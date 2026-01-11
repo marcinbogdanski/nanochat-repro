@@ -62,6 +62,16 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())/1e6
     print(f"Model size: {num_params:.2f}M parameters")
 
+    prompt = "Hello, I'm a language model, and"  # 8 tokens
+    tokens = tokenizer.encode_ordinary(prompt)
+
+    x = torch.tensor([tokens[:-1]], dtype=torch.long, device=device)  # B=1,T
+    y = torch.tensor([tokens[1:]], dtype=torch.long, device=device)   # B=1,T
+    with torch.no_grad():
+        logits, loss = model(x, y)  # B,T,C
+    print("Logits shape:", logits[0].shape)  # should be (1,8,vocab_size)
+    print("Loss:", loss.item())   # ~11.0 for random init
+
 
 if __name__ == "__main__":
     main()
