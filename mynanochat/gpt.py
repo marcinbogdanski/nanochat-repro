@@ -165,7 +165,12 @@ class GPTModel(nn.Module):
         for block in self.transformer.h:
             x = block(x, self.cos, self.sin)
         x = F.rms_norm(x, (x.size(-1),))
+
+        # Logits
+        softcap = 15
         logits = self.lm_head(x)   # B,T,V <- B,T,E
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
 
         if targets is None:
             return logits, None

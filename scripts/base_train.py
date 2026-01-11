@@ -78,9 +78,9 @@ def main():
 
     ################################ QUICK CHECK ###############################
     # Iterate model params and print first few for each
-    for i, p in enumerate(model.parameters()):
-        with torch.no_grad():
-            print(f"{i} {tuple(p.size())}, {p.dtype}, {p.device} {p.flatten()[:5].tolist()}")
+    # for i, p in enumerate(model.parameters()):
+    #     with torch.no_grad():
+    #         print(f"{i} {tuple(p.size())}, {p.dtype}, {p.device} {p.flatten()[:5].tolist()}")
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model size: {num_params} parameters")
@@ -94,6 +94,7 @@ def main():
         with autocast_ctx:
             logits, loss = model(x, y)  # B,T,C
     print("Logits shape:", logits[0].shape)  # should be (1,8,vocab_size)
+    print(f"{tuple(logits.size())}, {logits.dtype}, {logits.device} {logits.flatten()[:5].tolist()}")
     print("Loss:", loss.item())   # ~11.0 for random init
     ############################################################################
 
