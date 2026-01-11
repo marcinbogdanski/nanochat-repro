@@ -59,6 +59,10 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = self._apply_rope(q, cos, sin)
         k_rot = self._apply_rope(k, cos, sin)
 
+        # Normalize q,k
+        q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
+        k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
+
         q = q_rot.transpose(1, 2)  # B,nh,T,hs
         k = k_rot.transpose(1, 2)  # B,nh,T,hs
         v = v.transpose(1, 2)  # B,nh,T,hs
@@ -76,9 +80,9 @@ class MLP(nn.Module):
     """Linear transform and activation"""
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd, bias=False)
         self.act = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear(4*config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(4*config.n_embd, config.n_embd, bias=False)
         self.c_proj.NANOGPT_SCALE_INIT = 1  # flag to scale proj into residual
     
     def forward(self, x):
@@ -90,14 +94,15 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttentionRoPE(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
+    def _norm(self, x):
+        return F.rms_norm(x, (x.size(-1),))
+
     def forward(self, x, cos, sin):
-        x = x + self.attn(self.ln_1(x), cos, sin)        # B,T,E pre-norm
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.attn(self._norm(x), cos, sin)        # B,T,E pre-norm
+        x = x + self.mlp(self._norm(x))
         return x
 
 
@@ -109,7 +114,6 @@ class GPTModel(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
@@ -144,11 +148,12 @@ class GPTModel(nn.Module):
         
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
+        x = F.rms_norm(x, (x.size(-1),))
 
         # Transformer
         for block in self.transformer.h:
             x = block(x, self.cos, self.sin)
-        x = self.transformer.ln_f(x)
+        x = F.rms_norm(x, (x.size(-1),))
         logits = self.lm_head(x)   # B,T,V <- B,T,E
 
         if targets is None:
