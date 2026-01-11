@@ -83,14 +83,10 @@ class GPTModel(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-
-        # Weight Sharing
-        self.transformer.wte.weight = self.lm_head.weight
 
         # Init Params
         self.apply(self._init_weights)
@@ -116,10 +112,7 @@ class GPTModel(nn.Module):
         assert T <= self.config.block_size
         
         # Embeddings
-        pos = torch.arange(T, device=idx.device)  # T
-        pos_emb = self.transformer.wpe(pos)       #   T,E <- T
-        tok_emb = self.transformer.wte(idx)       # B,T,E <- B,T
-        x = tok_emb + pos_emb                     # B,T,E
+        x = self.transformer.wte(idx)             # B,T,E <- B,T
 
         # Transformer
         for block in self.transformer.h:
