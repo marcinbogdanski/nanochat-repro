@@ -82,7 +82,6 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd, bias=False)
         self.c_proj = nn.Linear(4*config.n_embd, config.n_embd, bias=False)
-        self.c_proj.NANOGPT_SCALE_INIT = 1  # flag to scale proj into residual
     
     def forward(self, x):
         x = self.c_fc(x)
@@ -122,24 +121,37 @@ class GPTModel(nn.Module):
         self.register_buffer("cos", cos, persistent=False)  # don't save to checkpoint
         self.register_buffer("sin", sin, persistent=False)
 
-        # Init Params
-        self.apply(self._init_weights)
+    def init_weights(self):
+        """Initialization following NanoChat
 
-    def _init_weights(self, module):
-        # note: wte/lm_head initialized twice, but that's ok
-        if isinstance(module, nn.Linear):
-            # 0.02 based on openai tensorflow source
-            # 1/sqrt(768) = 0.036, 0.02 is "roughly reasonable"
-            std = 0.02
-            if hasattr(module, "NANOGPT_SCALE_INIT"):
-                # each block project to residual 2x times: attention and MLP
-                num_layers = 2 * self.config.n_layer
-                std *= num_layers**-0.5
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        wte (embedding):     normal, std=1.0
+        lm_head:             normal, std=0.001
+        for each block:
+            attn.c_q:        uniform, std=1/sqrt(n_embd)
+            attn.c_k:        uniform, std=1/sqrt(n_embd)
+            attn.c_v:        uniform, std=1/sqrt(n_embd)
+            attn.c_proj:     zeros
+            mlp.c_fc:        uniform, std=1/sqrt(n_embd)
+            mlp.c_proj:      zeros
+        """
+        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+
+        # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
+        s = 3**0.5 * self.config.n_embd**-0.5
+        for block in self.transformer.h:
+            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
+            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
+            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+            torch.nn.init.zeros_(block.attn.c_proj.weight)
+            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
+            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+
+        # Cast to bfloat16 to align with NanoChat
+        if self.transformer.wte.weight.device.type == "cuda":
+            self.transformer.wte.to(dtype=torch.bfloat16)
+
+        
 
     def forward(self, idx, targets=None):
         B, T = idx.shape

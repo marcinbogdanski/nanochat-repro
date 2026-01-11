@@ -1,6 +1,7 @@
 import os
 import torch
 import pickle
+from contextlib import nullcontext
 from mynanochat.gpt import GPTConfig, GPTModel
 
 def main():
@@ -25,7 +26,7 @@ def main():
         device_type = device
     print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
 
-
+    autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
 
 
     # Tokenizer
@@ -48,6 +49,20 @@ def main():
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
 
+    # Reproducibility
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+    
+    ################################ EQUIVALENCE ###############################
+    # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    ############################################################################
+
+
     # Model
     model_config = GPTConfig(
         block_size=block_size,
@@ -58,9 +73,17 @@ def main():
     )
     model = GPTModel(model_config)
     model.to(device)
+    model.init_weights()
 
-    num_params = sum(p.numel() for p in model.parameters())/1e6
-    print(f"Model size: {num_params:.2f}M parameters")
+
+    ################################ QUICK CHECK ###############################
+    # Iterate model params and print first few for each
+    for i, p in enumerate(model.parameters()):
+        with torch.no_grad():
+            print(f"{i} {tuple(p.size())}, {p.dtype}, {p.device} {p.flatten()[:5].tolist()}")
+
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Model size: {num_params} parameters")
 
     prompt = "Hello, I'm a language model, and"  # 8 tokens
     tokens = tokenizer.encode_ordinary(prompt)
@@ -68,9 +91,11 @@ def main():
     x = torch.tensor([tokens[:-1]], dtype=torch.long, device=device)  # B=1,T
     y = torch.tensor([tokens[1:]], dtype=torch.long, device=device)   # B=1,T
     with torch.no_grad():
-        logits, loss = model(x, y)  # B,T,C
+        with autocast_ctx:
+            logits, loss = model(x, y)  # B,T,C
     print("Logits shape:", logits[0].shape)  # should be (1,8,vocab_size)
     print("Loss:", loss.item())   # ~11.0 for random init
+    ############################################################################
 
 
 if __name__ == "__main__":
