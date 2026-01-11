@@ -11,33 +11,58 @@ class GPTConfig:
         self.n_embd = n_embd
 
 
-class CausalSelfAttentionMarcin(nn.Module):
+class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.n_head = config.n_head
 
-        self.c_attn = nn.Linear(config.n_embd, 3*config.n_embd)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-        self.c_proj.NANOGPT_SCALE_INIT = 1  # flag to scale proj into residual
-        # self.register_buffer('bias', torch.tril(torch.ones((1, 1, config.block_size, config.block_size))))
+        self.c_q = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.c_k = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.c_v = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
-    def forward(self, x):
+    def _apply_rope(self, q, cos, sin):
+        B, T, nh, hs = q.size()
+        # Trim sin, cos to T and add batch dim
+        sin = sin[:T, :].view(1, T, 1, hs//2)     # 1,T,1,hs/2
+        cos = cos[:T, :].view(1, T, 1, hs//2)
+        # Split x/y
+        q_x, q_y = q[..., :hs//2], q[..., hs//2:]  # B,T,nh,hs/2
+        # Apply rotation
+        q_x_rot = cos * q_x - sin * q_y
+        q_y_rot = sin * q_x + cos * q_y
+        # Combine back
+        q_rot = torch.cat([q_x_rot, q_y_rot], dim=-1)        # B,T,nh,hs
+        return q_rot
+    
+    @classmethod
+    def precalculate_cos_sin(cls, seq_len, head_size, base=10_000):
+        # Compute exponent for the RoPE frequencies
+        theta = torch.arange(0, head_size, step=2)
+        theta = base**-(theta/head_size)     # head_size//2
+        pos = torch.arange(0, seq_len)       # seq_len
+        tmp = torch.outer(pos, theta)        # seq_len, head_size//2
+        sin, cos = torch.sin(tmp), torch.cos(tmp)
+        return cos, sin
+
+    def forward(self, x, cos, sin):
         B, T, C = x.size()
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(C, dim=2)  # B, T, nh*hs
+        q = self.c_q(x)    # B, T, nh*hs
+        k = self.c_k(x)    # B, T, nh*hs
+        v = self.c_v(x)    # B, T, nh*hs
         q = q.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
         k = k.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
         v = v.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
-        q = q.transpose(1, 2)  # B,nh,T,hs
-        k = k.transpose(1, 2)  # B,nh,T,hs
+
+        q_rot = self._apply_rope(q, cos, sin)
+        k_rot = self._apply_rope(k, cos, sin)
+
+        q = q_rot.transpose(1, 2)  # B,nh,T,hs
+        k = k_rot.transpose(1, 2)  # B,nh,T,hs
         v = v.transpose(1, 2)  # B,nh,T,hs
 
-        # W_affin = q @ k.mT / k.shape[-1]**0.5  # B,nh,T,hs @ B,nh,hs,T -> B,nh,T,T
-        # W_affin = W_affin.masked_fill(self.bias[:,:,:T,:T]==0, float('-inf'))
-        # W_affin = torch.softmax(W_affin, dim=-1)  # B,nh,T,T
-        # y = W_affin @ v    # B,nh,T,T @ B,nh,T,hs -> B,nh,T,hs
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
         y = y.transpose(1, 2)  # B,T,nh,hs
@@ -66,12 +91,12 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttentionMarcin(config)
+        self.attn = CausalSelfAttentionRoPE(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))        # B,T,E pre-norm
+    def forward(self, x, cos, sin):
+        x = x + self.attn(self.ln_1(x), cos, sin)        # B,T,E pre-norm
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -87,6 +112,12 @@ class GPTModel(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
+            config.block_size, config.n_embd // config.n_head
+        )
+        self.register_buffer("cos", cos, persistent=False)  # don't save to checkpoint
+        self.register_buffer("sin", sin, persistent=False)
 
         # Init Params
         self.apply(self._init_weights)
@@ -116,7 +147,7 @@ class GPTModel(nn.Module):
 
         # Transformer
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, self.cos, self.sin)
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)   # B,T,V <- B,T,E
 
