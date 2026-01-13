@@ -56,6 +56,10 @@ def main():
         torch.cuda.manual_seed(42)
         torch.cuda.manual_seed_all(42)
     
+    # Precision
+    if device_type == "cuda":
+        torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
+
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
     torch.backends.cudnn.deterministic = True
@@ -91,7 +95,7 @@ def main():
     )
 
 
-    max_steps = 5
+    max_steps = 2
     for step in range(max_steps):
 
 
@@ -102,8 +106,8 @@ def main():
             'y': [],
         }
         save_dict['weights_before'] = []
-        for i, p in enumerate(model.parameters()):
-            save_dict['weights_before'].append(p.detach().clone().cpu())
+        for name, p in model.named_parameters():
+            save_dict['weights_before'].append((name, p.detach().clone().cpu()))
         ### ^ SAVE ^ ###
 
         model.train()
@@ -120,11 +124,11 @@ def main():
             loss_accum += loss.detach()
 
             ## v SAVE v ###
+            save_dict['x'].append(x.detach().clone().cpu())
+            save_dict['y'].append(y.detach().clone().cpu())
             if 'loss_div_accum' not in save_dict:
                 save_dict['loss_div_accum'] = []
             save_dict['loss_div_accum'].append(loss.detach().clone().cpu())
-            save_dict['x'].append(x.detach().clone().cpu())
-            save_dict['y'].append(y.detach().clone().cpu())
             ### ^ SAVE ^ ###
 
             # TODO: Sync only if DDP and last backward in grad_accum
@@ -154,8 +158,8 @@ def main():
         ### v SAVE v ###
         save_dict['optimizer_states'] = [opt.state_dict() for opt in optimizers]
         save_dict['weights_after'] = []
-        for _, p in enumerate(model.parameters()):
-            save_dict['weights_after'].append(p.detach().clone().cpu())
+        for name, p in model.named_parameters():
+            save_dict['weights_after'].append((name, p.detach().clone().cpu()))
 
         # save the save_dict for this step (for debugging)
         filename = os.path.join(f"dump_step_{step:05d}_rank_{ddp_rank}.pt")

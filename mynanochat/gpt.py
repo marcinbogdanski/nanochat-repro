@@ -31,8 +31,8 @@ class CausalSelfAttentionRoPE(nn.Module):
         # Split x/y
         q_x, q_y = q[..., :hs//2], q[..., hs//2:]  # B,T,nh,hs/2
         # Apply rotation
-        q_x_rot = cos * q_x - sin * q_y
-        q_y_rot = sin * q_x + cos * q_y
+        q_x_rot = cos * q_x + sin * q_y
+        q_y_rot = -sin * q_x + cos * q_y
         # Combine back
         q_rot = torch.cat([q_x_rot, q_y_rot], dim=-1)        # B,T,nh,hs
         return q_rot
@@ -45,6 +45,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         pos = torch.arange(0, seq_len)       # seq_len
         tmp = torch.outer(pos, theta)        # seq_len, head_size//2
         sin, cos = torch.sin(tmp), torch.cos(tmp)
+        cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 
     def forward(self, x, cos, sin):
