@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import pickle
 from contextlib import nullcontext
@@ -65,6 +66,10 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
+
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
 
 
@@ -104,12 +109,19 @@ def main():
             'step': step,
             'x': [],
             'y': [],
+            'logits': [],
+            'loss_div_accum': [],
         }
         save_dict['weights_before'] = []
         for name, p in model.named_parameters():
             save_dict['weights_before'].append((name, p.detach().clone().cpu()))
+        save_dict['buffs_before'] = {}
+        for n, p in model.named_buffers():
+            save_dict['buffs_before'][n] = p.detach().clone().cpu()
         ### ^ SAVE ^ ###
 
+        # Training
+        ts = time.time()
         model.train()
         loss_accum = 0.0
         for opt in optimizers:
@@ -126,8 +138,7 @@ def main():
             ## v SAVE v ###
             save_dict['x'].append(x.detach().clone().cpu())
             save_dict['y'].append(y.detach().clone().cpu())
-            if 'loss_div_accum' not in save_dict:
-                save_dict['loss_div_accum'] = []
+            save_dict['logits'].append(logits.detach()[:,::4,::64].clone().cpu())
             save_dict['loss_div_accum'].append(loss.detach().clone().cpu())
             ### ^ SAVE ^ ###
 
@@ -145,8 +156,9 @@ def main():
 
 
         ### v SAVE v ###
-        save_dict['lrm'] = 0.0
-        save_dict['muon_momentum'] = 0.0
+        save_dict['lrm'] = lrm
+        save_dict['muon_momentum'] = muon_momentum
+        save_dict['optimizer_states_before'] = [opt.state_dict() for opt in optimizers]
         ### ^ SAVE ^ ###
 
 
@@ -156,7 +168,7 @@ def main():
 
 
         ### v SAVE v ###
-        save_dict['optimizer_states'] = [opt.state_dict() for opt in optimizers]
+        save_dict['optimizer_states_after'] = [opt.state_dict() for opt in optimizers]
         save_dict['weights_after'] = []
         for name, p in model.named_parameters():
             save_dict['weights_after'].append((name, p.detach().clone().cpu()))
@@ -169,7 +181,8 @@ def main():
 
 
         # Logs
-        print(f"Step {step+1}/{max_steps}, loss: {loss_accum.item():.4f}")
+        dt = (time.time() - ts)
+        print(f"Step {step+1}/{max_steps}, loss: {loss_accum.item():.4f}, dt={dt*1e3:.2f}ms")
                 
 
     return
