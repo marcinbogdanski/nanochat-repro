@@ -86,8 +86,59 @@ def main():
     model.init_weights()
 
     # Optimizers
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    optimizers = [optimizer]
+    params_matrix = list(model.transformer.h.parameters())
+    params_embedding = list(model.transformer.wte.parameters())
+    params_lm_head = list(model.lm_head.parameters())
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head)
+
+    # Magic numbers from NanoChat
+    reference_batch_size = 2**19
+    batch_ratio = total_batch_size / reference_batch_size
+    batch_lr = batch_ratio ** 0.5
+    unembedding_lr = 0.004 * batch_lr
+    embedding_lr = 0.3 * batch_lr
+    matrix_lr = 0.02 * batch_lr
+    adam_betas = (0.8, 0.95)
+
+    # Magic scaling from NanoChat
+    model_dim = model.config.n_embd
+    dmodel_lr_scale = (model_dim / 768) ** -0.5
+
+    # Actual Optimizers
+    adam_groups = [
+        {
+            'params': params_lm_head,
+            'lr': unembedding_lr * dmodel_lr_scale,
+        },
+        {
+            'params': params_embedding,
+            'lr': embedding_lr * dmodel_lr_scale,
+        }
+    ]
+    adamw_optimizer = torch.optim.AdamW(
+        adam_groups,
+        betas=adam_betas,
+        eps=1e-10,
+        weight_decay=0.0,
+        fused=True,
+    )
+    muon_groups = []
+    for size in {p.numel() for p in params_matrix}:
+        group_params = [p for p in params_matrix if p.numel() == size]
+        muon_groups.append({'params': group_params})
+    muon_optimizer = torch.optim.Muon(
+        muon_groups,
+        lr=matrix_lr,
+        momentum=0.95,
+        nesterov=True,
+        ns_steps=5,
+        weight_decay=0.0,
+        adjust_lr_fn='original',
+    )
+    optimizers = [adamw_optimizer, muon_optimizer]
+    for opt in optimizers:
+            for group in opt.param_groups:
+                group["initial_lr"] = group["lr"]
 
 
     train_loader = DataLoader(
@@ -155,6 +206,16 @@ def main():
         ### ^ SAVE ^ ###
 
 
+        # LR Scheduler
+        lrm = 1.0
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group['lr'] = group['initial_lr'] * lrm
+        muon_frac = min(step / 300, 1.0)
+        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
+        for group in muon_optimizer.param_groups:
+            group['momentum'] = muon_momentum
+        
         ### v SAVE v ###
         save_dict['lrm'] = lrm
         save_dict['muon_momentum'] = muon_momentum
