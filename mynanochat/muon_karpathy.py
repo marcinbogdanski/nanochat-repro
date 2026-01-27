@@ -32,7 +32,12 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
         X = X.mT
 
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    ### vv MARCIN vv slightly different formulation for testing equivalence ###
+    # X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    ### -- MARCIN -- ###
+    X = X / X.norm(dim=(-2, -1), keepdim=True).clamp(min=1e-7)
+    ### ^^ MARCIN ^^ ###
+
     # Perform the NS iterations
     ### vv MARCIN vv slightly different formulation for testing equivalence ###
     # for _ in range(steps):
