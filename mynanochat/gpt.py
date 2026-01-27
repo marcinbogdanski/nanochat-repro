@@ -26,8 +26,10 @@ class CausalSelfAttentionRoPE(nn.Module):
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
         # Trim sin, cos to T and add batch dim
-        sin = sin[:T, :].view(1, T, 1, hs//2)     # 1,T,1,hs/2
-        cos = cos[:T, :].view(1, T, 1, hs//2)
+        #sin = sin[:T, :].view(1, T, 1, hs//2)     # 1,T,1,hs/2       ### MARCIN - my version
+        #cos = cos[:T, :].view(1, T, 1, hs//2)                        ### MARCIN - my version
+        sin = sin[:, :T, :, :]     # 1,T,1,hs/2                       ### MARCIN - nanochat version
+        cos = cos[:, :T, :, :]     # 1,T,1,hs/2                       ### MARCIN - nanochat version
         # Split x/y
         q_x, q_y = q[..., :hs//2], q[..., hs//2:]  # B,T,nh,hs/2
         # Apply rotation
@@ -38,14 +40,16 @@ class CausalSelfAttentionRoPE(nn.Module):
         return q_rot
     
     @classmethod
-    def precalculate_cos_sin(cls, seq_len, head_size, base=10_000):
+    def precalculate_cos_sin(cls, seq_len, head_size, base=10_000, device=None):             ### MARCIN added device=
         # Compute exponent for the RoPE frequencies
-        theta = torch.arange(0, head_size, step=2)
-        theta = base**-(theta/head_size)     # head_size//2
-        pos = torch.arange(0, seq_len)       # seq_len
+        theta = torch.arange(0, head_size, step=2, dtype=torch.float32, device=device)       ### MARCIN added dtype= device=
+        # theta = base**-(theta/head_size)       # head_size//2                              ### MARCIN my version
+        theta = 1.0 / (base**(theta/head_size))  # head_size//2                              ### MARCIN nanochat version
+        pos = torch.arange(0, seq_len, dtype=torch.float32, device=device)       # seq_len   ### MARCIN added dtype= device=
         tmp = torch.outer(pos, theta)        # seq_len, head_size//2
         sin, cos = torch.sin(tmp), torch.cos(tmp)
-        cos, sin = cos.bfloat16(), sin.bfloat16()
+        sin, cos = sin[None, :, None, :], cos[None, :, None, :]  # 1,seq_len,1,head_size//2  ### MARCIN different sclicing
+        # cos, sin = cos.bfloat16(), sin.bfloat16()                                          ### MARCIN cast to bfloat16 removed
         return cos, sin
 
     def forward(self, x, cos, sin):
@@ -148,9 +152,14 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
-        # Cast to bfloat16 to align with NanoChat
-        if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
+        self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(          ### MARCIN - init here as well as in constructor (remove?)
+            self.config.block_size * 10, self.config.n_embd // self.config.n_head,
+            device=self.transformer.wte.weight.device
+        )
+
+        # Cast to bfloat16 to align with NanoChat                               ### MARCIN - removed bfloat16 casting
+        # if self.transformer.wte.weight.device.type == "cuda":
+        #     self.transformer.wte.to(dtype=torch.bfloat16)
 
         
 

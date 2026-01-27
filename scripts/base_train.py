@@ -29,7 +29,7 @@ def main():
     print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
 
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
-
+    autocast_ctx = nullcontext()  # MARCIN - disable autocast for debugging
 
     # Tokenizer
     tokenizer_path = os.path.dirname(__file__)+"/../data/tokenizer.pkl"
@@ -45,8 +45,8 @@ def main():
     num_heads = num_embed // head_size
     
     # Training Hyperparameters
-    total_batch_size = 524288    # 2**19, ~0.5M
-    micro_batch = 2              # what fits in GPU
+    total_batch_size = 524288 // 32   # 2**19, ~0.5M    ### MARCIN - smaller batch for debugging
+    micro_batch = 1              # what fits in GPU     ### MARCIN - smaller micro batch for debugging
     block_size = 2048
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
@@ -57,9 +57,9 @@ def main():
         torch.cuda.manual_seed(42)
         torch.cuda.manual_seed_all(42)
     
-    # Precision
-    if device_type == "cuda":
-        torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
+    # Precision                                 ### MARCIN - disable tf32 for debugging
+    # if device_type == "cuda":
+    #     torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
 
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
