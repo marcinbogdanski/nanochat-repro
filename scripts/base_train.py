@@ -5,6 +5,8 @@ import pickle
 from contextlib import nullcontext
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
+# from mynanochat.muon_karpathy import MuonK
+# from mynanochat.muon_torch import MuonT
 
 def main():
     # DDP Init
@@ -91,7 +93,6 @@ def main():
     params_lm_head = list(model.lm_head.parameters())
     assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head)
 
-    # Magic numbers from NanoChat
     reference_batch_size = 2**19
     batch_ratio = total_batch_size / reference_batch_size
     batch_lr = batch_ratio ** 0.5
@@ -100,11 +101,9 @@ def main():
     matrix_lr = 0.02 * batch_lr
     adam_betas = (0.8, 0.95)
 
-    # Magic scaling from NanoChat
     model_dim = model.config.n_embd
     dmodel_lr_scale = (model_dim / 768) ** -0.5
 
-    # Actual Optimizers
     adam_groups = [
         {
             'params': params_lm_head,
@@ -140,7 +139,6 @@ def main():
             for group in opt.param_groups:
                 group["initial_lr"] = group["lr"]
 
-
     train_loader = DataLoader(
         batch_size=micro_batch,
         block_size=block_size,
@@ -150,10 +148,8 @@ def main():
         tokenizer=tokenizer,
     )
 
-
     max_steps = 2
     for step in range(max_steps):
-
 
         ### v SAVE v ###
         save_dict = {
@@ -205,7 +201,6 @@ def main():
                 save_dict['gradients'].append(None)
         ### ^ SAVE ^ ###
 
-
         # LR Scheduler
         lrm = 1.0
         for opt in optimizers:
@@ -222,11 +217,9 @@ def main():
         save_dict['optimizer_states_before'] = [opt.state_dict() for opt in optimizers]
         ### ^ SAVE ^ ###
 
-
         # Optimizer step
         for opt in optimizers:
             opt.step()
-
 
         ### v SAVE v ###
         save_dict['optimizer_states_after'] = [opt.state_dict() for opt in optimizers]
@@ -239,60 +232,11 @@ def main():
         torch.save(save_dict, filename)
         ### ^ SAVE ^ ###
 
-
-
         # Logs
         dt = (time.time() - ts)
         print(f"Step {step+1}/{max_steps}, loss: {loss_accum.item():.4f}, dt={dt*1e3:.2f}ms")
-                
 
     return
-
-    ################################ QUICK CHECK ###############################
-    # Iterate model params and print first few for each
-    print('-'*40, "Model init parameters", '-'*40)
-    for i, p in enumerate(model.parameters()):
-        with torch.no_grad():
-            print(f"{i} {tuple(p.size())}, {p.dtype}, {p.device} {p.flatten()[:5].tolist()}")
-    print('-'*100)
-
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model size: {num_params} parameters")
-
-    prompt = "Hello, I'm a language model, and"  # 8 tokens
-    tokens = tokenizer.encode_ordinary(prompt)
-
-    x = torch.tensor([tokens[:-1]], dtype=torch.long, device=device)  # B=1,T
-    y = torch.tensor([tokens[1:]], dtype=torch.long, device=device)   # B=1,T
-    with autocast_ctx:
-        logits, loss = model(x, y)  # B,T,C
-    print("Logits shape:", logits[0].shape)
-    print(f"{tuple(logits.size())}, {logits.dtype}, {logits.device} {logits.flatten()[:5].tolist()}")
-    print("Loss:", loss.item())   # ~11.0 for random init
-
-    # setup basic optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    optimizers = [optimizer]
-
-    loss.backward()
-    print('-'*40, "Model gradients", '-'*40)
-    for i, p in enumerate(model.parameters()):
-        if p.grad is not None:
-            print(f"Param {i} grad {p.grad.flatten()[:5].tolist()}")
-        else:
-            print(f"Param {i} grad is None")
-    print('-'*100)
-
-    for opt in optimizers:
-        opt.step()
-
-    print('-'*40, "Model after update", '-'*40)
-    for i, p in enumerate(model.parameters()):
-        with torch.no_grad():
-            print(f"{i} {tuple(p.size())}, {p.dtype}, {p.device} {p.flatten()[:5].tolist()}")
-    print('-'*100)
-
-    ############################################################################
 
 
 if __name__ == "__main__":
