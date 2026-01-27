@@ -117,7 +117,7 @@ class GPTModel(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            config.block_size, config.n_embd // config.n_head
+            config.block_size * 10, config.n_embd // config.n_head
         )
         self.register_buffer("cos", cos, persistent=False)  # don't save to checkpoint
         self.register_buffer("sin", sin, persistent=False)
