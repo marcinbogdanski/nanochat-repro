@@ -40,16 +40,16 @@ def main():
 
     # Model Hyperparameters
     vocab_size = tokenizer.n_vocab
-    num_layers = 20
-    num_embed = 1280
+    num_layers = 10  # 20                        ### MARCIN - smaller model
+    num_embed = 640  # 1280                      ### MARCIN - smaller model
     head_size = 128
     assert num_embed % head_size == 0
     num_heads = num_embed // head_size
     
     # Training Hyperparameters
-    total_batch_size = 524288 // 32   # 2**19, ~0.5M    ### MARCIN - smaller batch for debugging
+    total_batch_size = 524288 // 128   # 2**19, ~0.5M   ### MARCIN - smaller batch for debugging
     micro_batch = 1              # what fits in GPU     ### MARCIN - smaller micro batch for debugging
-    block_size = 2048
+    block_size = 1024  # 2048                           ### MARCIN - smaller model
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
 
@@ -100,6 +100,30 @@ def main():
     embedding_lr = 0.3 * batch_lr
     matrix_lr = 0.02 * batch_lr
     adam_betas = (0.8, 0.95)
+
+    # LR Scheduler params
+    max_steps = 10                    ### MARCIN - fewer steps for debugging
+    lr_warmup_ratio = 0.4     # 0.0   ### MARCIN - warmup testing
+    lr_warmdown_ratio = 0.4
+    lr_final_frac = 0.1       # 0.0   ### MARCIN - warmdown testing
+    muon_momentum_warup_steps = 5  # 300  ### MARCIN - faster momentum warmup for debugging
+
+    # LR / Muon Scheduler functions
+    def get_lr(step: int):
+        warmup_steps = round(lr_warmup_ratio * max_steps)
+        warmdown_steps = round(lr_warmdown_ratio * max_steps)
+        if step < warmup_steps:
+            return (step+1) / warmup_steps
+        if step <= max_steps - warmdown_steps:
+            return 1.0
+        else:
+            progress = (max_steps - step) / warmdown_steps
+            return (progress * 1.0) + (1.0 - progress) * lr_final_frac
+
+    def get_muon_momentum(step: int):
+        muon_frac = min(step / muon_momentum_warup_steps, 1.0)
+        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
+        return muon_momentum
 
     model_dim = model.config.n_embd
     dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -175,7 +199,6 @@ def main():
         tokenizer=tokenizer,
     )
 
-    max_steps = 2
     for step in range(max_steps):
 
         ### v SAVE v ###
@@ -229,12 +252,11 @@ def main():
         ### ^ SAVE ^ ###
 
         # LR Scheduler
-        lrm = 1.0
+        lrm = get_lr(step)
         for opt in optimizers:
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
-        muon_frac = min(step / 300, 1.0)
-        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
+        muon_momentum = get_muon_momentum(step)
         for group in muon_optimizer.param_groups:
             group['momentum'] = muon_momentum
         
