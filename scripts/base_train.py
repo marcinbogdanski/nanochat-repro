@@ -5,9 +5,6 @@ import pickle
 from contextlib import nullcontext
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
-from mynanochat.muon_karpathy import MuonK
-from mynanochat.muon_torch import MuonT
-from mynanochat.adamw import AdamW
 from mynanochat.muon import Muon
 
 def main():

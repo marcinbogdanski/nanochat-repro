@@ -1,5 +1,6 @@
 import torch
 
+@torch.compile
 def zeropower_via_newtonschulz(grad, steps=5):
     """Newton-schulz orthogonalization
     
@@ -15,12 +16,15 @@ def zeropower_via_newtonschulz(grad, steps=5):
     X = grad.bfloat16()
     if grad.size(0) > grad.size(1):
         X = X.T
+
     # Scale down to norm at most 1
-    X.div_(X.norm().clamp(min=eps))
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+
     for _ in range(steps):
-        A = X @ X.T
-        B = torch.addmm(A, A, A, beta=b, alpha=c)
-        X = torch.addmm(X, B, X, beta=a)
+        A = X @ X.mT
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+
     if grad.size(0) > grad.size(1):
         X = X.T
     return X
