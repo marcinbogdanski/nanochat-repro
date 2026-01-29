@@ -7,6 +7,8 @@ from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
 from mynanochat.muon_karpathy import MuonK
 from mynanochat.muon_torch import MuonT
+from mynanochat.adamw import AdamW
+from mynanochat.muon import Muon
 
 def main():
     # DDP Init
@@ -145,45 +147,18 @@ def main():
         weight_decay=0.0,
         fused=True,
     )
-    ### vv MARCIN vv - PyTorch original optimizer
     muon_groups = []
     for size in {p.numel() for p in params_matrix}:
         group_params = [p for p in params_matrix if p.numel() == size]
         muon_groups.append({'params': group_params})
-    muon_optimizer = torch.optim.Muon(
+    muon_optimizer = Muon(
         muon_groups,
         lr=matrix_lr,
         momentum=0.95,
         nesterov=True,
         ns_steps=5,
         weight_decay=0.0,
-        adjust_lr_fn='original',
     )
-    ### -- MARCIN -- PyTorch copied optimizer ###
-    # muon_groups = []
-    # for size in {p.numel() for p in params_matrix}:
-    #     group_params = [p for p in params_matrix if p.numel() == size]
-    #     muon_groups.append({'params': group_params})
-    # muon_optimizer = MuonT(
-    #     muon_groups,
-    #     lr=matrix_lr,
-    #     momentum=0.95,
-    #     nesterov=True,
-    #     ns_steps=5,
-    #     weight_decay=0.0,
-    #     adjust_lr_fn='original',
-    # )
-    ### -- MARCIN -- - Karpathy optimizer ###
-    # muon_optimizer = MuonK(
-    #     params_matrix,
-    #     lr=matrix_lr,
-    #     momentum=0.95,
-    #     nesterov=True,
-    #     ns_steps=5,
-    # )
-    ### ^^ MARCIN ^^
-
-
 
     optimizers = [adamw_optimizer, muon_optimizer]
     for opt in optimizers:
