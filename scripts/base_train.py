@@ -5,7 +5,8 @@ import pickle
 from contextlib import nullcontext
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
-from mynanochat.muon import Muon
+from mynanochat.adamw import DistAdamW
+from mynanochat.muon import Muon, DistMuon
 
 def main():
     # DDP Init
@@ -137,7 +138,8 @@ def main():
             'lr': embedding_lr * dmodel_lr_scale,
         }
     ]
-    adamw_optimizer = torch.optim.AdamW(
+    adamw_factory = DistAdamW if ddp else torch.optim.AdamW
+    adamw_optimizer = adamw_factory(
         adam_groups,
         betas=adam_betas,
         eps=1e-10,
@@ -145,10 +147,12 @@ def main():
         fused=True,
     )
     muon_groups = []
-    for size in {p.numel() for p in params_matrix}:
-        group_params = [p for p in params_matrix if p.numel() == size]
+    for shape in sorted({p.shape for p in params_matrix}):
+        group_params = [p for p in params_matrix if p.shape == shape]
+        print(f"Muon group: shape={shape}, num_params={len(group_params)}")
         muon_groups.append({'params': group_params})
-    muon_optimizer = Muon(
+    muon_factory = DistMuon if ddp else Muon
+    muon_optimizer = muon_factory(
         muon_groups,
         lr=matrix_lr,
         momentum=0.95,
@@ -156,7 +160,7 @@ def main():
         ns_steps=5,
         weight_decay=0.0,
     )
-
+    
     optimizers = [adamw_optimizer, muon_optimizer]
     for opt in optimizers:
             for group in opt.param_groups:
@@ -169,6 +173,9 @@ def main():
         hf_name="sample-100BT",
         hf_split="train",
         tokenizer=tokenizer,
+        group_size=1024,   # same as nanochat row_group_size
+        rank=ddp_rank,
+        world_size=ddp_world_size,
     )
 
     for step in range(max_steps):
@@ -257,7 +264,8 @@ def main():
         dt = (time.time() - ts)
         print(f"Step {step+1}/{max_steps}, loss: {loss_accum.item():.4f}, dt={dt*1e3:.2f}ms")
 
-    return
+    if ddp:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
