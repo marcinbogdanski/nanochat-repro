@@ -46,8 +46,7 @@ ns_steps = 5
 
 # Optimizers
 opt_ref = Muon([W1, W2], lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=0.0)
-opt_dist = DistMuon([W3, W4], lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=0.0,
-                    rank=ddp_local_rank, world_size=ddp_world_size)
+opt_dist = DistMuon([W3, W4], lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=0.0)
 
 for i in range(20):
     if ddp_master:
@@ -75,6 +74,7 @@ for i in range(20):
         weight_max_diff = (W1 - W3).abs().max().item()
         weight_max_diff += (W2 - W4).abs().max().item()
         
+        # Final diff 0.00451226532459259 - NanoChat has exact same value
         print(f"Diff {weight_max_diff}    {W1.sum().item()}    {W2.sum().item()}   {W3.sum().item()}   {W4.sum().item()}")
 
 if ddp_master and weight_max_diff == 0.0:

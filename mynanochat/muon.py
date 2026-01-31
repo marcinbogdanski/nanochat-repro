@@ -12,7 +12,6 @@ def zeropower_via_newtonschulz(grad, steps=5):
     """
     assert grad.ndim == 2
     a, b, c = 3.4445, -4.7750, 2.0315
-    eps=1e-7
     X = grad.bfloat16()
     if grad.size(0) > grad.size(1):
         X = X.T
@@ -79,14 +78,14 @@ class Muon(torch.optim.Optimizer):
 
 class DistMuon(torch.optim.Optimizer):
     """ZeRO-2 version of Muon optimizer"""
-    def __init__(self, params, lr=0.01, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.1, rank=0, world_size=1):
+    def __init__(self, params, lr=0.01, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.1):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay)
-        self.rank = rank
-        self.world_size = world_size
         super().__init__(params, defaults)
     
     @torch.no_grad()
     def step(self):
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
 
         # Assert all grads exist
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
@@ -94,13 +93,13 @@ class DistMuon(torch.optim.Optimizer):
         # Sync point 1
         # This will reduce scatter grads, such that each rank gets full averated grad for owned param
         for group in self.param_groups:
-            if len(group['params']) % self.world_size != 0:
+            if len(group['params']) % world_size != 0:
                 group['zero_buffer'] = torch.zeros_like(group['params'][0].grad)
-            for i in range(0, len(group['params']), self.world_size):
-                input_grads = [p.grad for p in group['params'][i:i+self.world_size]]
-                if len(input_grads) < self.world_size:
-                    input_grads.extend([group['zero_buffer']] * (self.world_size - len(input_grads)))
-                out_tensor = group['params'][i+self.rank].grad if i+self.rank < len(group['params']) else torch.zeros_like(group['zero_buffer'])
+            for i in range(0, len(group['params']), world_size):
+                input_grads = [p.grad for p in group['params'][i:i+world_size]]
+                if len(input_grads) < world_size:
+                    input_grads.extend([group['zero_buffer']] * (world_size - len(input_grads)))
+                out_tensor = group['params'][i+rank].grad if i+rank < len(group['params']) else torch.zeros_like(group['zero_buffer'])
                 torch.distributed.reduce_scatter(
                     out_tensor,
                     input_grads,
@@ -108,10 +107,10 @@ class DistMuon(torch.optim.Optimizer):
                 )
             
         for group in self.param_groups:
-            for i in range(0, len(group['params']), self.world_size):
-                if i+self.rank < len(group['params']):
+            for i in range(0, len(group['params']), world_size):
+                if i+rank < len(group['params']):
                 
-                    p = group['params'][i+self.rank]
+                    p = group['params'][i+rank]
 
                     # Lazy Init
                     if p not in self.state:
@@ -141,9 +140,9 @@ class DistMuon(torch.optim.Optimizer):
                     input_tensor = torch.zeros_like(group['zero_buffer'])
 
                 # Sync point 2
-                output_params = [p for p in group['params'][i:i+self.world_size]]
-                if len(output_params) < self.world_size:
-                    output_params.extend(torch.zeros_like(group['zero_buffer']) for _ in range(self.world_size - len(output_params)))
+                output_params = [p for p in group['params'][i:i+world_size]]
+                if len(output_params) < world_size:
+                    output_params.extend(torch.zeros_like(group['zero_buffer']) for _ in range(world_size - len(output_params)))
                 torch.distributed.all_gather(output_params, input_tensor)
 
 

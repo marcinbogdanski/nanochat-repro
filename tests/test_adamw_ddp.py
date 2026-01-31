@@ -44,8 +44,7 @@ lr = 0.02
 
 # Optimizers
 opt_ref = AdamW([W2], lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
-opt_dist = DistAdamW([W1], lr=lr, betas=(0.9, 0.999), weight_decay=0.01,
-                      rank=ddp_rank, world_size=ddp_world_size)
+opt_dist = DistAdamW([W1], lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
 
 for i in range(20):
     opt_dist.zero_grad()

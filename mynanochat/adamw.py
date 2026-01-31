@@ -66,21 +66,22 @@ class AdamW(torch.optim.Optimizer):
 
 class DistAdamW(torch.optim.Optimizer):
     """ZeRO-2 version of AdamW optimizer"""
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, rank=0, world_size=1):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
-        self.rank = rank
-        self.world_size = world_size
         super().__init__(params, defaults)
     
     @torch.no_grad()
     def step(self):
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+
         for group in self.param_groups:
             for p in group['params']:
                 if p.grad is None:
                     continue
                 # Lazy Init
-                slice_width = p.size(0) // self.world_size
-                slice_start = self.rank * slice_width
+                slice_width = p.size(0) // world_size
+                slice_start = rank * slice_width
                 slice_end = slice_start + slice_width
 
                 if p not in self.state:
