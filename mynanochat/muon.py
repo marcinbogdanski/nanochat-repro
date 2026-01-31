@@ -94,45 +94,56 @@ class DistMuon(torch.optim.Optimizer):
         # Sync point 1
         # This will reduce scatter grads, such that each rank gets full averated grad for owned param
         for group in self.param_groups:
-            assert len(group['params']) % self.world_size == 0
+            if len(group['params']) % self.world_size != 0:
+                group['zero_buffer'] = torch.zeros_like(group['params'][0].grad)
             for i in range(0, len(group['params']), self.world_size):
                 input_grads = [p.grad for p in group['params'][i:i+self.world_size]]
+                if len(input_grads) < self.world_size:
+                    input_grads.extend([group['zero_buffer']] * (self.world_size - len(input_grads)))
+                out_tensor = group['params'][i+self.rank].grad if i+self.rank < len(group['params']) else torch.zeros_like(group['zero_buffer'])
                 torch.distributed.reduce_scatter(
-                    group['params'][i+self.rank].grad,
+                    out_tensor,
                     input_grads,
                     op=torch.distributed.ReduceOp.AVG
                 )
             
         for group in self.param_groups:
             for i in range(0, len(group['params']), self.world_size):
-                p = group['params'][i+self.rank]
+                if i+self.rank < len(group['params']):
+                
+                    p = group['params'][i+self.rank]
 
-                # Lazy Init
-                if p not in self.state:
-                    self.state[p] = {
-                        'momentum_buffer': torch.zeros_like(p),
-                    }
+                    # Lazy Init
+                    if p not in self.state:
+                        self.state[p] = {
+                            'momentum_buffer': torch.zeros_like(p),
+                        }
 
-                # Decoupled Weight Decay
-                if group['weight_decay'] != 0:
-                    p.mul_(1 - group['lr'] * group['weight_decay'])
+                    # Decoupled Weight Decay
+                    if group['weight_decay'] != 0:
+                        p.mul_(1 - group['lr'] * group['weight_decay'])
 
-                # Update v
-                # v = B1 * v + (1-B) * g
-                v = self.state[p]['momentum_buffer']
-                v.lerp_(p.grad, 1 - group['momentum'])
+                    # Update v
+                    # v = B1 * v + (1-B) * g
+                    v = self.state[p]['momentum_buffer']
+                    v.lerp_(p.grad, 1 - group['momentum'])
 
-                # Optional Nesterov look-ahead
-                # vv = B*v + (1-B)*g
-                vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
+                    # Optional Nesterov look-ahead
+                    # vv = B*v + (1-B)*g
+                    vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
-                # Update
-                update = zeropower_via_newtonschulz(vv, group['ns_steps'])
-                lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
-                p.add_(update, alpha=-lr)
+                    # Update
+                    update = zeropower_via_newtonschulz(vv, group['ns_steps'])
+                    lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+                    p.add_(update, alpha=-lr)
+                    input_tensor = p
+                else:
+                    input_tensor = torch.zeros_like(group['zero_buffer'])
 
                 # Sync point 2
-                input_params = [p for p in group['params'][i:i+self.world_size]]
-                torch.distributed.all_gather(input_params, p)
+                output_params = [p for p in group['params'][i:i+self.world_size]]
+                if len(output_params) < self.world_size:
+                    output_params.extend(torch.zeros_like(group['zero_buffer']) for _ in range(self.world_size - len(output_params)))
+                torch.distributed.all_gather(output_params, input_tensor)
 
 
