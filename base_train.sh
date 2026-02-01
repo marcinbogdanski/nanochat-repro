@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Run the training script with specified parameters
 TOTAL_BATCH_SIZE=$((524288/128))
-CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 \
   torchrun --standalone --nproc_per_node=2 -m scripts.base_train \
     --num-layers=10 \
     --total-batch-size="${TOTAL_BATCH_SIZE}" \
@@ -12,7 +12,7 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8 \
     --max-steps=10
 
 # Equivalent nanochat run:
-# CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+# CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 \
 #   torchrun --standalone --nproc_per_node=2 -m scripts.base_train \
 #     --depth=10 \
 #     --max_seq_len=1024 \

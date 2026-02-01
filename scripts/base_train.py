@@ -160,7 +160,6 @@ def main():
     muon_groups = []
     for shape in sorted({p.shape for p in params_matrix}):
         group_params = [p for p in params_matrix if p.shape == shape]
-        print(f"Muon group: shape={shape}, num_params={len(group_params)}")
         muon_groups.append({'params': group_params})
     muon_factory = DistMuon if ddp else Muon
     muon_optimizer = muon_factory(
@@ -189,9 +188,12 @@ def main():
         world_size=ddp_world_size,
     )
 
+    total_ntok = 0
+    total_time = 0.0
+    smooth_train_loss = 0.0
     for step in range(max_steps+1):
 
-        # Save the model checkpoint
+        # Save Model
         if ddp_master and step == max_steps:
             print("Saving final model...")
             model_data = model.state_dict()
@@ -202,7 +204,7 @@ def main():
             with open(f"meta_{step:06d}.json", "w") as f:
                 json.dump(metadata, f)
 
-        # Exit condition
+        # Exit Condition
         if step == max_steps:
             break
 
@@ -212,17 +214,18 @@ def main():
         loss_accum = 0.0
         for opt in optimizers:
             opt.zero_grad()
-        for ii in range(grad_accum):
+        for _ in range(grad_accum):
             x, y = train_loader.get_batch()
             x = x.to(device)
             y = y.to(device)
             with autocast_ctx:
-                logits, loss = model(x, y)
+                _, loss = model(x, y)
+            train_loss = loss.item()
             loss = loss / grad_accum
             loss_accum += loss.detach()
-
-            # TODO: Sync only if DDP and last backward in grad_accum
             loss.backward()
+        if ddp:
+            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # LR Scheduler
         lrm = get_lr(step)
@@ -233,13 +236,25 @@ def main():
         for group in muon_optimizer.param_groups:
             group['momentum'] = muon_momentum
 
-        # Optimizer step
+        # Optimizer Step
         for opt in optimizers:
             opt.step()
+        
+        # Sync & Time
+        if device.startswith('cuda'):
+            torch.cuda.synchronize() # wait for the GPU to finish work
+        dt = (time.time() - ts)
+        total_time += dt
 
         # Logs
-        dt = (time.time() - ts)
-        print(f"Step {step+1}/{max_steps}, loss: {loss_accum.item():.4f}, dt={dt*1e3:.2f}ms")
+        ntok = (micro_batch * block_size * grad_accum * ddp_world_size)
+        total_ntok += ntok
+        tps = ntok / dt
+        if ddp_master:
+            pct = (step+1) / max_steps * 100
+            smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
+            debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
+            print(f"Step {step+1}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.6f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps/1e6:.2f}MT/s, time={total_time//60}:{total_time%60:.2f}m")
 
     if ddp:
         torch.distributed.destroy_process_group()
