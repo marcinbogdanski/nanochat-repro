@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import torch
 import pickle
@@ -79,9 +80,9 @@ def main():
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
 
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
+    # torch.backends.cuda.enable_flash_sdp(False)
+    # torch.backends.cuda.enable_mem_efficient_sdp(False)
+    # torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
 
 
@@ -96,6 +97,7 @@ def main():
     model = GPTModel(model_config)
     model.to(device)
     model.init_weights()
+    # model = torch.compile(model)
 
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
@@ -187,7 +189,22 @@ def main():
         world_size=ddp_world_size,
     )
 
-    for step in range(max_steps):
+    for step in range(max_steps+1):
+
+        # Save the model checkpoint
+        if ddp_master and step == max_steps:
+            print("Saving final model...")
+            model_data = model.state_dict()
+            torch.save(model_data, f"model_{step:06d}.pt")
+            metadata = {
+                'step': step,
+            }
+            with open(f"meta_{step:06d}.json", "w") as f:
+                json.dump(metadata, f)
+
+        # Exit condition
+        if step == max_steps:
+            break
 
         ### v SAVE v ###
         save_dict = {
