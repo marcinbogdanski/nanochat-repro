@@ -59,9 +59,9 @@ def main():
         torch.cuda.manual_seed(42)
         torch.cuda.manual_seed_all(42)
     
-    # Precision                                 ### MARCIN - disable tf32 for debugging
-    # if device_type == "cuda":
-    #     torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
+    # Precision
+    if device_type == "cuda":
+        torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
 
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
