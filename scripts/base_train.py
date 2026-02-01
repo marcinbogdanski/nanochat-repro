@@ -254,7 +254,7 @@ def main():
             pct = (step+1) / max_steps * 100
             smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
             debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
-            print(f"Step {step+1}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.6f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps/1e6:.2f}MT/s, time={total_time//60}:{total_time%60:.2f}m")
+            print(f"Step {step+1}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.6f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
 
     if ddp:
         torch.distributed.destroy_process_group()
