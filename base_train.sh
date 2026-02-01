@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Run the training script with specified parameters
 TOTAL_BATCH_SIZE=$((524288/128))
-
 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
   torchrun --standalone --nproc_per_node=2 -m scripts.base_train \
     --num-layers=10 \
