@@ -2,6 +2,7 @@ import os
 import time
 import torch
 import pickle
+import argparse
 from contextlib import nullcontext
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
@@ -9,6 +10,16 @@ from mynanochat.adamw import DistAdamW
 from mynanochat.muon import Muon, DistMuon
 
 def main():
+
+    parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
+    parser.add_argument('--num-layers', type=int, default=20, help='Number of transformer layers.')
+    parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
+    parser.add_argument('--micro-batch', type=int, default=8, help='Micro batch size per device.')
+    parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
+    parser.add_argument('--max-steps', type=int, default=10000, help='Maximum number of training steps.')
+    args = parser.parse_args()
+
+    
     # DDP Init
     ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
     if ddp:
@@ -39,16 +50,16 @@ def main():
 
     # Model Hyperparameters
     vocab_size = tokenizer.n_vocab
-    num_layers = 10  # 20                        ### MARCIN - smaller model
-    num_embed = 640  # 1280                      ### MARCIN - smaller model
+    num_layers = args.num_layers
+    num_embed = num_layers * 64       # aspect ratio 64
     head_size = 128
     assert num_embed % head_size == 0
     num_heads = num_embed // head_size
     
     # Training Hyperparameters
-    total_batch_size = 524288 // 128   # 2**19, ~0.5M   ### MARCIN - smaller batch for debugging
-    micro_batch = 1              # what fits in GPU     ### MARCIN - smaller micro batch for debugging
-    block_size = 1024  # 2048                           ### MARCIN - smaller model
+    total_batch_size = args.total_batch_size
+    micro_batch = args.micro_batch
+    block_size = args.block_size
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
 
@@ -101,11 +112,10 @@ def main():
     adam_betas = (0.8, 0.95)
 
     # LR Scheduler params
-    max_steps = 10                    ### MARCIN - fewer steps for debugging
-    lr_warmup_ratio = 0.4     # 0.0   ### MARCIN - warmup testing
+    max_steps = args.max_steps
+    lr_warmup_ratio = 0.0
     lr_warmdown_ratio = 0.4
-    lr_final_frac = 0.1       # 0.0   ### MARCIN - warmdown testing
-    muon_momentum_warup_steps = 5  # 300  ### MARCIN - faster momentum warmup for debugging
+    lr_final_frac = 0.0
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
@@ -120,7 +130,7 @@ def main():
             return (progress * 1.0) + (1.0 - progress) * lr_final_frac
 
     def get_muon_momentum(step: int):
-        muon_frac = min(step / muon_momentum_warup_steps, 1.0)
+        muon_frac = min(step / 300, 1.0)
         muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
         return muon_momentum
 
@@ -213,7 +223,7 @@ def main():
             ## v SAVE v ###
             save_dict['x'].append(x.detach().clone().cpu())
             save_dict['y'].append(y.detach().clone().cpu())
-            save_dict['logits'].append(logits.detach()[:,::4,::64].clone().cpu())
+            # save_dict['logits'].append(logits.detach()[:,::4,::64].clone().cpu())
             save_dict['loss_div_accum'].append(loss.detach().clone().cpu())
             ### ^ SAVE ^ ###
 
