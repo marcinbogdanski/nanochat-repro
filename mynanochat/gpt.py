@@ -49,7 +49,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         tmp = torch.outer(pos, theta)        # seq_len, head_size//2
         sin, cos = torch.sin(tmp), torch.cos(tmp)
         sin, cos = sin[None, :, None, :], cos[None, :, None, :]  # 1,seq_len,1,head_size//2  ### MARCIN different sclicing
-        # cos, sin = cos.bfloat16(), sin.bfloat16()                                          ### MARCIN cast to bfloat16 removed
+        cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 
     def forward(self, x, cos, sin):
@@ -157,9 +157,9 @@ class GPTModel(nn.Module):
             device=self.transformer.wte.weight.device
         )
 
-        # Cast to bfloat16 to align with NanoChat                               ### MARCIN - removed bfloat16 casting
-        # if self.transformer.wte.weight.device.type == "cuda":
-        #     self.transformer.wte.to(dtype=torch.bfloat16)
+        # Cast to bfloat16 to align with NanoChat
+        if self.transformer.wte.weight.device.type == "cuda":
+            self.transformer.wte.to(dtype=torch.bfloat16)
 
         
 

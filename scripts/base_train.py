@@ -31,7 +31,6 @@ def main():
     print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
 
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
-    autocast_ctx = nullcontext()  # MARCIN - disable autocast for debugging
 
     # Tokenizer
     tokenizer_path = os.path.dirname(__file__)+"/../data/tokenizer.pkl"
