@@ -4,6 +4,7 @@ import time
 import torch
 import pickle
 import argparse
+import datasets
 from contextlib import nullcontext
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
@@ -176,22 +177,49 @@ def main():
             for group in opt.param_groups:
                 group["initial_lr"] = group["lr"]
 
+    # Dataset
+    # Match nanochat repackage_data_reference.py seed
+    dataset = datasets.load_dataset("HuggingFaceFW/fineweb-edu", name="sample-100BT", split="train")
+    dataset = dataset.shuffle(seed=42)
+
     train_loader = DataLoader(
+        dataset=dataset,
+        start_at=0,
+        end_at=12736512,   # start of eval set, as per nanochat
         batch_size=micro_batch,
         block_size=block_size,
-        hf_path="HuggingFaceFW/fineweb-edu",
-        hf_name="sample-100BT",
-        hf_split="train",
         tokenizer=tokenizer,
         group_size=1024,   # same as nanochat row_group_size
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
 
+    eval_every = 250
+    eval_loader = DataLoader(
+        dataset=dataset,
+        start_at=12736512,  # start of eval set, as per nanochat
+        end_at=None,   
+        batch_size=micro_batch,
+        block_size=block_size,
+        tokenizer=tokenizer,
+        group_size=1024,   # same as nanochat row_group_size
+        rank=ddp_rank,
+        world_size=ddp_world_size,
+    )
+
+
     total_ntok = 0
     total_time = 0.0
     smooth_train_loss = 0.0
     for step in range(max_steps+1):
+
+        # Evaluation
+        if eval_every > 0 and step % eval_every == 0:
+            model.eval()
+
+
+
+            model.train()
 
         # Save Model
         if ddp_master and step == max_steps:
