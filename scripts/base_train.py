@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import math
 import torch
 import pickle
 import argparse
@@ -19,6 +20,8 @@ def main():
     parser.add_argument('--micro-batch', type=int, default=8, help='Micro batch size per device.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
     parser.add_argument('--max-steps', type=int, default=10000, help='Maximum number of training steps.')
+    parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
+    parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
     args = parser.parse_args()
 
     
@@ -46,8 +49,12 @@ def main():
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
 
     # Tokenizer
-    tokenizer_path = os.path.dirname(__file__)+"/../data/tokenizer.pkl"
+    base_path = os.path.dirname(__file__)+"/../data/"
+    tokenizer_path = base_path + "tokenizer.pkl"
     tokenizer = pickle.load(open(tokenizer_path, "rb"))
+    token_bytes_path = base_path + "token_bytes.pkl"
+    token_bytes = pickle.load(open(token_bytes_path, "rb"))
+    token_bytes = torch.tensor(token_bytes, device=device)
 
 
     # Model Hyperparameters
@@ -194,7 +201,9 @@ def main():
         world_size=ddp_world_size,
     )
 
-    eval_every = 250
+    assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
+    eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
+    print(f"Eval every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         dataset=dataset,
         start_at=12736512,  # start of eval set, as per nanochat
@@ -213,12 +222,33 @@ def main():
     smooth_train_loss = 0.0
     for step in range(max_steps+1):
 
-        # Evaluation
-        if eval_every > 0 and step % eval_every == 0:
+        # BPB Evaluation
+        if args.eval_every > 0 and step % args.eval_every == 0:
             model.eval()
-
-
-
+            total_nats = torch.tensor(0.0, device=device)
+            total_bytes = torch.tensor(0.0, device=device)
+            with torch.no_grad():
+                for _ in range(eval_steps):
+                    x, y = eval_loader.get_batch()
+                    assert (y >= 0).all()  # maskig with -1 not supported
+                    x = x.to(device)
+                    y = y.to(device)
+                    with autocast_ctx:
+                        _, loss_arr = model(x, y, reduction='none')
+                    bytes_arr = token_bytes[y.view(-1)]
+                    loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
+                    total_nats += loss_arr.sum().item()
+                    total_bytes += bytes_arr.sum().item()
+            if ddp:
+                torch.distributed.all_reduce(total_nats, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(total_bytes, op=torch.distributed.ReduceOp.SUM)
+            total_nats = total_nats.item()
+            total_bytes = total_bytes.item()
+            bpb = float('inf')
+            if total_bytes > 0:
+                bpb = total_nats / (total_bytes * math.log(2))
+            if ddp_master:
+                print(f"Step {step}: eval bpb: {bpb:.12f} nats: {total_nats:.1f} bytes: {total_bytes:.1f}")
             model.train()
 
         # Save Model

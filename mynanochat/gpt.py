@@ -163,7 +163,7 @@ class GPTModel(nn.Module):
 
         
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, reduction='mean'):
         B, T = idx.shape
         assert T <= self.config.block_size
         
@@ -188,5 +188,5 @@ class GPTModel(nn.Module):
             B, T, C = logits.shape
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
-            loss = F.cross_entropy(logits_, targets_)
+            loss = F.cross_entropy(logits_, targets_, reduction=reduction)
             return logits, loss
