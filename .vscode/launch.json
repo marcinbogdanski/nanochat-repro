@@ -8,7 +8,19 @@
             "name": "Python Debugger: Module",
             "type": "debugpy",
             "request": "launch",
-            "module": "scripts.base_train"
+            "module": "scripts.base_train",
+            "env": {
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "CUDA_VISIBLE_DEVICES": "1"
+            },
+            "args": [
+                "--num-layers=10",
+                "--block-size=1024",
+                "--max-steps=10",
+                "--micro-batch=2",
+                "--total-batch-size=8192",
+                "--eval-every=-1"
+            ]
         }
     ]
 }

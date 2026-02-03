@@ -11,6 +11,7 @@ from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
 from mynanochat.adamw import DistAdamW
 from mynanochat.muon import Muon, DistMuon
+from mynanochat.core_eval import evaluate_core_metric
 
 def main():
 
@@ -22,6 +23,9 @@ def main():
     parser.add_argument('--max-steps', type=int, default=10000, help='Maximum number of training steps.')
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
     parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
+    parser.add_argument('--eval-core-every', type=int, default=2000, help='Evaluate core metric every N steps.')
+    parser.add_argument('--eval-core-max-examples', type=int, default=500, help='Number of examples for core metric evaluation.')
+    parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     args = parser.parse_args()
 
     
@@ -223,7 +227,7 @@ def main():
     for step in range(max_steps+1):
 
         # BPB Evaluation
-        if args.eval_every > 0 and step % args.eval_every == 0:
+        if args.eval_every > 0 and step > 0 and (step % args.eval_every == 0 or step == max_steps):
             model.eval()
             total_nats = torch.tensor(0.0, device=device)
             total_bytes = torch.tensor(0.0, device=device)
@@ -251,8 +255,25 @@ def main():
                 print(f"Step {step}: eval bpb: {bpb:.12f} nats: {total_nats:.1f} bytes: {total_bytes:.1f}")
             model.train()
 
+        # Core Metric
+        if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
+            ts = time.time()
+            model.eval()
+            with autocast_ctx:
+                bundle_path = os.path.dirname(__file__)+"/../data/eval_bundle"
+                results = evaluate_core_metric(bundle_path, model, tokenizer, device, max_examples_per_task=args.eval_core_max_examples)
+            core_metric = results['core_metric']
+            accuracies = [task['centered_accuracy'] for task in results['tasks']]
+            if device.startswith('cuda'):
+                torch.cuda.synchronize() # wait for the GPU to finish work
+            dt = (time.time() - ts)
+            if ddp_master:
+                print(f"Step {step}: core metric: {core_metric:.6f} dt={dt:.2f}s")
+                print(f"Step {step}: accuracies: {[f'{acc:.4f}' for acc in accuracies]}")
+            model.train()
+
         # Save Model
-        if ddp_master and step == max_steps:
+        if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
             print("Saving final model...")
             model_data = model.state_dict()
             torch.save(model_data, f"model_{step:06d}.pt")

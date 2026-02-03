@@ -165,7 +165,9 @@ class GPTModel(nn.Module):
 
     def forward(self, idx, targets=None, reduction='mean'):
         B, T = idx.shape
-        assert T <= self.config.block_size
+        assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
+        assert idx.device == self.cos.device, "Input device does not match model device."
+        assert self.cos.dtype == torch.bfloat16, "Model buffers are not in bfloat16."
         
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
