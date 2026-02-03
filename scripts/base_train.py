@@ -7,11 +7,54 @@ import pickle
 import argparse
 import datasets
 from contextlib import nullcontext
+import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
 from mynanochat.adamw import DistAdamW
 from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
+
+@torch.inference_mode()
+def sample_one_token(logits, temperature=1.0, top_k=None, sample_rng=None):
+    assert logits.ndim == 2  # B,C
+    assert temperature >= 0.0
+    assert top_k is None or 0 < top_k <= logits.size(-1)
+    if temperature == 0.0:
+        return torch.argmax(logits, dim=-1, keepdim=True)  # greedy
+    if top_k is None:
+        probs = F.softmax(logits / temperature, dim=-1)  # B,C
+        ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
+        return ix
+    else:
+        topk_logits, topk_indices = torch.topk(logits, k=top_k, dim=-1)  # B,k
+        probs = F.softmax(topk_logits / temperature, dim=-1)  # B,k
+        ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
+        return torch.gather(topk_indices, -1, ix)  # B,1
+
+@torch.inference_mode()
+def generate(model, autocast_ctx, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng=None):
+    """Generate max_tokens starting from idx[B,T]"""
+    assert isinstance(idx, torch.Tensor)
+    assert idx.dtype == torch.long
+    assert len(idx.shape) == 2  # B,T
+    assert isinstance(max_new_tokens, int)
+    
+    is_training = model.training
+    model.eval()
+
+    block_size = model.config.block_size
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            idx_tail = idx[:, -block_size:]      # B,T  sliding window
+            with autocast_ctx:
+                logits, _ = model(idx_tail)      # B,T,C <- B,T
+            logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
+            xcol = sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
+            idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
+    
+    model.train(is_training)
+    return idx
+
 
 def main():
 
@@ -113,8 +156,9 @@ def main():
     model = GPTModel(model_config)
     model.to(device)
     model.init_weights()
+    orig_model = model
     # model = torch.compile(model)
-
+    
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
     params_embedding = list(model.transformer.wte.parameters())
@@ -265,16 +309,51 @@ def main():
             model.eval()
             with autocast_ctx:
                 bundle_path = os.path.dirname(__file__)+"/../data/eval_bundle"
-                results = evaluate_core_metric(bundle_path, model, tokenizer, device, max_examples_per_task=args.eval_core_max_examples)
+                # Original model because shapes keep chaning
+                results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, max_examples_per_task=args.core_metric_max_examples)
             core_metric = results['core_metric']
             accuracies = [task['centered_accuracy'] for task in results['tasks']]
             if device.startswith('cuda'):
                 torch.cuda.synchronize() # wait for the GPU to finish work
             dt = (time.time() - ts)
             if ddp_master:
-                print(f"Step {step}: core metric: {core_metric:.6f} dt={dt:.2f}s")
+                print(f"Step {step}: core metric: {core_metric:.12f} dt={dt:.2f}s")
                 print(f"Step {step}: accuracies: {[f'{acc:.4f}' for acc in accuracies]}")
             model.train()
+
+        # Generate
+        if ddp_master and args.generate_every > 0 and step > 0 and (step % args.generate_every == 0 or step == max_steps):
+            model.eval()
+            prompts = [
+                "The capital of France is",
+                "The chemical symbol of gold is",
+                "If yesterday was Friday, then tomorrow will be",
+                "The opposite of hot is",
+                "The planets of the solar system are:",
+                "My favorite color is",
+                "If 5*x + 3 = 13, then x is",
+            ]
+
+            sample_rng = torch.Generator(device=device)
+            sample_rng.manual_seed(42)
+
+            bos = tokenizer.encode_single_token('<|bos|>')
+            for prompt in prompts:
+
+                tokens =  [bos] + tokenizer.encode(prompt)
+                idx = torch.tensor(tokens, dtype=torch.long, device=device)
+                idx = idx.unsqueeze(0)  # B,T
+                idx = generate(
+                    model,
+                    autocast_ctx,
+                    idx,
+                    max_new_tokens=16,
+                    temperature=0.0,
+                    top_k=None,
+                    sample_rng=sample_rng
+                )  # B,T
+                gen_text = tokenizer.decode(idx[0].tolist())
+                print(gen_text)
 
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
@@ -334,10 +413,10 @@ def main():
         total_ntok += ntok
         tps = ntok / dt
         if ddp_master:
-            pct = (step+1) / max_steps * 100
+            pct = (step) / max_steps * 100
             smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
             debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
-            print(f"Step {step+1}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.6f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
+            print(f"Step {step}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.12f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
 
     if ddp:
         torch.distributed.destroy_process_group()
