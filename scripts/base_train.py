@@ -16,15 +16,19 @@ from mynanochat.core_eval import evaluate_core_metric
 def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
+    # Model
     parser.add_argument('--num-layers', type=int, default=20, help='Number of transformer layers.')
-    parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
-    parser.add_argument('--micro-batch', type=int, default=8, help='Micro batch size per device.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
+    # Optimization
     parser.add_argument('--max-steps', type=int, default=10000, help='Maximum number of training steps.')
+    parser.add_argument('--micro-batch', type=int, default=8, help='Micro batch size per device.')
+    parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
+    # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
     parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
-    parser.add_argument('--eval-core-every', type=int, default=2000, help='Evaluate core metric every N steps.')
-    parser.add_argument('--eval-core-max-examples', type=int, default=500, help='Number of examples for core metric evaluation.')
+    parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
+    parser.add_argument('--core-metric-max-examples', type=int, default=500, help='Number of examples for core metric evaluation.')
+    parser.add_argument('--generate-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     args = parser.parse_args()
 
