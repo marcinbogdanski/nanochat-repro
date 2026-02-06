@@ -10,6 +10,15 @@ class GPTConfig:
         self.n_head = n_head
         self.n_embd = n_embd
 
+    def to_dict(self):
+        return {
+            'block_size': self.block_size,
+            'vocab_size': self.vocab_size,
+            'n_layer': self.n_layer,
+            'n_head': self.n_head,
+            'n_embd': self.n_embd,
+        }
+
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""

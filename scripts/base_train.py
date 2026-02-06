@@ -6,6 +6,7 @@ import torch
 import pickle
 import argparse
 import datasets
+import wandb
 from contextlib import nullcontext
 import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
@@ -13,6 +14,14 @@ from mynanochat.dataloader import DataLoader
 from mynanochat.adamw import DistAdamW
 from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
+
+class WandBDummy:
+    def __init__(self):
+        pass
+    def log(self, *args, **kwargs):
+        pass
+    def finish(self):
+        pass
 
 @torch.inference_mode()
 def sample_one_token(logits, temperature=1.0, top_k=None, sample_rng=None):
@@ -59,13 +68,16 @@ def generate(model, autocast_ctx, idx, max_new_tokens, temperature=0.0, top_k=No
 def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
+    # WandB
+    parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # Model
-    parser.add_argument('--num-layers', type=int, default=20, help='Number of transformer layers.')
+    parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
     # Optimization
     parser.add_argument('--max-steps', type=int, default=10000, help='Maximum number of training steps.')
-    parser.add_argument('--micro-batch', type=int, default=8, help='Micro batch size per device.')
+    parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
+    parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
     parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
@@ -75,7 +87,6 @@ def main():
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     args = parser.parse_args()
 
-    
     # DDP Init
     ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
     if ddp:
@@ -97,6 +108,14 @@ def main():
         device_type = device
     print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
 
+    # WandB Init
+    if args.run is not None and ddp_master:
+        user_config = vars(args).copy()
+        wandb_logger = wandb.init(project="nanochat", name=args.run, config=user_config)
+    else:
+        wandb_logger = WandBDummy()
+    
+    # Autocast Context
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
 
     # Tokenizer
@@ -110,24 +129,25 @@ def main():
 
     # Model Hyperparameters
     vocab_size = tokenizer.n_vocab
-    num_layers = args.num_layers
-    num_embed = num_layers * 64       # aspect ratio 64
+    depth = args.depth
+    num_embed = depth * 64       # aspect ratio 64
     head_size = 128
     assert num_embed % head_size == 0
     num_heads = num_embed // head_size
     
     # Training Hyperparameters
     total_batch_size = args.total_batch_size
-    micro_batch = args.micro_batch
+    micro_batch = args.device_batch_size
     block_size = args.block_size
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
 
     # Reproducibility
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
-        torch.cuda.manual_seed_all(42)
+    if args.deterministic:
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
     
     # Precision
     if device_type == "cuda":
@@ -135,13 +155,14 @@ def main():
 
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
+    if args.deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
 
-    # torch.backends.cuda.enable_flash_sdp(False)
-    # torch.backends.cuda.enable_mem_efficient_sdp(False)
-    # torch.backends.cuda.enable_math_sdp(True)
+        # torch.backends.cuda.enable_flash_sdp(False)
+        # torch.backends.cuda.enable_mem_efficient_sdp(False)
+        # torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
 
 
@@ -149,7 +170,7 @@ def main():
     model_config = GPTConfig(
         block_size=block_size,
         vocab_size=vocab_size,
-        n_layer=num_layers,
+        n_layer=depth,
         n_head=num_heads,
         n_embd=num_embed,
     )
@@ -157,7 +178,8 @@ def main():
     model.to(device)
     model.init_weights()
     orig_model = model
-    # model = torch.compile(model)
+    if not args.deterministic:
+        model = torch.compile(model)
     
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
@@ -301,6 +323,11 @@ def main():
                 bpb = total_nats / (total_bytes * math.log(2))
             if ddp_master:
                 print(f"Step {step}: eval bpb: {bpb:.12f} nats: {total_nats:.1f} bytes: {total_bytes:.1f}")
+            wandb_logger.log({
+                'step': step,
+                'total_training_time': total_time,
+                'val/bpb': bpb,
+            })
             model.train()
 
         # Core Metric
@@ -312,13 +339,18 @@ def main():
                 # Original model because shapes keep chaning
                 results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, max_examples_per_task=args.core_metric_max_examples)
             core_metric = results['core_metric']
-            accuracies = [task['centered_accuracy'] for task in results['tasks']]
+            accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
             if device.startswith('cuda'):
                 torch.cuda.synchronize() # wait for the GPU to finish work
             dt = (time.time() - ts)
             if ddp_master:
                 print(f"Step {step}: core metric: {core_metric:.12f} dt={dt:.2f}s")
-                print(f"Step {step}: accuracies: {[f'{acc:.4f}' for acc in accuracies]}")
+                print(f"Step {step}: accuracies: {[f'{acc:.4f}' for acc in accuracies.values()]}")
+            wandb_logger.log({
+                'step': step,
+                'core_metric': core_metric,
+                'centered_results': accuracies,
+            })
             model.train()
 
         # Generate
@@ -362,6 +394,8 @@ def main():
             torch.save(model_data, f"model_{step:06d}.pt")
             metadata = {
                 'step': step,
+                'model_config': model_config.to_dict(),
+                'user_config': user_config,
             }
             with open(f"meta_{step:06d}.json", "w") as f:
                 json.dump(metadata, f)
@@ -371,8 +405,10 @@ def main():
             break
 
         # Training
-        ts = time.time()
         model.train()
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+        ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
             opt.zero_grad()
@@ -404,7 +440,7 @@ def main():
         
         # Sync & Time
         if device.startswith('cuda'):
-            torch.cuda.synchronize() # wait for the GPU to finish work
+            torch.cuda.synchronize()  # wait for the GPU to finish work
         dt = (time.time() - ts)
         total_time += dt
 
@@ -412,12 +448,22 @@ def main():
         ntok = (micro_batch * block_size * grad_accum * ddp_world_size)
         total_ntok += ntok
         tps = ntok / dt
+        pct = (step) / max_steps * 100
+        smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
+        debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
         if ddp_master:
-            pct = (step) / max_steps * 100
-            smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
-            debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
             print(f"Step {step}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.12f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
+        if step % 100 == 0:
+            wandb_logger.log({
+                'step': step,
+                'total_training_time': total_time,
+                'train/loss': debiased_smooth_train_loss,
+                'train/lrm': lrm,
+                'train/dt': dt,
+                'train/tok_per_sec': tps,
+            })
 
+    wandb_logger.finish()
     if ddp:
         torch.distributed.destroy_process_group()
 
