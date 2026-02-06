@@ -308,7 +308,7 @@ def main():
                     x = x.to(device)
                     y = y.to(device)
                     with autocast_ctx:
-                        _, loss_arr = model(x, y, reduction='none')
+                        _, loss_arr = model(x, y, reduction='none', return_logits=False)
                     bytes_arr = token_bytes[y.view(-1)]
                     loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
                     total_nats += loss_arr.sum().item()
@@ -376,7 +376,7 @@ def main():
                 idx = torch.tensor(tokens, dtype=torch.long, device=device)
                 idx = idx.unsqueeze(0)  # B,T
                 idx = generate(
-                    model,
+                    orig_model,
                     autocast_ctx,
                     idx,
                     max_new_tokens=16,
@@ -386,6 +386,7 @@ def main():
                 )  # B,T
                 gen_text = tokenizer.decode(idx[0].tolist())
                 print(gen_text)
+            model.train()
 
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
@@ -417,7 +418,7 @@ def main():
             x = x.to(device)
             y = y.to(device)
             with autocast_ctx:
-                _, loss = model(x, y)
+                _, loss = model(x, y, return_logits=False)
             train_loss = loss.item()
             loss = loss / grad_accum
             loss_accum += loss.detach()
@@ -437,7 +438,7 @@ def main():
         # Optimizer Step
         for opt in optimizers:
             opt.step()
-        
+
         # Sync & Time
         if device.startswith('cuda'):
             torch.cuda.synchronize()  # wait for the GPU to finish work
@@ -463,6 +464,9 @@ def main():
                 'train/tok_per_sec': tps,
             })
 
+    if torch.cuda.is_available():
+        print(f"Alloc: {torch.cuda.memory_allocated() / (1024**2):.1f}MiB, "
+              f"Max: {torch.cuda.max_memory_allocated() / (1024**2):.1f}MiB")
     wandb_logger.finish()
     if ddp:
         torch.distributed.destroy_process_group()

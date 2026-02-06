@@ -172,12 +172,12 @@ class GPTModel(nn.Module):
 
         
 
-    def forward(self, idx, targets=None, reduction='mean'):
+    def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
         assert idx.device == self.cos.device, "Input device does not match model device."
         assert self.cos.dtype == torch.bfloat16, "Model buffers are not in bfloat16."
-        
+
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
@@ -194,10 +194,14 @@ class GPTModel(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is None:
+            assert return_logits, "If targets is None, return_logits must be True."
             return logits, None
         else:
             B, T, C = logits.shape
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
             loss = F.cross_entropy(logits_, targets_, reduction=reduction)
-            return logits, loss
+            if return_logits:
+                return logits, loss
+            else:
+                return None, loss
