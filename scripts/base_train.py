@@ -337,7 +337,7 @@ def main():
             with autocast_ctx:
                 bundle_path = os.path.dirname(__file__)+"/../data/eval_bundle"
                 # Original model because shapes keep chaning
-                results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, max_examples_per_task=args.core_metric_max_examples)
+                results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_examples)
             core_metric = results['core_metric']
             accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
             if device.startswith('cuda'):
@@ -345,7 +345,6 @@ def main():
             dt = (time.time() - ts)
             if ddp_master:
                 print(f"Step {step}: core metric: {core_metric:.12f} dt={dt:.2f}s")
-                print(f"Step {step}: accuracies: {[f'{acc:.4f}' for acc in accuracies.values()]}")
             wandb_logger.log({
                 'step': step,
                 'core_metric': core_metric,
@@ -453,7 +452,9 @@ def main():
         smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
         debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
         if ddp_master:
-            print(f"Step {step}/{max_steps} ({pct:.2f}%), loss: {debiased_smooth_train_loss:.12f} ({loss_accum.item():.4f}), lrm={lrm}, dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
+            print(f"Step {step}/{max_steps} ({pct:.2f}%): "
+                  f"loss={debiased_smooth_train_loss:.12f} ({loss_accum.item():.4f}), lrm={lrm}, "
+                  f"dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
         if step % 100 == 0:
             wandb_logger.log({
                 'step': step,

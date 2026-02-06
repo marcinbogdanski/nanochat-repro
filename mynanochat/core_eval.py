@@ -212,12 +212,6 @@ def evaluate_one_example(idx, data_list, model, tokenizer, device,
     else:
         raise ValueError(f'Unknown task type: {task_type}')
     
-    # sum losses, note last is nan
-    losses_sum = losses[:, :-1].sum().item()
-    with open('debug_core_eval.txt', 'a') as f:
-        # loss in full precision for debugging
-        f.write(f"{task_type}:{idx}: {is_correct}, loss_sum: {losses_sum}\n")
-
     return is_correct
 
 
@@ -266,8 +260,6 @@ def evaluate_core_metric(bundle_folder, model, tokenizer, device, max_examples_p
         task_dataset_uri = task['dataset_uri']
         task_num_fewshot = task['num_fewshot'][0]
         task_cont_delim = task.get('continuation_delimiter', ' ')
-        if ddp_master:
-            print(f'Evaluating task={task_label} type={task_type} fewshot={task_num_fewshot}... ', end='')
 
         ts = time.time()
 
@@ -299,7 +291,8 @@ def evaluate_core_metric(bundle_folder, model, tokenizer, device, max_examples_p
 
         dt = time.time() - ts
         if ddp_master:
-            print(f'Task {task_label} done in {dt:.1f}s: accuracy={accuracy:.4f}, centered_accuracy={centered_accuracy:.4f}')
+            print(f"Task {task_label} ({task_type}, {task_num_fewshot}): "
+                  f"dt={dt:.1f}s: acc={accuracy:.4f}, centered_acc={centered_accuracy:.4f}")
     
     # Compute core metric
     centered_accuracies = [t['centered_accuracy'] for t in results['tasks']]
