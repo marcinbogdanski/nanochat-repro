@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- \
-  --depth=12 --device-batch-size=16 --run=d12m
+CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=4 -m scripts.base_train \
+  -- --depth=4 --device-batch-size=8 \
+  --eval-every=100 --core-metric-every=100 --sample-every=100 --save-every=100 \
+  --log-every=1 --deterministic
+#  --run=d4m
+
 
 # Run the training script with specified parameters
 # TOTAL_BATCH_SIZE=$((524288/16))

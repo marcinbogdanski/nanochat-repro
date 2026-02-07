@@ -84,8 +84,9 @@ def main():
     parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
     parser.add_argument('--core-metric-max-examples', type=int, default=500, help='Number of examples for core metric evaluation.')
-    parser.add_argument('--generate-every', type=int, default=1000, help='Generate samples every N steps.')
+    parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
+    parser.add_argument('--log-every', type=int, default=100, help='Log training metrics every N steps.')
     args = parser.parse_args()
     user_config = vars(args).copy()
 
@@ -332,7 +333,7 @@ def main():
             if total_bytes > 0:
                 bpb = total_nats / (total_bytes * math.log(2))
             if ddp_master:
-                print(f"Step {step}: eval bpb: {bpb:.12f} nats: {total_nats:.1f} bytes: {total_bytes:.1f}")
+                print(f"Step {step}: eval bpb: {bpb:.14f} nats: {total_nats:.1f} bytes: {total_bytes:.1f}")
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
@@ -354,7 +355,7 @@ def main():
                 torch.cuda.synchronize() # wait for the GPU to finish work
             dt = (time.time() - ts)
             if ddp_master:
-                print(f"Step {step}: core metric: {core_metric:.12f} dt={dt:.2f}s")
+                print(f"Step {step}: core metric: {core_metric:.14f} dt={dt:.2f}s")
             wandb_logger.log({
                 'step': step,
                 'core_metric': core_metric,
@@ -363,7 +364,7 @@ def main():
             model.train()
 
         # Generate
-        if ddp_master and args.generate_every > 0 and step > 0 and (step % args.generate_every == 0 or step == max_steps):
+        if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or step == max_steps):
             model.eval()
             prompts = [
                 "The capital of France is",
@@ -474,7 +475,7 @@ def main():
                   f"loss {debiased_smooth_train_loss:.6f} {loss_accum.item():.4f} | "
                   f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
                   f"time {total_time_str} | eta {eta_str}")
-        if step % 100 == 0:
+        if step % args.log_every == 0:
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
@@ -486,6 +487,7 @@ def main():
 
     if torch.cuda.is_available():
         print(f"Alloc: {torch.cuda.memory_allocated() / (1024**2):.1f}MiB, "
+              f"Res: {torch.cuda.memory_reserved() / (1024**2):.1f}MiB, "
               f"Max: {torch.cuda.max_memory_allocated() / (1024**2):.1f}MiB")
     wandb_logger.finish()
     if ddp:
