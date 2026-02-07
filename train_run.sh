@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- --depth=12 --device-batch-size=16 --max-steps=10
+OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- --depth=12 --device-batch-size=16 --max-steps=10  --save-every=999999999
 
 # Run the training script with specified parameters
 # TOTAL_BATCH_SIZE=$((524288/16))

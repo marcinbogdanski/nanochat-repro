@@ -6,6 +6,7 @@ import torch
 import pickle
 import argparse
 import datasets
+datasets.disable_progress_bars()
 import wandb
 from contextlib import nullcontext
 import torch.nn.functional as F
@@ -107,7 +108,9 @@ def main():
         ddp_master = True
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         device_type = device
-    print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
+    
+    if ddp_master:
+        print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
 
     # WandB Init
     if args.run is not None and ddp_master:
@@ -277,7 +280,8 @@ def main():
 
     assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
-    print(f"Eval every {args.eval_every} steps, eval_steps={eval_steps}")
+    if ddp_master:
+        print(f"Eval every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         dataset=dataset,
         start_at=12736512,  # start of eval set, as per nanochat
@@ -293,6 +297,7 @@ def main():
 
     total_ntok = 0
     total_time = 0.0
+    smooth_dt = 0.0
     smooth_train_loss = 0.0
     for step in range(max_steps+1):
 
@@ -390,14 +395,16 @@ def main():
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
             print("Saving final model...")
+            models_path = os.path.dirname(__file__)+"/../models/"
+            os.makedirs(models_path, exist_ok=True)
             model_data = model.state_dict()
-            torch.save(model_data, f"model_{step:06d}.pt")
+            torch.save(model_data, models_path+f"model_{step:06d}.pt")
             metadata = {
                 'step': step,
                 'model_config': model_config.to_dict(),
                 'user_config': user_config,
             }
-            with open(f"meta_{step:06d}.json", "w") as f:
+            with open(models_path+f"meta_{step:06d}.json", "w") as f:
                 json.dump(metadata, f)
 
         # Exit Condition
@@ -442,19 +449,26 @@ def main():
         if device.startswith('cuda'):
             torch.cuda.synchronize()  # wait for the GPU to finish work
         dt = (time.time() - ts)
+        smooth_dt = 0.9 * smooth_dt + 0.1 * dt
+        debiased_smooth_dt = smooth_dt / (1 - 0.9**(step+1))
         total_time += dt
 
         # Logs
         ntok = (micro_batch * block_size * grad_accum * ddp_world_size)
         total_ntok += ntok
-        tps = ntok / dt
+        tps = int(ntok / dt)
         pct = (step) / max_steps * 100
         smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
         debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
+        total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
+        remaining_steps = max_steps - step
+        eta_seconds = debiased_smooth_dt * remaining_steps
+        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
         if ddp_master:
-            print(f"Step {step}/{max_steps} ({pct:.2f}%): "
-                  f"loss={debiased_smooth_train_loss:.12f} ({loss_accum.item():.4f}), lrm={lrm}, "
-                  f"dt={dt*1e3:.2f}ms, tps={tps:,}, time={total_time//60}:{total_time%60:.2f}m")
+            print(f"Step {step}/{max_steps} ({pct:.2f}%) | "
+                  f"loss {debiased_smooth_train_loss:.6f} {loss_accum.item():.4f} | "
+                  f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                  f"time {total_time_str} | eta {eta_str}")
         if step % 100 == 0:
             wandb_logger.log({
                 'step': step,

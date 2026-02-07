@@ -291,8 +291,8 @@ def evaluate_core_metric(bundle_folder, model, tokenizer, device, max_examples_p
 
         dt = time.time() - ts
         if ddp_master:
-            print(f"Task {task_label} ({task_type}, {task_num_fewshot}): "
-                  f"dt={dt:.1f}s: acc={accuracy:.4f}, centered_acc={centered_accuracy:.4f}")
+            print(f"Task {task_label:>32} ({task_type}, {task_num_fewshot}-shot) | "
+                  f"dt {dt:.1f}s | acc {accuracy:.4f} | centered_acc {centered_accuracy:.4f}")
     
     # Compute core metric
     centered_accuracies = [t['centered_accuracy'] for t in results['tasks']]
