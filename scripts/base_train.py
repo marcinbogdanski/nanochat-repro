@@ -86,6 +86,7 @@ def main():
     parser.add_argument('--generate-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     args = parser.parse_args()
+    user_config = vars(args).copy()
 
     # DDP Init
     ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
@@ -110,7 +111,6 @@ def main():
 
     # WandB Init
     if args.run is not None and ddp_master:
-        user_config = vars(args).copy()
         wandb_logger = wandb.init(project="nanochat", name=args.run, config=user_config)
     else:
         wandb_logger = WandBDummy()
