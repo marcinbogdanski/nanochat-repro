@@ -1,6 +1,6 @@
 # Karpathy Nanochat
 
-## Vanilla 788110ad
+## Speed Test - Vanilla 788110ad
 
 - 1x RTX 3090, pl=350W, bs=4
 
@@ -60,7 +60,7 @@ step 00011/02832 (0.39%) | loss: 7.328709 | lrm: 1.00 | dt: 3454.68ms | tok/sec:
 ```
 
 
-## Deterministic 788110ad
+## Speed Test - Modified Deterministic 788110ad
 
 - 1x RTX 3090 watercooled, power limit 350W
 - torch.compile commented out
@@ -78,6 +78,21 @@ step 00011/02832 (0.39%) | loss: 7.285553 | lrm: 1.00 | dt: 16501.75ms | tok/sec
 ```
 
 
+## Models and Sizes -  Vanilla 788110ad - PL 200W
+
+```bash
+
+torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- --depth=12 --device_batch_size=16
+step 00011/02832 (0.39%) | loss: 7.328726 | lrm: 1.00 | dt: 3460.44ms | tok/sec: 151,509 | mfu: 3.98 | total time: 0.06m | eta: 162.7m
 
 
+torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- --depth=10 --device_batch_size=16
+step 00011/02030 (0.54%) | loss: 7.350708 | lrm: 1.00 | dt: 2489.80ms | tok/sec: 210,574 | mfu: 3.75 | total time: 0.04m | eta: 83.8m
 
+
+torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- --depth=8 --device_batch_size=16
+step 00011/01408 (0.78%) | loss: 7.394463 | lrm: 1.00 | dt: 1613.64ms | tok/sec: 324,910 | mfu: 51.82 | total time: 0.03m | eta: 37.6m
+
+torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- --depth=6 --device_batch_size=32
+step 00011/00930 (1.18%) | loss: 7.447861 | lrm: 1.00 | dt: 1044.52ms | tok/sec: 501,943 | mfu: 47.95 | total time: 0.02m | eta: 16.0m
+```
