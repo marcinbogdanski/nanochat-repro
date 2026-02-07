@@ -308,7 +308,8 @@ def main():
     for step in range(max_steps+1):
 
         # BPB Evaluation
-        if args.eval_every > 0 and step > 0 and (step % args.eval_every == 0 or step == max_steps):
+        # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
+        if step == 0 or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
             model.eval()
             total_nats = torch.tensor(0.0, device=device)
             total_bytes = torch.tensor(0.0, device=device)
