@@ -9,7 +9,8 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 \
     --total-batch-size="${TOTAL_BATCH_SIZE}" \
     --micro-batch=1 \
     --block-size=1024 \
-    --max-steps=10
+    --max-steps=10 \
+    --save-every=99999999
 
 # Equivalent nanochat run:
 # CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 \
