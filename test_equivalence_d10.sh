@@ -9,9 +9,9 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 \
     --total-batch-size="${TOTAL_BATCH_SIZE}" \
     --device-batch-size=1 \
     --block-size=1024 \
-    --max-steps=10 \
+    --num-iterations=10 \
     --save-every=99999999 \
     --deterministic
 
 # To check checkpoints:
-# md5sum ~/projects/my-nanochat/model_000010.pt ~/.cache/nanochat/base_checkpoints/d10/model_000010.pt
+# md5sum ~/projects/my-nanochat/models/model_000010.pt ~/.cache/nanochat/base_checkpoints/d10/model_000010.pt

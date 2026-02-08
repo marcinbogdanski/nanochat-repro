@@ -75,7 +75,7 @@ def main():
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
     # Optimization
-    parser.add_argument('--max-steps', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
+    parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
     parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
@@ -200,7 +200,7 @@ def main():
     adam_betas = (0.8, 0.95)
 
     # LR Scheduler params
-    max_steps = args.max_steps
+    max_steps = args.num_iterations
     if max_steps <= 0:
         num_model_params = sum(p.numel() for p in model.parameters())
         max_steps = (num_model_params * 8) // args.total_batch_size  # match Nanochat
@@ -473,7 +473,7 @@ def main():
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
         if ddp_master:
             print(f"Step {step}/{max_steps} ({pct:.2f}%) | "
-                  f"loss {debiased_smooth_train_loss:.6f} {loss_accum.item():.4f} | "
+                  f"loss {debiased_smooth_train_loss:.16f} {loss_accum.item():.4f} | "
                   f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
                   f"time {total_time_str} | eta {eta_str}")
         if step % args.log_every == 0:
