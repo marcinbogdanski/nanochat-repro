@@ -26,6 +26,10 @@ class DataLoader:
         self.rank = rank
         self.world_size = world_size
 
+    def reset(self):
+        self.idx = 0
+        self.token_buffer = []
+
     def map_idx_to_pos(self, idx):
         idx_in_group = idx % self.group_size
         shard_num = idx // self.group_size

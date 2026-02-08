@@ -304,15 +304,16 @@ def main():
     total_ntok = 0
     total_time = 0.0
     smooth_dt = 0.0
-    smooth_train_loss = 0.0
+    smooth_train_loss = 0
     for step in range(max_steps+1):
 
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
         if step == 0 or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
             model.eval()
-            total_nats = torch.tensor(0.0, device=device)
-            total_bytes = torch.tensor(0.0, device=device)
+            total_nats = torch.tensor(0.0, device=device, dtype=torch.float32)
+            total_bytes = torch.tensor(0, device=device, dtype=torch.int64)
+            eval_loader.reset()
             with torch.no_grad():
                 for _ in range(eval_steps):
                     x, y = eval_loader.get_batch()
@@ -432,7 +433,7 @@ def main():
             y = y.to(device)
             with autocast_ctx:
                 _, loss = model(x, y, return_logits=False)
-            train_loss = loss.item()
+            train_loss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
@@ -465,7 +466,7 @@ def main():
         total_ntok += ntok
         tps = int(ntok / dt)
         pct = (step) / max_steps * 100
-        smooth_train_loss = 0.9 * smooth_train_loss + 0.1 * train_loss
+        smooth_train_loss = 0.9 * smooth_train_loss + (1 - 0.9) * train_loss.item()
         debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
