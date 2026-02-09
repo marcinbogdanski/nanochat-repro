@@ -1,6 +1,6 @@
 # My NanoChat
 
-Reproduction of Karpathy nanochat
+Reproduction of Karpathy nanochat. All credit to the Great Sensei!
 
 # Run
 

@@ -10,6 +10,15 @@ class GPTConfig:
         self.n_head = n_head
         self.n_embd = n_embd
 
+    def to_dict(self):
+        return {
+            'block_size': self.block_size,
+            'vocab_size': self.vocab_size,
+            'n_layer': self.n_layer,
+            'n_head': self.n_head,
+            'n_embd': self.n_embd,
+        }
+
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
@@ -163,10 +172,12 @@ class GPTModel(nn.Module):
 
         
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape
-        assert T <= self.config.block_size
-        
+        assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
+        assert idx.device == self.cos.device, "Input device does not match model device."
+        assert self.cos.dtype == torch.bfloat16, "Model buffers are not in bfloat16."
+
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
@@ -183,10 +194,14 @@ class GPTModel(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is None:
+            assert return_logits, "If targets is None, return_logits must be True."
             return logits, None
         else:
             B, T, C = logits.shape
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
-            loss = F.cross_entropy(logits_, targets_)
-            return logits, loss
+            loss = F.cross_entropy(logits_, targets_, reduction=reduction)
+            if return_logits:
+                return logits, loss
+            else:
+                return None, loss
