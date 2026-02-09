@@ -231,7 +231,7 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
     if torch.distributed.is_initialized():
         torch.distributed.all_reduce(results_tensor, op=torch.distributed.ReduceOp.SUM)
     
-    accuracy = results_tensor.sum().item() / len(data_list)
+    accuracy = results_tensor.mean().item()
     return accuracy
 
 
