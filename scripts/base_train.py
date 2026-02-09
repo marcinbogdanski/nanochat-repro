@@ -281,8 +281,8 @@ def main():
 
     train_loader = DataLoader(
         dataset=dataset,
-        start_at=0,
-        end_at=12736512,   # start of eval set, as per nanochat
+        first_shard=0,
+        last_shard=238,
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
@@ -297,8 +297,8 @@ def main():
         print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         dataset=dataset,
-        start_at=12736512,  # start of eval set, as per nanochat
-        end_at=None,   
+        first_shard=238,
+        last_shard=239,
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
