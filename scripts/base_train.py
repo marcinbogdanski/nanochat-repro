@@ -297,7 +297,7 @@ def main():
         print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         dataset=dataset,
-        first_shard=238,
+        first_shard=239,
         last_shard=239,
         batch_size=micro_batch,
         block_size=block_size,
