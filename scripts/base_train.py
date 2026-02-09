@@ -73,17 +73,24 @@ def main():
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # Model
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
+    parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
     # Optimization
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
     parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
+    parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
+    parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
+    parser.add_argument('--weight-decay', type=float, default=0.0, help='Weight decay for AdamW optimizer.')
+    parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
+    parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
+    parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
     parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
-    parser.add_argument('--core-metric-max-examples', type=int, default=500, help='Number of examples for core metric evaluation.')
+    parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation.')
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     parser.add_argument('--log-every', type=int, default=100, help='Log training metrics every N steps.')
@@ -111,7 +118,7 @@ def main():
         device_type = device
     
     if ddp_master:
-        print(f"{ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
+        print(f"Init: {ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
 
     # WandB Init
     if args.run is not None and ddp_master:
@@ -134,7 +141,7 @@ def main():
     # Model Hyperparameters
     vocab_size = tokenizer.n_vocab
     depth = args.depth
-    num_embed = depth * 64       # aspect ratio 64
+    num_embed = depth * args.aspect_ratio
     head_size = 128
     assert num_embed % head_size == 0
     num_heads = num_embed // head_size
@@ -194,10 +201,10 @@ def main():
     reference_batch_size = 2**19
     batch_ratio = total_batch_size / reference_batch_size
     batch_lr = batch_ratio ** 0.5
-    unembedding_lr = 0.004 * batch_lr
-    embedding_lr = 0.3 * batch_lr
-    matrix_lr = 0.02 * batch_lr
-    adam_betas = (0.8, 0.95)
+    unembedding_lr = args.unembedding_lr * batch_lr
+    embedding_lr = args.embedding_lr * batch_lr
+    matrix_lr = args.matrix_lr * batch_lr
+    adam_betas = (args.adam_beta1, args.adam_beta2)
 
     # LR Scheduler params
     max_steps = args.num_iterations
@@ -205,7 +212,7 @@ def main():
         num_model_params = sum(p.numel() for p in model.parameters())
         max_steps = (num_model_params * 8) // args.total_batch_size  # match Nanochat
         if ddp_master:
-            print(f"Calculated max_steps={max_steps} based on total_batch_size and model size.")
+            print(f"Init: Calculated max_steps={max_steps} based on total_batch_size and model size.")
     lr_warmup_ratio = 0.0
     lr_warmdown_ratio = 0.4
     lr_final_frac = 0.0
@@ -245,7 +252,7 @@ def main():
         adam_groups,
         betas=adam_betas,
         eps=1e-10,
-        weight_decay=0.0,
+        weight_decay=args.weight_decay,
         fused=True,
     )
     muon_groups = []
@@ -287,7 +294,7 @@ def main():
     assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
     if ddp_master:
-        print(f"Eval every {args.eval_every} steps, eval_steps={eval_steps}")
+        print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         dataset=dataset,
         start_at=12736512,  # start of eval set, as per nanochat
@@ -335,7 +342,7 @@ def main():
             if total_bytes > 0:
                 bpb = total_nats / (total_bytes * math.log(2))
             if ddp_master:
-                print(f"Step {step}: eval bpb: {bpb:.14f} nats: {total_nats:.1f} bytes: {total_bytes:.1f}")
+                print(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
@@ -350,14 +357,14 @@ def main():
             with autocast_ctx:
                 bundle_path = os.path.dirname(__file__)+"/../data/eval_bundle"
                 # Original model because shapes keep chaning
-                results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_examples)
+                results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
             core_metric = results['core_metric']
             accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
             if device.startswith('cuda'):
                 torch.cuda.synchronize() # wait for the GPU to finish work
             dt = (time.time() - ts)
             if ddp_master:
-                print(f"Step {step}: core metric: {core_metric:.14f} dt={dt:.2f}s")
+                print(f"CORE {step} | core metric {core_metric:.14f} | dt {dt:.2f}s")
             wandb_logger.log({
                 'step': step,
                 'core_metric': core_metric,
@@ -402,11 +409,15 @@ def main():
 
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
-            print("Saving final model...")
+            print("Saveing model...")
             models_path = os.path.dirname(__file__)+"/../models/"
             os.makedirs(models_path, exist_ok=True)
             model_data = model.state_dict()
             torch.save(model_data, models_path+f"model_{step:06d}.pt")
+            # Calculate MD5 sum of saved file by running os command
+            md5sum = os.popen(f"md5sum {models_path}model_{step:06d}.pt").read().split()[0]
+            print(f"Saved model_{step:06d}.pt with MD5 sum: {md5sum}")
+            
             metadata = {
                 'step': step,
                 'model_config': model_config.to_dict(),
@@ -488,9 +499,13 @@ def main():
             })
 
     if torch.cuda.is_available():
-        print(f"Alloc: {torch.cuda.memory_allocated() / (1024**2):.1f}MiB, "
-              f"Res: {torch.cuda.memory_reserved() / (1024**2):.1f}MiB, "
-              f"Max: {torch.cuda.max_memory_allocated() / (1024**2):.1f}MiB")
+        for r in range(ddp_world_size):
+            if r == ddp_rank:
+                print(f"Mem rank {ddp_rank}: {torch.cuda.memory_allocated() / (1024**2):.1f}MiB, "
+                    f"Res: {torch.cuda.memory_reserved() / (1024**2):.1f}MiB, "
+                    f"Max: {torch.cuda.max_memory_allocated() / (1024**2):.1f}MiB")
+            if ddp:
+                torch.distributed.barrier()
     wandb_logger.finish()
     if ddp:
         torch.distributed.destroy_process_group()
