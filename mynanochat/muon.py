@@ -28,6 +28,45 @@ def zeropower_via_newtonschulz(grad, steps=5):
         X = X.T
     return X
 
+# From https://arxiv.org/pdf/2505.16932
+polar_express_coeffs = [
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+]
+
+@torch.compile
+def zeropower_via_polar_express(grad, steps=5):
+    """Polar express orthogonalization
+
+    Details: https://arxiv.org/pdf/2505.16932
+    
+    Algorithm:
+        X = G / ||G||                        # scale so singular values < 1
+        repeat 5 times:
+            X = 1.5 * X - 0.5 * X @ X.T @ X
+        return X
+    """
+    assert grad.ndim == 2
+    X = grad.bfloat16()
+    if grad.size(0) > grad.size(1):
+        X = X.T
+
+    # Ensure spectral norm is at most 1 (with 2% safety factor)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
+
+    for i in range(steps):
+        a, b, c = polar_express_coeffs[i]
+        A = X @ X.mT
+        B = b * A + c * (A @ A)
+        X = a * X + B @ X
+
+    if grad.size(0) > grad.size(1):
+        X = X.T
+    return X
+
 
 class Muon(torch.optim.Optimizer):
     """Muon optimizer
@@ -70,7 +109,7 @@ class Muon(torch.optim.Optimizer):
                 vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
                 # Update
-                update = zeropower_via_newtonschulz(vv, group['ns_steps'])
+                update = zeropower_via_polar_express(vv, group['ns_steps'])
                 lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                 p.add_(update, alpha=-lr)
 
@@ -132,7 +171,7 @@ class DistMuon(torch.optim.Optimizer):
                     vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
                     # Update
-                    update = zeropower_via_newtonschulz(vv, group['ns_steps'])
+                    update = zeropower_via_polar_express(vv, group['ns_steps'])
                     lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                     p.add_(update, alpha=-lr)
                     input_tensor = p
