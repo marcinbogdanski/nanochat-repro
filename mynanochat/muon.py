@@ -67,6 +67,34 @@ def zeropower_via_polar_express(grad, steps=5):
         X = X.T
     return X
 
+@torch.compile
+def apply_variance_reduction(grad, momentum_buffer2, beta2):
+    """Similar to NorMuon per row variance reduction
+    
+    Details: https://arxiv.org/pdf/2510.05491
+    """
+    reduction_dim = 0 if momentum_buffer2.size(0) == 1 else 1
+    reduction_dim_size = grad.size(reduction_dim)
+
+    # Per row variance
+    s_squared_column = grad.float().square().mean(dim=reduction_dim, keepdim=True)
+
+    # Current norm
+    norm_current = s_squared_column.sum(dim=(0,1), keepdim=True) * reduction_dim_size
+    norm_current = norm_current.sqrt()
+
+    # EMA momentum_buffer2
+    momentum_buffer2.lerp_(s_squared_column.to(dtype=momentum_buffer2.dtype), 1-beta2)
+
+    # Compute scaling factor
+    step_size_solumn = momentum_buffer2.clamp_min(1e-10).rsqrt()
+    xx = (s_squared_column * reduction_dim_size) * step_size_solumn.float().square()
+    norm_new = xx.sum(dim=(0,1), keepdim=True).sqrt()
+
+    # Final scale
+    final_scale = step_size_solumn * (norm_current / norm_new.clamp_min(1e-10))
+    return grad.mul(final_scale.to(grad.dtype))
+
 
 class Muon(torch.optim.Optimizer):
     """Muon optimizer
@@ -79,8 +107,8 @@ class Muon(torch.optim.Optimizer):
         lr_adj = lr * sqrt(max(1, m/n))  # adjust for aspect ratio
         p = p - lr * U                   # update weights
     """
-    def __init__(self, params, lr=0.01, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.1):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay)
+    def __init__(self, params, lr=0.01, momentum=0.95, nesterov=True, ns_steps=5, beta2=0.95, weight_decay=0.1):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
         super().__init__(params, defaults)
     
     @torch.no_grad()
@@ -94,6 +122,11 @@ class Muon(torch.optim.Optimizer):
                     self.state[p] = {
                         'momentum_buffer': torch.zeros_like(p),
                     }
+                    if group['beta2'] is not None:
+                        if p.size(0) >= p.size(1):
+                            self.state[p]['momentum_buffer2'] = torch.zeros_like(p.grad[..., :1], dtype=torch.bfloat16)
+                        else:
+                            self.state[p]['momentum_buffer2'] = torch.zeros_like(p.grad[..., :1, :], dtype=torch.bfloat16)
 
                 # Update v
                 # v = B1 * v + (1-B) * g
@@ -106,6 +139,8 @@ class Muon(torch.optim.Optimizer):
 
                 # Update
                 update = zeropower_via_polar_express(vv, group['ns_steps'])
+                if group['beta2'] is not None:
+                    update = apply_variance_reduction(update, self.state[p]['momentum_buffer2'], group['beta2'])
                 lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                 if group['weight_decay'] != 0:
                     # Decoupled Cautious Weight Decay
@@ -118,8 +153,8 @@ class Muon(torch.optim.Optimizer):
 
 class DistMuon(torch.optim.Optimizer):
     """ZeRO-2 version of Muon optimizer"""
-    def __init__(self, params, lr=0.01, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.1):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay)
+    def __init__(self, params, lr=0.01, momentum=0.95, nesterov=True, ns_steps=5, beta2=0.95, weight_decay=0.1):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
         super().__init__(params, defaults)
     
     @torch.no_grad()
@@ -157,6 +192,11 @@ class DistMuon(torch.optim.Optimizer):
                         self.state[p] = {
                             'momentum_buffer': torch.zeros_like(p),
                         }
+                        if group['beta2'] is not None:
+                            if p.size(0) >= p.size(1):
+                                self.state[p]['momentum_buffer2'] = torch.zeros_like(p[..., :1], dtype=torch.bfloat16)
+                            else:
+                                self.state[p]['momentum_buffer2'] = torch.zeros_like(p[..., :1, :], dtype=torch.bfloat16)
 
                     # Update v
                     # v = B1 * v + (1-B) * g
@@ -169,6 +209,8 @@ class DistMuon(torch.optim.Optimizer):
 
                     # Update
                     update = zeropower_via_polar_express(vv, group['ns_steps'])
+                    if group['beta2'] is not None:
+                        update = apply_variance_reduction(update, self.state[p]['momentum_buffer2'], group['beta2'])
                     lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                     if group['weight_decay'] != 0:
                         # Decoupled Cautious Weight Decay
