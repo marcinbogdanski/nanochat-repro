@@ -104,17 +104,15 @@ class Muon(torch.optim.Optimizer):
                 # vv = B*v + (1-B)*g
                 vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
-                # Calc update
+                # Update
                 update = zeropower_via_polar_express(vv, group['ns_steps'])
-
-                # Decoupled Cautious Weight Decay
                 lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                 if group['weight_decay'] != 0:
+                    # Decoupled Cautious Weight Decay
                     mask = (update * p) >= 0
-                    p.mul_(1 - lr * group['weight_decay'] * mask)
-
-                # Final update
-                p.add_(update, alpha=-lr)
+                    p.sub_(lr * update + lr * group['weight_decay'] * p * mask)
+                else:
+                    p.sub_(lr * update)
 
 
 
@@ -169,17 +167,16 @@ class DistMuon(torch.optim.Optimizer):
                     # vv = B*v + (1-B)*g
                     vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
-                    # Calc update
+                    # Update
                     update = zeropower_via_polar_express(vv, group['ns_steps'])
-
-                    # Decoupled Cautious Weight Decay
                     lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                     if group['weight_decay'] != 0:
+                        # Decoupled Cautious Weight Decay
                         mask = (update * p) >= 0
-                        p.mul_(1 - lr * group['weight_decay'] * mask)
+                        p.sub_(lr * update + lr * group['weight_decay'] * p * mask)
+                    else:
+                        p.sub_(lr * update)
 
-                    # Final update
-                    p.add_(update, alpha=-lr)
                     input_tensor = p
                 else:
                     input_tensor = torch.zeros_like(group['zero_buffer'])
