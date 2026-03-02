@@ -81,7 +81,7 @@ def main():
     parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
     parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
-    parser.add_argument('--weight-decay', type=float, default=0.0, help='Weight decay for AdamW optimizer.')
+    parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
@@ -205,6 +205,7 @@ def main():
     embedding_lr = args.embedding_lr * batch_lr
     matrix_lr = args.matrix_lr * batch_lr
     adam_betas = (args.adam_beta1, args.adam_beta2)
+    scaled_weight_decay = args.weight_decay * (12 / args.depth)**2  # NanoChat wd tuned for 12 layers
 
     # LR Scheduler params
     max_steps = args.num_iterations
@@ -216,6 +217,10 @@ def main():
     lr_warmup_ratio = 0.0
     lr_warmdown_ratio = 0.4
     lr_final_frac = 0.0
+
+    # WD for Optimizers
+    def get_wd(step: int):
+        return scaled_weight_decay * (1.0 - step / max_steps)  # linearly decay to 0
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
@@ -252,7 +257,7 @@ def main():
         adam_groups,
         betas=adam_betas,
         eps=1e-10,
-        weight_decay=args.weight_decay,
+        weight_decay=0.0,
         fused=True,
     )
     muon_groups = []
@@ -266,7 +271,7 @@ def main():
         momentum=0.95,
         nesterov=True,
         ns_steps=5,
-        weight_decay=0.0,
+        weight_decay=scaled_weight_decay,
     )
     
     optimizers = [adamw_optimizer, muon_optimizer]
@@ -457,8 +462,10 @@ def main():
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
+        muon_weight_decay = get_wd(step)
         for group in muon_optimizer.param_groups:
             group['momentum'] = muon_momentum
+            group['weight_decay'] = muon_weight_decay
 
         # Optimizer Step
         for opt in optimizers:

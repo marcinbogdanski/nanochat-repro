@@ -95,10 +95,6 @@ class Muon(torch.optim.Optimizer):
                         'momentum_buffer': torch.zeros_like(p),
                     }
 
-                # Decoupled Weight Decay
-                if group['weight_decay'] != 0:
-                    p.mul_(1 - group['lr'] * group['weight_decay'])
-
                 # Update v
                 # v = B1 * v + (1-B) * g
                 v = self.state[p]['momentum_buffer']
@@ -108,9 +104,16 @@ class Muon(torch.optim.Optimizer):
                 # vv = B*v + (1-B)*g
                 vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
-                # Update
+                # Calc update
                 update = zeropower_via_polar_express(vv, group['ns_steps'])
+
+                # Decoupled Cautious Weight Decay
                 lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+                if group['weight_decay'] != 0:
+                    mask = (update * p) >= 0
+                    p.mul_(1 - lr * group['weight_decay'] * mask)
+
+                # Final update
                 p.add_(update, alpha=-lr)
 
 
@@ -157,10 +160,6 @@ class DistMuon(torch.optim.Optimizer):
                             'momentum_buffer': torch.zeros_like(p),
                         }
 
-                    # Decoupled Weight Decay
-                    if group['weight_decay'] != 0:
-                        p.mul_(1 - group['lr'] * group['weight_decay'])
-
                     # Update v
                     # v = B1 * v + (1-B) * g
                     v = self.state[p]['momentum_buffer']
@@ -170,9 +169,16 @@ class DistMuon(torch.optim.Optimizer):
                     # vv = B*v + (1-B)*g
                     vv = p.grad.lerp(v, group['momentum']) if group['nesterov'] else v
 
-                    # Update
+                    # Calc update
                     update = zeropower_via_polar_express(vv, group['ns_steps'])
+
+                    # Decoupled Cautious Weight Decay
                     lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+                    if group['weight_decay'] != 0:
+                        mask = (update * p) >= 0
+                        p.mul_(1 - lr * group['weight_decay'] * mask)
+
+                    # Final update
                     p.add_(update, alpha=-lr)
                     input_tensor = p
                 else:
