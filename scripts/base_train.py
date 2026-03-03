@@ -83,6 +83,7 @@ def main():
     parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
     parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
+    parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
@@ -196,7 +197,9 @@ def main():
     params_matrix = list(model.transformer.h.parameters())
     params_embedding = list(model.transformer.wte.parameters())
     params_lm_head = list(model.lm_head.parameters())
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head)
+    params_resid = [model.resid_lambdas]
+    params_x0 = [model.x0_lambdas]
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head) + len(params_resid) + len(params_x0)
 
     reference_batch_size = 2**19
     batch_ratio = total_batch_size / reference_batch_size
@@ -205,6 +208,7 @@ def main():
     embedding_lr = args.embedding_lr * batch_lr
     matrix_lr = args.matrix_lr * batch_lr
     adam_betas = (args.adam_beta1, args.adam_beta2)
+    scalar_lr = args.scalar_lr * batch_lr
     scaled_weight_decay = args.weight_decay * (12 / args.depth)**2  # NanoChat wd tuned for 12 layers
 
     # LR Scheduler params
@@ -246,10 +250,22 @@ def main():
         {
             'params': params_lm_head,
             'lr': unembedding_lr * dmodel_lr_scale,
+            'is_small': False,
         },
         {
             'params': params_embedding,
             'lr': embedding_lr * dmodel_lr_scale,
+            'is_small': False,
+        },
+        {
+            'params': params_resid,
+            'lr': scalar_lr * 0.01,
+            'is_small': True,
+        },
+        {
+            'params': params_x0,
+            'lr': scalar_lr,
+            'is_small': True,
         }
     ]
     adamw_factory = DistAdamW if ddp else torch.optim.AdamW

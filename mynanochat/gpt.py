@@ -129,6 +129,10 @@ class GPTModel(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        # Params for merging x0 across network and blending residual stream
+        self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
+        self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
             config.block_size * 10, config.n_embd // config.n_head
         )
@@ -150,6 +154,9 @@ class GPTModel(nn.Module):
         """
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+
+        torch.nn.init.constant_(self.resid_lambdas, 1.0)
+        torch.nn.init.constant_(self.x0_lambdas, 0.0)
 
         # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
         s = 3**0.5 * self.config.n_embd**-0.5
@@ -181,9 +188,11 @@ class GPTModel(nn.Module):
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
 
         # Transformer
-        for block in self.transformer.h:
+        for i, block in enumerate(self.transformer.h):
+            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             x = block(x, self.cos, self.sin)
         x = F.rms_norm(x, (x.size(-1),))
 

@@ -80,9 +80,16 @@ class DistAdamW(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 # Lazy Init
-                slice_width = p.size(0) // world_size
-                slice_start = rank * slice_width
-                slice_end = slice_start + slice_width
+                if group['is_small']:
+                    # Don't slice
+                    slice_width = p.size(0)
+                    slice_start = 0
+                    slice_end = p.size(0)
+                else:
+                    assert p.size(0) % world_size == 0
+                    slice_width = p.size(0) // world_size
+                    slice_start = rank * slice_width
+                    slice_end = slice_start + slice_width
 
                 if p not in self.state:
                     self.state[p] = {
@@ -100,7 +107,12 @@ class DistAdamW(torch.optim.Optimizer):
 
                 # Sync point 1
                 grad_slice = torch.empty_like(p.grad[:slice_width])
-                torch.distributed.reduce_scatter_tensor(grad_slice, p.grad, op=torch.distributed.ReduceOp.AVG)
+                if group['is_small']:
+                    # Don't slice
+                    torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG)
+                    grad_slice = p.grad
+                else:
+                    torch.distributed.reduce_scatter_tensor(grad_slice, p.grad, op=torch.distributed.ReduceOp.AVG)
 
                 # Update v
                 # v = B1 * v + (1-B1) * g
@@ -123,8 +135,11 @@ class DistAdamW(torch.optim.Optimizer):
                 bias2 = 1-group['betas'][1]**t
                 denom = (s / bias2).sqrt().add_(group['eps'])
                 update = v.div(denom).mul_(-group['lr'] / bias1)
-                p_slice = p[slice_start:slice_end] + update
 
                 # Sync point 2
-                torch.distributed.all_gather_into_tensor(p, p_slice)
+                if group['is_small']:
+                    p.add_(update)
+                else:
+                    p_slice = p[slice_start:slice_end] + update
+                    torch.distributed.all_gather_into_tensor(p, p_slice)                    
 
