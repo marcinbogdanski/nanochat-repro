@@ -85,7 +85,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         # k = k_rot.transpose(1, 2)  # B,nh,T,hs
         # v = v.transpose(1, 2)  # B,nh,T,hs
 
-        y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True)
+        y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, deterministic=True)
 
         # y = y.transpose(1, 2)  # B,T,nh,hs
         y = y.contiguous()
