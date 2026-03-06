@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Flash Attention 3, source wheel with 3090 support
+from kernels import get_kernel
+flash_attn = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd):
         self.block_size = block_size
@@ -77,13 +81,13 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
 
-        q = q_rot.transpose(1, 2)  # B,nh,T,hs
-        k = k_rot.transpose(1, 2)  # B,nh,T,hs
-        v = v.transpose(1, 2)  # B,nh,T,hs
+        # q = q_rot.transpose(1, 2)  # B,nh,T,hs
+        # k = k_rot.transpose(1, 2)  # B,nh,T,hs
+        # v = v.transpose(1, 2)  # B,nh,T,hs
 
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True)
 
-        y = y.transpose(1, 2)  # B,T,nh,hs
+        # y = y.transpose(1, 2)  # B,T,nh,hs
         y = y.contiguous()
         y = y.view(B,T,C)
 
