@@ -75,6 +75,7 @@ def main():
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
+    parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
     # Optimization
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
     parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
@@ -168,6 +169,9 @@ def main():
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
+        # if args.window_pattern != 'L':
+        #     print("In deterministinc mode window_pattern must be 'L' due to lack of support in upstream library")
+        #     return 1
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -185,6 +189,7 @@ def main():
         n_layer=depth,
         n_head=num_heads,
         n_embd=num_embed,
+        window_pattern=args.window_pattern,
     )
     model = GPTModel(model_config)
     model.to(device)
