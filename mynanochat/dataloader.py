@@ -66,7 +66,7 @@ class DataLoader:
             self.step_cursor()
         # Consume tokens
         tokens = self.token_buffer[:need_tokens]
-        self.token_buffer = self.token_buffer[need_tokens:]
+        self.token_buffer = self.token_buffer[self.batch_size * self.block_size:]
 
         x = torch.tensor([tokens[:-1]], dtype=torch.long)  # B=1,T
         y = torch.tensor([tokens[1:]], dtype=torch.long)   # B=1,T
