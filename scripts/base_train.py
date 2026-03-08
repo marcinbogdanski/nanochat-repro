@@ -349,7 +349,7 @@ def main():
             eval_loader.reset()
             with torch.no_grad():
                 for _ in range(eval_steps):
-                    x, y = eval_loader.get_batch()
+                    x, y = eval_loader.get_batch_bos()
                     assert (y >= 0).all()  # maskig with -1 not supported
                     x = x.to(device)
                     y = y.to(device)
@@ -465,7 +465,7 @@ def main():
         for opt in optimizers:
             opt.zero_grad()
         for _ in range(grad_accum):
-            x, y = train_loader.get_batch()
+            x, y = train_loader.get_batch_bos()
             x = x.to(device)
             y = y.to(device)
             with autocast_ctx:
