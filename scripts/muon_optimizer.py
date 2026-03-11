@@ -4,6 +4,7 @@ import time
 import torch
 import torch.nn as nn
 from mynanochat.muon import Muon
+from mynanochat.muon_karpathy import Muon as MuonKarpathy
 
 # Run like this
 # python -m scripts.muon_optimizer
@@ -28,14 +29,23 @@ def main():
         group_params = [torch.nn.parameter.Parameter(torch.randn(*shape, device='cuda')) for _ in range(count)]
         muon_groups.append({'params': group_params})
 
+    # My version
     muon_optimizer = Muon(
         muon_groups,
         lr=matrix_lr,
         momentum=0.95,
-        nesterov=True,
         ns_steps=5,
         weight_decay=weight_decay,
     )
+    # Karpathy version
+    # all_params = [p for group in muon_groups for p in group['params']]
+    # muon_optimizer = MuonKarpathy(
+    #     all_params,
+    #     lr=matrix_lr,
+    #     momentum=0.95,
+    #     ns_steps=5,
+    #     weight_decay=weight_decay,
+    # )
 
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
     print(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
@@ -53,10 +63,22 @@ def main():
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
     print(f"Memory allocated after warmup: {mem_alloc:.2f} GB")
 
+
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        record_shapes=True,
+    ) as prof:
+        torch.cuda.synchronize()
+        muon_optimizer.step()
+        torch.cuda.synchronize()
+        muon_optimizer.step()
+
     torch.cuda.synchronize()
     ts = time.time()
+
     for i in range(100):
         muon_optimizer.step()
+
     torch.cuda.synchronize()
 
     te = time.time()
@@ -64,6 +86,11 @@ def main():
 
     max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
     print(f"Max memory allocated during 100 steps: {max_mem:.2f} GB")
+
+    print("---")
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    print("---")
+    prof.export_chrome_trace("muon_optimizer_trace.json")
 
     # Print sum of all params to verify that they are changing
     total_sum = 0.0
