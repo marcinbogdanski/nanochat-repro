@@ -1,3 +1,5 @@
+import os
+os.environ['TORCH_LOGS'] = "graph_breaks,recompiles"
 import time
 import torch
 import torch.nn as nn
@@ -35,6 +37,9 @@ def main():
         weight_decay=weight_decay,
     )
 
+    mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+    print(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
+
     # Set grads
     for group in muon_groups:
         for p in group['params']:
@@ -44,13 +49,21 @@ def main():
     for i in range(5):
         muon_optimizer.step()
 
+    torch.cuda.reset_peak_memory_stats()
+    mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+    print(f"Memory allocated after warmup: {mem_alloc:.2f} GB")
+
     torch.cuda.synchronize()
     ts = time.time()
     for i in range(100):
         muon_optimizer.step()
     torch.cuda.synchronize()
+
     te = time.time()
     print(f"Time taken for 100 steps: {te - ts} seconds")
+
+    max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
+    print(f"Max memory allocated during 100 steps: {max_mem:.2f} GB")
 
     # Print sum of all params to verify that they are changing
     total_sum = 0.0
