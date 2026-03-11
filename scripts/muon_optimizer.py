@@ -13,6 +13,13 @@ from mynanochat.muon_karpathy import Muon as MuonKarpathy
 params_def_d4 = [((256, 256), 16), ((256, 1024), 4), ((1024, 256), 4)]
 params_def_d12 = [((768, 768), 48), ((768, 3072), 12), ((3072, 768), 12)]
 
+def schedule_lr_etc(muon_optimizer):
+    # Simulate Scheduler
+    for group in muon_optimizer.param_groups:
+        group['lr'] *= 0.99
+        group['momentum'] *= 0.99
+        group['weight_decay'] *= 0.99
+
 
 def main():
 
@@ -58,6 +65,7 @@ def main():
     # Warmup
     for i in range(5):
         muon_optimizer.step()
+        schedule_lr_etc(muon_optimizer)
 
     torch.cuda.reset_peak_memory_stats()
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
@@ -70,8 +78,10 @@ def main():
     ) as prof:
         torch.cuda.synchronize()
         muon_optimizer.step()
+        schedule_lr_etc(muon_optimizer)
         torch.cuda.synchronize()
         muon_optimizer.step()
+        schedule_lr_etc(muon_optimizer)
 
     torch.cuda.synchronize()
     ts = time.time()
@@ -79,6 +89,7 @@ def main():
     print(" -------- HOT ITER START --------")
     for i in range(100):
         muon_optimizer.step()
+        schedule_lr_etc(muon_optimizer)
     print(" -------- HOT ITER END --------")
 
     torch.cuda.synchronize()

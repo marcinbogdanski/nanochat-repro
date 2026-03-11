@@ -14,8 +14,8 @@ def fused_muon_step(
     params,
     grad,
     momentum_buffer,
-    momentum,
     momentum_buffer2,
+    momentum,
     lr,
     wd,
     beta2,
@@ -106,15 +106,22 @@ class Muon(torch.optim.Optimizer):
             # Update
             assert p.grad.ndim == 2
             lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+            beta2 = group['beta2'] if group['beta2'] is not None else 0.0
+
+            # 0-D CPU tesnsors to avoid re-compilation when values change
+            lr = torch.tensor(lr, device='cpu', dtype=torch.float32)
+            momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
+            wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
+            beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
             fused_muon_step(
                 params=stacked_params,
                 grad=stacked_grads,
                 momentum_buffer=self.state[p]['momentum_buffer'],
-                momentum=group['momentum'],
                 momentum_buffer2=self.state[p]['momentum_buffer2'],
                 lr=lr,
-                wd=group['weight_decay'],
-                beta2=group['beta2'] if group['beta2'] is not None else 0.0,
+                momentum=momentum,
+                wd=wd,
+                beta2=beta2,
                 steps=group['ns_steps']
             )
 
