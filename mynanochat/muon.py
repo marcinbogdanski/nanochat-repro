@@ -11,14 +11,14 @@ polar_express_coeffs = [
 
 @torch.compile
 def fused_muon_step(
-    grad,
     params,
+    grad,
     momentum_buffer,
     momentum,
     momentum_buffer2,
-    beta2,
     lr,
     wd,
+    beta2,
     steps=5
 ):
 
@@ -32,8 +32,8 @@ def fused_muon_step(
     # Polar express orthogonalization
     # https://arxiv.org/pdf/2505.16932
     X = grad.bfloat16()
-    if grad.size(0) > grad.size(1):
-        X = X.T
+    if grad.size(-2) > grad.size(-1):
+        X = X.mT
     # Ensure spectral norm is at most 1 (with 2% safety factor)
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
     for i in range(steps):
@@ -41,26 +41,26 @@ def fused_muon_step(
         A = X @ X.mT
         B = b * A + c * (A @ A)
         X = a * X + B @ X
-    if grad.size(0) > grad.size(1):
-        X = X.T
+    if grad.size(-2) > grad.size(-1):
+        X = X.mT
     grad = X
 
     ################################################
     # Similar to NorMuon per row variance reduction
     # https://arxiv.org/pdf/2510.05491
-    reduction_dim = 0 if momentum_buffer2.size(0) == 1 else 1
+    reduction_dim = -2 if momentum_buffer2.size(-2) == 1 else -1
     reduction_dim_size = grad.size(reduction_dim)
     # Per row variance
     s_squared_column = grad.float().square().mean(dim=reduction_dim, keepdim=True)
     # Current norm
-    norm_current = s_squared_column.sum(dim=(0,1), keepdim=True) * reduction_dim_size
+    norm_current = s_squared_column.sum(dim=(-2,-1), keepdim=True) * reduction_dim_size
     norm_current = norm_current.sqrt()
     # EMA momentum_buffer2
     momentum_buffer2.lerp_(s_squared_column.to(dtype=momentum_buffer2.dtype), 1-beta2)
     # Compute scaling factor
     step_size_solumn = momentum_buffer2.clamp_min(1e-10).rsqrt()
     xx = (s_squared_column * reduction_dim_size) * step_size_solumn.float().square()
-    norm_new = xx.sum(dim=(0,1), keepdim=True).sqrt()
+    norm_new = xx.sum(dim=(-2,-1), keepdim=True).sqrt()
     # Final scale
     final_scale = step_size_solumn * (norm_current / norm_new.clamp_min(1e-10))
     update = grad.mul(final_scale.to(grad.dtype))
@@ -89,31 +89,39 @@ class Muon(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                # Lazy Init
-                if p not in self.state:
-                    self.state[p] = {'momentum_buffer': torch.zeros_like(p)}
-                    if p.size(0) >= p.size(1):
-                        self.state[p]['momentum_buffer2'] = torch.zeros_like(p.grad[..., :1], dtype=torch.bfloat16)
-                    else:
-                        self.state[p]['momentum_buffer2'] = torch.zeros_like(p.grad[..., :1, :], dtype=torch.bfloat16)
+            assert all(p.grad is not None for p in group['params'])
 
-                # Update
-                assert p.grad.ndim == 2
-                lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
-                fused_muon_step(
-                    grad=p.grad,
-                    params=p,
-                    momentum_buffer=self.state[p]['momentum_buffer'],
-                    momentum=group['momentum'],
-                    momentum_buffer2=self.state[p]['momentum_buffer2'],
-                    beta2=group['beta2'] if group['beta2'] is not None else 0.0,
-                    lr=lr,
-                    wd=group['weight_decay'],
-                    steps=group['ns_steps']
-                )
+            # First dim is stack size, i.e. num params in group
+            p = group['params'][0]  # keep buffers i group['params'][0] for each param_group
+            stacked_params = torch.stack([p for p in group['params']])
+            stacked_grads = torch.stack([p.grad for p in group['params']])
+
+            if 'momentum_buffer' not in self.state[p]:
+                self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_params)
+                if p.size(0) >= p.size(1):
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1])
+                else:
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1, :])
+
+            # Update
+            assert p.grad.ndim == 2
+            lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+            fused_muon_step(
+                params=stacked_params,
+                grad=stacked_grads,
+                momentum_buffer=self.state[p]['momentum_buffer'],
+                momentum=group['momentum'],
+                momentum_buffer2=self.state[p]['momentum_buffer2'],
+                lr=lr,
+                wd=group['weight_decay'],
+                beta2=group['beta2'] if group['beta2'] is not None else 0.0,
+                steps=group['ns_steps']
+            )
+
+            # copy back params
+            torch._foreach_copy_(group["params"], list(stacked_params.unbind(0)))
+
+
 
 
 class DistMuon(torch.optim.Optimizer):

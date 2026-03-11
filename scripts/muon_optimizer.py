@@ -76,8 +76,10 @@ def main():
     torch.cuda.synchronize()
     ts = time.time()
 
+    print(" -------- HOT ITER START --------")
     for i in range(100):
         muon_optimizer.step()
+    print(" -------- HOT ITER END --------")
 
     torch.cuda.synchronize()
 
