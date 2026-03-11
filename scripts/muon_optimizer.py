@@ -1,17 +1,25 @@
 import os
-os.environ['TORCH_LOGS'] = "graph_breaks,recompiles"
+if os.environ.get("RANK", "0") == "0":  # set on rank 0 only
+    os.environ["TORCH_LOGS"] = "graph_breaks,recompiles"
+else:
+    os.environ.pop("TORCH_LOGS", None)
 import time
 import torch
 import torch.nn as nn
-from mynanochat.muon import Muon
+from mynanochat.muon import Muon, DistMuon
 from mynanochat.muon_karpathy import Muon as MuonKarpathy
 
 # Run like this
 # python -m scripts.muon_optimizer
-
+# CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=2 -m scripts.muon_optimizer
 
 params_def_d4 = [((256, 256), 16), ((256, 1024), 4), ((1024, 256), 4)]
 params_def_d12 = [((768, 768), 48), ((768, 3072), 12), ((3072, 768), 12)]
+
+def print0(s="",**kwargs):
+    ddp_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    if ddp_rank == 0:
+        print(s, **kwargs)
 
 def schedule_lr_etc(muon_optimizer):
     # Simulate Scheduler
@@ -22,6 +30,26 @@ def schedule_lr_etc(muon_optimizer):
 
 
 def main():
+    assert torch.cuda.is_available()
+
+    # DDP Init
+    ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
+    if ddp:
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        ddp_master = ddp_rank == 0  # is this a master?
+        device = f'cuda:{ddp_local_rank}'
+        assert torch.cuda.is_available()
+        torch.cuda.set_device(device)
+        # device_id= to suppress barrier warning
+        torch.distributed.init_process_group(backend='nccl', device_id=ddp_local_rank)
+    else:
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        ddp_master = True
+        device = 'cuda'
 
     torch.manual_seed(42)
     if torch.cuda.is_available():
@@ -33,11 +61,14 @@ def main():
 
     muon_groups = []
     for shape, count in params_def_d12:
-        group_params = [torch.nn.parameter.Parameter(torch.randn(*shape, device='cuda')) for _ in range(count)]
+        group_params = [
+            torch.nn.parameter.Parameter(torch.randn(*shape, device=device)) for _ in range(count)
+        ]
         muon_groups.append({'params': group_params})
 
     # My version
-    muon_optimizer = Muon(
+    muon_factory = DistMuon if ddp else Muon
+    muon_optimizer = muon_factory(
         muon_groups,
         lr=matrix_lr,
         momentum=0.95,
@@ -55,7 +86,7 @@ def main():
     # )
 
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
-    print(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
+    print0(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
 
     # Set grads
     for group in muon_groups:
@@ -69,7 +100,7 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
-    print(f"Memory allocated after warmup: {mem_alloc:.2f} GB")
+    print0(f"Memory allocated after warmup: {mem_alloc:.2f} GB")
 
 
     with torch.profiler.profile(
@@ -86,34 +117,36 @@ def main():
     torch.cuda.synchronize()
     ts = time.time()
 
-    print(" -------- HOT ITER START --------")
+    print0(" -------- HOT ITER START --------")
     for i in range(100):
         muon_optimizer.step()
         schedule_lr_etc(muon_optimizer)
-    print(" -------- HOT ITER END --------")
+    print0(" -------- HOT ITER END --------")
 
     torch.cuda.synchronize()
 
     te = time.time()
-    print(f"Time taken for 100 steps: {te - ts} seconds")
+    print0(f"Time taken for 100 steps: {te - ts} seconds")
 
     max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
-    print(f"Max memory allocated during 100 steps: {max_mem:.2f} GB")
+    print0(f"Max memory allocated during 100 steps: {max_mem:.2f} GB")
 
-    print("---")
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    print("---")
-    prof.export_chrome_trace("muon_optimizer_trace.json")
+    print0("---")
+    print0(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    print0("---")
+    prof.export_chrome_trace(f"muon_optimizer_trace_rank{ddp_rank}.json")
 
     # Print sum of all params to verify that they are changing
     total_sum = 0.0
     for group in muon_groups:
         for p in group['params']:
             total_sum += p.sum().item()
-    print(f"Total sum of all params: {total_sum}")
+    print0(f"Total sum of all params: {total_sum}")
 
-    print("Done")
+    print0("Done")
 
+    if ddp:
+        torch.distributed.destroy_process_group()
 
     
 if __name__ == "__main__":
