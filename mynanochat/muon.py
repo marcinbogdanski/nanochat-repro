@@ -56,6 +56,7 @@ def fused_muon_step(
     norm_current = s_squared_column.sum(dim=(-2,-1), keepdim=True) * reduction_dim_size
     norm_current = norm_current.sqrt()
     # EMA momentum_buffer2
+    beta2 = beta2.to(grad.dtype)
     momentum_buffer2.lerp_(s_squared_column.to(dtype=momentum_buffer2.dtype), 1-beta2)
     # Compute scaling factor
     step_size_solumn = momentum_buffer2.clamp_min(1e-10).rsqrt()
@@ -67,6 +68,8 @@ def fused_muon_step(
 
     ##################################
     # Decoupled Cautious Weight Decay
+    lr = lr.to(update.dtype)
+    wd = wd.to(update.dtype)
     mask = (update * params) >= 0
     params.sub_(lr * update + lr * wd * params * mask)
 
