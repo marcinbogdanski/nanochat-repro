@@ -2,13 +2,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Flash Attention 3, source wheel with 3090 support
+from kernels import get_kernel
+flash_attn = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+
 class GPTConfig:
-    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd):
+    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern):
         self.block_size = block_size
         self.vocab_size = vocab_size
         self.n_layer = n_layer
         self.n_head = n_head
         self.n_embd = n_embd
+        self.window_pattern = window_pattern
 
     def to_dict(self):
         return {
@@ -17,6 +22,7 @@ class GPTConfig:
             'n_layer': self.n_layer,
             'n_head': self.n_head,
             'n_embd': self.n_embd,
+            'window_pattern': self.window_pattern,
         }
 
 
@@ -61,7 +67,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, window_size):
         B, T, C = x.size()
         q = self.c_q(x)    # B, T, nh*hs
         k = self.c_k(x)    # B, T, nh*hs
@@ -77,13 +83,13 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
 
-        q = q_rot.transpose(1, 2)  # B,nh,T,hs
-        k = k_rot.transpose(1, 2)  # B,nh,T,hs
-        v = v.transpose(1, 2)  # B,nh,T,hs
+        # q = q_rot.transpose(1, 2)  # B,nh,T,hs
+        # k = k_rot.transpose(1, 2)  # B,nh,T,hs
+        # v = v.transpose(1, 2)  # B,nh,T,hs
 
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size, deterministic=True)
 
-        y = y.transpose(1, 2)  # B,T,nh,hs
+        # y = y.transpose(1, 2)  # B,T,nh,hs
         y = y.contiguous()
         y = y.view(B,T,C)
 
@@ -112,8 +118,8 @@ class Block(nn.Module):
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
 
-    def forward(self, x, cos, sin):
-        x = x + self.attn(self._norm(x), cos, sin)        # B,T,E pre-norm
+    def forward(self, x, cos, sin, window_size):
+        x = x + self.attn(self._norm(x), cos, sin, window_size)        # B,T,E pre-norm
         x = x + self.mlp(self._norm(x))
         return x
 
@@ -129,11 +135,30 @@ class GPTModel(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        # Params for merging x0 across network and blending residual stream
+        self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
+        self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
             config.block_size * 10, config.n_embd // config.n_head
         )
         self.register_buffer("cos", cos, persistent=False)  # don't save to checkpoint
         self.register_buffer("sin", sin, persistent=False)
+
+        # Pre-calculate window size tuples (context_length, 0) for each layer
+        self.window_sizes = self._calc_window_sizes(self.config)
+
+    def _calc_window_sizes(self, config):
+        chat_to_window_type = {
+            'L': (config.block_size, 0),
+            'S': (config.block_size//2, 0),
+        }
+        window_sizes = []
+        for layer_idx in range(config.n_layer):
+            window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
+            window_sizes.append(chat_to_window_type[window_type])
+        window_sizes[-1] = (config.block_size, 0)  # Last layer always full attention
+        return window_sizes
 
     def init_weights(self):
         """Initialization following NanoChat
@@ -150,6 +175,9 @@ class GPTModel(nn.Module):
         """
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+
+        torch.nn.init.constant_(self.resid_lambdas, 1.0)
+        torch.nn.init.constant_(self.x0_lambdas, 0.0)
 
         # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
         s = 3**0.5 * self.config.n_embd**-0.5
@@ -170,7 +198,7 @@ class GPTModel(nn.Module):
         if self.transformer.wte.weight.device.type == "cuda":
             self.transformer.wte.to(dtype=torch.bfloat16)
 
-        
+
 
     def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape
@@ -181,10 +209,12 @@ class GPTModel(nn.Module):
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
 
         # Transformer
-        for block in self.transformer.h:
-            x = block(x, self.cos, self.sin)
+        for i, block in enumerate(self.transformer.h):
+            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            x = block(x, self.cos, self.sin, self.window_sizes[i])
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits

@@ -12,6 +12,7 @@ dependencies = [
   "datasets==4.4.2",
   "rustbpe==0.1.0",
   "wandb==0.24.2",
+  "kernels==0.11.7",
 ]
 
 # Don't allow non-wheel installs (no copile from source)

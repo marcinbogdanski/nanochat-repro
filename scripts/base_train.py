@@ -75,14 +75,16 @@ def main():
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
     parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
+    parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
     # Optimization
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
     parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
     parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
-    parser.add_argument('--weight-decay', type=float, default=0.0, help='Weight decay for AdamW optimizer.')
+    parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
+    parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
@@ -167,6 +169,9 @@ def main():
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
+        # if args.window_pattern != 'L':
+        #     print("In deterministinc mode window_pattern must be 'L' due to lack of support in upstream library")
+        #     return 1
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -184,6 +189,7 @@ def main():
         n_layer=depth,
         n_head=num_heads,
         n_embd=num_embed,
+        window_pattern=args.window_pattern,
     )
     model = GPTModel(model_config)
     model.to(device)
@@ -196,7 +202,9 @@ def main():
     params_matrix = list(model.transformer.h.parameters())
     params_embedding = list(model.transformer.wte.parameters())
     params_lm_head = list(model.lm_head.parameters())
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head)
+    params_resid = [model.resid_lambdas]
+    params_x0 = [model.x0_lambdas]
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head) + len(params_resid) + len(params_x0)
 
     reference_batch_size = 2**19
     batch_ratio = total_batch_size / reference_batch_size
@@ -205,6 +213,8 @@ def main():
     embedding_lr = args.embedding_lr * batch_lr
     matrix_lr = args.matrix_lr * batch_lr
     adam_betas = (args.adam_beta1, args.adam_beta2)
+    scalar_lr = args.scalar_lr * batch_lr
+    scaled_weight_decay = args.weight_decay * (12 / args.depth)**2  # NanoChat wd tuned for 12 layers
 
     # LR Scheduler params
     max_steps = args.num_iterations
@@ -216,6 +226,10 @@ def main():
     lr_warmup_ratio = 0.0
     lr_warmdown_ratio = 0.4
     lr_final_frac = 0.0
+
+    # WD for Optimizers
+    def get_wd(step: int):
+        return scaled_weight_decay * (1.0 - step / max_steps)  # linearly decay to 0
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
@@ -241,10 +255,22 @@ def main():
         {
             'params': params_lm_head,
             'lr': unembedding_lr * dmodel_lr_scale,
+            'is_small': False,
         },
         {
             'params': params_embedding,
             'lr': embedding_lr * dmodel_lr_scale,
+            'is_small': False,
+        },
+        {
+            'params': params_resid,
+            'lr': scalar_lr * 0.01,
+            'is_small': True,
+        },
+        {
+            'params': params_x0,
+            'lr': scalar_lr,
+            'is_small': True,
         }
     ]
     adamw_factory = DistAdamW if ddp else torch.optim.AdamW
@@ -252,7 +278,7 @@ def main():
         adam_groups,
         betas=adam_betas,
         eps=1e-10,
-        weight_decay=args.weight_decay,
+        weight_decay=0.0,
         fused=True,
     )
     muon_groups = []
@@ -266,7 +292,7 @@ def main():
         momentum=0.95,
         nesterov=True,
         ns_steps=5,
-        weight_decay=0.0,
+        weight_decay=scaled_weight_decay,
     )
     
     optimizers = [adamw_optimizer, muon_optimizer]
@@ -323,7 +349,7 @@ def main():
             eval_loader.reset()
             with torch.no_grad():
                 for _ in range(eval_steps):
-                    x, y = eval_loader.get_batch()
+                    x, y = eval_loader.get_batch_bos()
                     assert (y >= 0).all()  # maskig with -1 not supported
                     x = x.to(device)
                     y = y.to(device)
@@ -439,7 +465,7 @@ def main():
         for opt in optimizers:
             opt.zero_grad()
         for _ in range(grad_accum):
-            x, y = train_loader.get_batch()
+            x, y = train_loader.get_batch_bos()
             x = x.to(device)
             y = y.to(device)
             with autocast_ctx:
@@ -457,8 +483,10 @@ def main():
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
+        muon_weight_decay = get_wd(step)
         for group in muon_optimizer.param_groups:
             group['momentum'] = muon_momentum
+            group['weight_decay'] = muon_weight_decay
 
         # Optimizer Step
         for opt in optimizers:

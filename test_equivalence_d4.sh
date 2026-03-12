@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=4 -m scripts.base_train \
+CUDA_VISIBLE_DEVICES=2,3 CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=2 -m scripts.base_train \
   -- --depth=4 --device-batch-size=8 \
-  --eval-every=10 --core-metric-every=10 --sample-every=10 --save-every=10 --num-iterations=100 \
-  --log-every=1 --deterministic
+  --eval-every=10 --eval-tokens=524288 --core-metric-every=0 --sample-every=0 --save-every=10 --num-iterations=10 \
+  --log-every=1 --deterministic --window-pattern="L"
 #  --run=d4m
 
 # To check checkpoints:
