@@ -7,8 +7,8 @@ import time
 import torch
 import torch.nn as nn
 from mynanochat.muon import Muon, DistMuon
-from mynanochat.muon_karpathy import Muon as MuonKarpathy
-from mynanochat.muon_karpathy import DistMuon as DistMuonKarpathy
+# from mynanochat.muon_karpathy import Muon as MuonKarpathy
+# from mynanochat.muon_karpathy import DistMuon as DistMuonKarpathy
 
 # Run like this
 # python -m scripts.muon_optimizer
@@ -38,8 +38,6 @@ def main():
     if ddp:
         ddp_rank = int(os.environ['RANK'])
         ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        ddp_master = ddp_rank == 0  # is this a master?
         device = f'cuda:{ddp_local_rank}'
         assert torch.cuda.is_available()
         torch.cuda.set_device(device)
@@ -48,8 +46,6 @@ def main():
     else:
         ddp_rank = 0
         ddp_local_rank = 0
-        ddp_world_size = 1
-        ddp_master = True
         device = 'cuda'
 
     torch.manual_seed(42)
