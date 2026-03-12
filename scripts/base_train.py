@@ -285,12 +285,12 @@ def main():
     for shape in sorted({p.shape for p in params_matrix}):
         group_params = [p for p in params_matrix if p.shape == shape]
         muon_groups.append({'params': group_params})
+
     muon_factory = DistMuon if ddp else Muon
     muon_optimizer = muon_factory(
         muon_groups,
         lr=matrix_lr,
         momentum=0.95,
-        nesterov=True,
         ns_steps=5,
         weight_decay=scaled_weight_decay,
     )
