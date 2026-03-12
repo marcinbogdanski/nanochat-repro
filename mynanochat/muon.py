@@ -143,20 +143,22 @@ class DistMuon(torch.optim.Optimizer):
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
 
-        # Sync point 1
+        temp_buffers = {}
+
         # This will reduce scatter grads, such that each rank gets full averaged grad for owned param
-        for group in self.param_groups:
+        for i, group in enumerate(self.param_groups):
             p = group['params'][0]  # shape, dtype, device
+            num_params = len(group['params'])
+            padded_num_params = ((len(group['params']) + world_size - 1) // world_size) * world_size
+            num_params_per_rank = padded_num_params // world_size
+
             if len(group['params']) % world_size != 0:
                 group['zero_buffer'] = torch.zeros_like(group['params'][0].grad)
 
-            num_params = len(group['params'])
-            padded_num_params = ((num_params + world_size - 1) // world_size) * world_size
             padded_grads = [p.grad for p in group['params']]
             if len(group['params']) % world_size != 0:
                 padded_grads.extend([group['zero_buffer']] * (padded_num_params-len(group['params'])))
             stacked_all_grads = torch.stack(padded_grads)
-            num_params_per_rank = padded_num_params // world_size
             stacked_grads = torch.empty(num_params_per_rank, *p.shape, dtype=p.dtype, device=p.device)
 
             torch.distributed.reduce_scatter_tensor(
@@ -165,7 +167,21 @@ class DistMuon(torch.optim.Optimizer):
                 op=torch.distributed.ReduceOp.AVG
             )
 
-            # TODO: break into two loops here later
+            # Temp buffers
+            temp_buffers[i] = {
+                'stacked_grads': stacked_grads,
+                'stacked_all_grads': stacked_all_grads
+            }
+
+        for i, group in enumerate(self.param_groups):
+            p = group['params'][0]  # shape, dtype, device
+            num_params = len(group['params'])
+            padded_num_params = ((len(group['params']) + world_size - 1) // world_size) * world_size
+            num_params_per_rank = padded_num_params // world_size
+
+            # Get buffers
+            stacked_grads = temp_buffers[i]['stacked_grads']
+            stacked_all_grads = temp_buffers[i]['stacked_all_grads']
 
             # Sync point 2
             idx_start = num_params_per_rank * rank
@@ -178,9 +194,9 @@ class DistMuon(torch.optim.Optimizer):
             if 'momentum_buffer' not in self.state[p]:
                 self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_params)
                 if p.size(0) >= p.size(1):
-                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1])
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_params[..., :1])
                 else:
-                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1, :])
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_params[..., :1, :])
 
             num_params_this_rank = min(num_params_per_rank, max(0, num_params - idx_start))
             if num_params_this_rank > 0:
