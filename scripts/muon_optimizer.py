@@ -68,24 +68,24 @@ def main():
         muon_groups.append({'params': group_params})
 
     # My version
-    # muon_factory = DistMuon if ddp else Muon
-    # muon_optimizer = muon_factory(
-    #     muon_groups,
-    #     lr=matrix_lr,
-    #     momentum=0.95,
-    #     ns_steps=5,
-    #     weight_decay=weight_decay,
-    # )
-    # Karpathy version
-    muon_factory = DistMuonKarpathy if ddp else MuonKarpathy
-    all_params = [p for group in muon_groups for p in group['params']]
+    muon_factory = DistMuon if ddp else Muon
     muon_optimizer = muon_factory(
-        all_params,
+        muon_groups,
         lr=matrix_lr,
         momentum=0.95,
         ns_steps=5,
         weight_decay=weight_decay,
     )
+    # Karpathy version
+    # muon_factory = DistMuonKarpathy if ddp else MuonKarpathy
+    # all_params = [p for group in muon_groups for p in group['params']]
+    # muon_optimizer = muon_factory(
+    #     all_params,
+    #     lr=matrix_lr,
+    #     momentum=0.95,
+    #     ns_steps=5,
+    #     weight_decay=weight_decay,
+    # )
 
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
     print0(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
@@ -144,7 +144,7 @@ def main():
     print0("---")
     print0(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     print0("---")
-    prof.export_chrome_trace(f"muon_optimizer_trace_rank{ddp_rank}_k.json")
+    prof.export_chrome_trace(f"muon_optimizer_trace_rank{ddp_rank}.json")
 
     # Print sum of all params to verify that they are changing
     total_sum = 0.0
