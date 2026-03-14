@@ -1,5 +1,44 @@
 import torch
 
+def fused_adamw_step(
+    params,
+    grad,
+    exp_avg,
+    exp_avg_sq,
+    step,
+    lr,
+    beta1,
+    beta2,
+    eps,
+    wd,
+):
+    # Weight Decay
+    # p = p - lr * weight_decay * p
+    params.mul_(1 - lr * wd)
+
+    # Update v
+    # v = B1 * v + (1-B1) * g
+    v = exp_avg
+    v.mul_(beta1).add_(grad, alpha=1-beta1)
+
+    # Update s
+    # s = B2 * s + (1-B2) * g**2
+    s = exp_avg_sq
+    s.mul_(beta2)
+    s.addcmul_(grad, grad, value=1-beta2)
+
+    # Correction
+    # Somewhat convoluted way to do:
+    # v_corrected = v / (1-B1**t)
+    # s_corrected = s / (1-B2**t)
+    # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
+    bias1 = 1-beta1**step
+    bias2 = 1-beta2**step
+    denom = (s / bias2).sqrt().add_(eps)
+    update = v.div(denom).mul_(lr / bias1)
+    params.data.add_(update, alpha=-1.0)
+
+
 class AdamW(torch.optim.Optimizer):
     """AdamW optimizer
     
@@ -20,47 +59,42 @@ class AdamW(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
+            for params in group['params']:
+                if params.grad is None:
                     continue
                 # Lazy Init
-                if p not in self.state:
-                    self.state[p] = {
-                        'step': torch.tensor(0, dtype=torch.int64, device=p.device),
-                        'exp_avg': torch.zeros_like(p),
-                        'exp_avg_sq': torch.zeros_like(p),
+                if params not in self.state:
+                    self.state[params] = {
+                        'step': torch.tensor(0, dtype=torch.int64, device=params.device),
+                        'exp_avg': torch.zeros_like(params),
+                        'exp_avg_sq': torch.zeros_like(params),
                     }
-                self.state[p]['step'] += 1
+                self.state[params]['step'] += 1
 
-                # Weight Decay
-                grad = p.grad
-                if group['weight_decay'] != 0.0:
-                    # AdamW
-                    # p = p - lr * weight_decay * p
-                    p.mul_(1 - group['lr'] * group['weight_decay'])
+                grad = params.grad
+                exp_avg = self.state[params]['exp_avg']
+                exp_avg_sq = self.state[params]['exp_avg_sq']                
 
-                # Update v
-                # v = B1 * v + (1-B1) * g
-                v = self.state[p]['exp_avg']
-                v.mul_(group['betas'][0]).add_(grad, alpha=1-group['betas'][0])
+                lr = group['lr']
+                wd = group['weight_decay']
+                beta1 = group['betas'][0]
+                beta2 = group['betas'][1]
+                eps = group['eps']
+                step = self.state[params]['step']
 
-                # Update s
-                # s = B2 * s + (1-B2) * g**2
-                s = self.state[p]['exp_avg_sq']
-                s.mul_(group['betas'][1])
-                s.addcmul_(grad, grad, value=1-group['betas'][1])
+                fused_adamw_step(
+                    params=params,
+                    grad=grad,
+                    exp_avg=exp_avg,
+                    exp_avg_sq=exp_avg_sq,
+                    step=step,
+                    lr=lr,
+                    beta1=beta1,
+                    beta2=beta2,
+                    eps=eps,
+                    wd=wd,
+                )
 
-                # Correction
-                # Somewhat convoluted way to do:
-                # v_corrected = v / (1-B1**t)
-                # s_corrected = s / (1-B2**t)
-                # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
-                t = self.state[p]['step']
-                bias1 = 1-group['betas'][0]**t
-                bias2 = 1-group['betas'][1]**t
-                denom = (s / bias2).sqrt().add_(group['eps'])
-                update = v.div(denom).mul_(group['lr'] / bias1)
-                p.data.add_(update, alpha=-1.0)
 
 
 
