@@ -1,5 +1,42 @@
 import torch
 
+@torch.compile(dynamic=False, fullgraph=True)
+def fused_adamw_step(
+    params,
+    grad,
+    exp_avg,
+    exp_avg_sq,
+    step,
+    lr,
+    beta1,
+    beta2,
+    eps,
+    wd,
+):
+    # Weight Decay
+    # p = p - lr * weight_decay * p
+    params.mul_(1 - lr * wd)
+
+    # Update v
+    # v = B1 * v + (1-B1) * g
+    exp_avg.lerp_(grad, 1-beta1)
+
+    # Update s
+    # s = B2 * s + (1-B2) * g**2
+    exp_avg_sq.lerp_(grad.square(), 1-beta2)
+    
+    # Correction
+    # Somewhat convoluted way to do:
+    # v_corrected = v / (1-B1**t)
+    # s_corrected = s / (1-B2**t)
+    # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
+    bias1 = 1-beta1**step
+    bias2 = 1-beta2**step
+    denom = (exp_avg_sq / bias2).sqrt().add_(eps)
+    update = exp_avg.div(denom).mul_(lr / bias1)
+    params.add_(update, alpha=-1.0)
+
+
 class AdamW(torch.optim.Optimizer):
     """AdamW optimizer
     
@@ -20,47 +57,42 @@ class AdamW(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
+            for params in group['params']:
+                if params.grad is None:
                     continue
                 # Lazy Init
-                if p not in self.state:
-                    self.state[p] = {
-                        'step': torch.tensor(0, dtype=torch.int64, device=p.device),
-                        'exp_avg': torch.zeros_like(p),
-                        'exp_avg_sq': torch.zeros_like(p),
+                if params not in self.state:
+                    self.state[params] = {
+                        'step': 0,
+                        'exp_avg': torch.zeros_like(params),
+                        'exp_avg_sq': torch.zeros_like(params),
                     }
-                self.state[p]['step'] += 1
+                self.state[params]['step'] += 1
 
-                # Weight Decay
-                grad = p.grad
-                if group['weight_decay'] != 0.0:
-                    # AdamW
-                    # p = p - lr * weight_decay * p
-                    p.mul_(1 - group['lr'] * group['weight_decay'])
+                grad = params.grad
+                exp_avg = self.state[params]['exp_avg']
+                exp_avg_sq = self.state[params]['exp_avg_sq']
 
-                # Update v
-                # v = B1 * v + (1-B1) * g
-                v = self.state[p]['exp_avg']
-                v.mul_(group['betas'][0]).add_(grad, alpha=1-group['betas'][0])
+                step = torch.tensor(self.state[params]['step'], device='cpu', dtype=torch.float32)
+                lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
+                beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
+                beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
+                eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
+                wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
-                # Update s
-                # s = B2 * s + (1-B2) * g**2
-                s = self.state[p]['exp_avg_sq']
-                s.mul_(group['betas'][1])
-                s.addcmul_(grad, grad, value=1-group['betas'][1])
+                fused_adamw_step(
+                    params=params,
+                    grad=grad,
+                    exp_avg=exp_avg,
+                    exp_avg_sq=exp_avg_sq,
+                    step=step,
+                    lr=lr,
+                    beta1=beta1,
+                    beta2=beta2,
+                    eps=eps,
+                    wd=wd,
+                )
 
-                # Correction
-                # Somewhat convoluted way to do:
-                # v_corrected = v / (1-B1**t)
-                # s_corrected = s / (1-B2**t)
-                # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
-                t = self.state[p]['step']
-                bias1 = 1-group['betas'][0]**t
-                bias2 = 1-group['betas'][1]**t
-                denom = (s / bias2).sqrt().add_(group['eps'])
-                update = v.div(denom).mul_(group['lr'] / bias1)
-                p.data.add_(update, alpha=-1.0)
 
 
 
@@ -75,71 +107,93 @@ class DistAdamW(torch.optim.Optimizer):
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
 
-        for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
+        temp_buffers = {}
+
+        for i, group in enumerate(self.param_groups):
+            for j, params in enumerate(group['params']):
+                if params.grad is None:
                     continue
                 # Lazy Init
                 if group['is_small']:
                     # Don't slice
-                    slice_width = p.size(0)
+                    slice_width = params.size(0)
                     slice_start = 0
-                    slice_end = p.size(0)
+                    slice_end = params.size(0)
                 else:
-                    assert p.size(0) % world_size == 0
-                    slice_width = p.size(0) // world_size
+                    assert params.size(0) % world_size == 0
+                    slice_width = params.size(0) // world_size
                     slice_start = rank * slice_width
                     slice_end = slice_start + slice_width
 
-                if p not in self.state:
-                    self.state[p] = {
-                        'step': torch.tensor(0, dtype=torch.int64, device=p.device),
-                        'exp_avg': torch.zeros_like(p[:slice_width]),
-                        'exp_avg_sq': torch.zeros_like(p[:slice_width]),
+                if params not in self.state:
+                    self.state[params] = {
+                        'step': 0,
+                        'exp_avg': torch.zeros_like(params[:slice_width]),
+                        'exp_avg_sq': torch.zeros_like(params[:slice_width]),
                     }
-                self.state[p]['step'] += 1
-
-                # Weight Decay
-                if group['weight_decay'] != 0.0:
-                    # AdamW
-                    # p = p - lr * weight_decay * p
-                    p.mul_(1 - group['lr'] * group['weight_decay'])
+                self.state[params]['step'] += 1
 
                 # Sync point 1
-                grad_slice = torch.empty_like(p.grad[:slice_width])
+                grad_slice = torch.empty_like(params.grad[:slice_width])
                 if group['is_small']:
                     # Don't slice
-                    torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG)
-                    grad_slice = p.grad
+                    future = torch.distributed.all_reduce(
+                        params.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                    ).get_future()
+                    grad_slice = params.grad
+                    params_slice = params
                 else:
-                    torch.distributed.reduce_scatter_tensor(grad_slice, p.grad, op=torch.distributed.ReduceOp.AVG)
+                    future = torch.distributed.reduce_scatter_tensor(
+                        grad_slice, params.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                    ).get_future()
+                    params_slice = params[slice_start:slice_end]
 
-                # Update v
-                # v = B1 * v + (1-B1) * g
-                v = self.state[p]['exp_avg']
-                v.mul_(group['betas'][0]).add_(grad_slice, alpha=1-group['betas'][0])
+                temp_buffers[(i,j)] = {
+                    'future': future,
+                    'grad_slice': grad_slice,
+                    'params_slice': params_slice
+                }
 
-                # Update s
-                # s = B2 * s + (1-B2) * g**2
-                s = self.state[p]['exp_avg_sq']
-                s.mul_(group['betas'][1])
-                s.addcmul_(grad_slice, grad_slice, value=1-group['betas'][1])
+        for i, group in enumerate(self.param_groups):
+            for j, params in enumerate(group['params']):
+                temp_buffers[(i,j)].pop('future').wait()
+                grad_slice = temp_buffers[(i,j)].pop('grad_slice')
+                params_slice = temp_buffers[(i,j)].pop('params_slice')
 
-                # Correction
-                # Somewhat convoluted way to do:
-                # v_corrected = v / (1-B1**t)
-                # s_corrected = s / (1-B2**t)
-                # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
-                t = self.state[p]['step']
-                bias1 = 1-group['betas'][0]**t
-                bias2 = 1-group['betas'][1]**t
-                denom = (s / bias2).sqrt().add_(group['eps'])
-                update = v.div(denom).mul_(-group['lr'] / bias1)
+                exp_avg = self.state[params]['exp_avg']
+                exp_avg_sq = self.state[params]['exp_avg_sq']
+
+                step = torch.tensor(self.state[params]['step'], device='cpu', dtype=torch.float32)
+                lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
+                beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
+                beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
+                eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
+                wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
+
+                fused_adamw_step(
+                    params=params_slice,
+                    grad=grad_slice,
+                    exp_avg=exp_avg,
+                    exp_avg_sq=exp_avg_sq,
+                    step=step,
+                    lr=lr,
+                    beta1=beta1,
+                    beta2=beta2,
+                    eps=eps,
+                    wd=wd,
+                )
 
                 # Sync point 2
-                if group['is_small']:
-                    p.add_(update)
-                else:
-                    p_slice = p[slice_start:slice_end] + update
-                    torch.distributed.all_gather_into_tensor(p, p_slice)                    
+                if not group['is_small']:
+                    future2 = torch.distributed.all_gather_into_tensor(
+                        params, params_slice, async_op=True
+                    ).get_future()
+                    temp_buffers[(i,j)]['future2'] = future2
+        
+        for i, group in enumerate(self.param_groups):
+            for j, params in enumerate(group['params']):
+                if not group['is_small']:
+                    temp_buffers[(i,j)].pop('future2').wait()
+        
+
 
