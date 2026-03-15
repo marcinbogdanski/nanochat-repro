@@ -107,8 +107,10 @@ class DistAdamW(torch.optim.Optimizer):
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
 
-        for group in self.param_groups:
-            for params in group['params']:
+        temp_buffers = {}
+
+        for i, group in enumerate(self.param_groups):
+            for j, params in enumerate(group['params']):
                 if params.grad is None:
                     continue
                 # Lazy Init
@@ -135,12 +137,28 @@ class DistAdamW(torch.optim.Optimizer):
                 grad_slice = torch.empty_like(params.grad[:slice_width])
                 if group['is_small']:
                     # Don't slice
-                    torch.distributed.all_reduce(params.grad, op=torch.distributed.ReduceOp.AVG)
+                    future = torch.distributed.all_reduce(
+                        params.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                    ).get_future()
                     grad_slice = params.grad
                     params_slice = params
                 else:
-                    torch.distributed.reduce_scatter_tensor(grad_slice, params.grad, op=torch.distributed.ReduceOp.AVG)
+                    future = torch.distributed.reduce_scatter_tensor(
+                        grad_slice, params.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                    ).get_future()
                     params_slice = params[slice_start:slice_end]
+
+                temp_buffers[(i,j)] = {
+                    'future': future,
+                    'grad_slice': grad_slice,
+                    'params_slice': params_slice
+                }
+
+        for i, group in enumerate(self.param_groups):
+            for j, params in enumerate(group['params']):
+                temp_buffers[(i,j)].pop('future').wait()
+                grad_slice = temp_buffers[(i,j)].pop('grad_slice')
+                params_slice = temp_buffers[(i,j)].pop('params_slice')
 
                 exp_avg = self.state[params]['exp_avg']
                 exp_avg_sq = self.state[params]['exp_avg_sq']
@@ -167,5 +185,15 @@ class DistAdamW(torch.optim.Optimizer):
 
                 # Sync point 2
                 if not group['is_small']:
-                    torch.distributed.all_gather_into_tensor(params, params_slice)                    
+                    future2 = torch.distributed.all_gather_into_tensor(
+                        params, params_slice, async_op=True
+                    ).get_future()
+                    temp_buffers[(i,j)]['future2'] = future2
+        
+        for i, group in enumerate(self.param_groups):
+            for j, params in enumerate(group['params']):
+                if not group['is_small']:
+                    temp_buffers[(i,j)].pop('future2').wait()
+        
+
 
