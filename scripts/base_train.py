@@ -201,10 +201,12 @@ def main():
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
     params_embedding = list(model.transformer.wte.parameters())
+    params_val_embds = list(model.value_embeds.parameters())
     params_lm_head = list(model.lm_head.parameters())
     params_resid = [model.resid_lambdas]
     params_x0 = [model.x0_lambdas]
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_lm_head) + len(params_resid) + len(params_x0)
+    params_v0 = [model.v0_lambdas]
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) +  len(params_v0)
 
     reference_batch_size = 2**19
     batch_ratio = total_batch_size / reference_batch_size
@@ -263,6 +265,11 @@ def main():
             'is_small': False,
         },
         {
+            'params': params_val_embds,
+            'lr': embedding_lr * dmodel_lr_scale,
+            'is_small': False,
+        },
+        {
             'params': params_resid,
             'lr': scalar_lr * 0.01,
             'is_small': True,
@@ -271,7 +278,12 @@ def main():
             'params': params_x0,
             'lr': scalar_lr,
             'is_small': True,
-        }
+        },
+        {
+            'params': params_v0,
+            'lr': scalar_lr,
+            'is_small': True,
+        },
     ]
     adamw_factory = DistAdamW if ddp else torch.optim.AdamW
     adamw_optimizer = adamw_factory(

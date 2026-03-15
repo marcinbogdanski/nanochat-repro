@@ -67,7 +67,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 
-    def forward(self, x, cos, sin, window_size):
+    def forward(self, x, cos, sin, window_size, v0, v0_lambda):
         B, T, C = x.size()
         q = self.c_q(x)    # B, T, nh*hs
         k = self.c_k(x)    # B, T, nh*hs
@@ -75,6 +75,10 @@ class CausalSelfAttentionRoPE(nn.Module):
         q = q.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
         k = k.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
         v = v.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
+
+        if v0 is not None:
+            v0 = v0.view(B, T, self.n_head, C//self.n_head)
+            v = v + v0_lambda * v0
 
         q_rot = self._apply_rope(q, cos, sin)
         k_rot = self._apply_rope(k, cos, sin)
@@ -118,8 +122,8 @@ class Block(nn.Module):
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
 
-    def forward(self, x, cos, sin, window_size):
-        x = x + self.attn(self._norm(x), cos, sin, window_size)        # B,T,E pre-norm
+    def forward(self, x, cos, sin, window_size, v0, v0_lambda):
+        x = x + self.attn(self._norm(x), cos, sin, window_size, v0, v0_lambda)        # B,T,E pre-norm
         x = x + self.mlp(self._norm(x))
         return x
 
@@ -138,6 +142,10 @@ class GPTModel(nn.Module):
         # Params for merging x0 across network and blending residual stream
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+
+        # Value embeddings for each layer
+        self.value_embeds = nn.ModuleList([nn.Embedding(config.vocab_size, config.n_embd) for _ in range(config.n_layer)])
+        self.v0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
 
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
             config.block_size * 10, config.n_embd // config.n_head
@@ -189,6 +197,10 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
+        for i in range(self.config.n_layer):
+            torch.nn.init.uniform_(self.value_embeds[i].weight, -s, s)
+        torch.nn.init.zeros_(self.v0_lambdas)
+
         self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(          ### MARCIN - init here as well as in constructor (remove?)
             self.config.block_size * 10, self.config.n_embd // self.config.n_head,
             device=self.transformer.wte.weight.device
@@ -197,6 +209,8 @@ class GPTModel(nn.Module):
         # Cast to bfloat16 to align with NanoChat
         if self.transformer.wte.weight.device.type == "cuda":
             self.transformer.wte.to(dtype=torch.bfloat16)
+            for v0 in self.value_embeds:
+                v0.to(dtype=torch.bfloat16)
 
 
 
@@ -214,7 +228,8 @@ class GPTModel(nn.Module):
         # Transformer
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            x = block(x, self.cos, self.sin, self.window_sizes[i])
+            v0, v0_lambda = self.value_embeds[i](idx), self.v0_lambdas[i]
+            x = block(x, self.cos, self.sin, self.window_sizes[i], v0, v0_lambda)
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits
