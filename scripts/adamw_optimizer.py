@@ -7,8 +7,7 @@ import time
 import torch
 import torch.nn as nn
 from mynanochat.adamw import AdamW, DistAdamW
-# from mynanochat.muon_karpathy import Muon as MuonKarpathy
-# from mynanochat.muon_karpathy import DistMuon as DistMuonKarpathy
+# from mynanochat.adamw_karpathy import DistAdamW as DistAdamWKarpathy
 
 # Run like this
 # CUDA_VISIBLE_DEVICES=0 python -m scripts.adamw_optimizer
@@ -97,14 +96,12 @@ def main():
         weight_decay=0.0,
     )
     # Karpathy version
-    # muon_factory = DistMuonKarpathy if ddp else MuonKarpathy
-    # all_params = [p for group in muon_groups for p in group['params']]
-    # muon_optimizer = muon_factory(
-    #     all_params,
-    #     lr=matrix_lr,
-    #     momentum=0.95,
-    #     ns_steps=5,
-    #     weight_decay=weight_decay,
+    # adamw_factory = DistAdamWKarpathy if ddp else AdamW
+    # adamw_optimizer = adamw_factory(
+    #     adam_groups,
+    #     betas=(0.8, 0.95),
+    #     eps=1e-10,
+    #     weight_decay=0.0,
     # )
 
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
