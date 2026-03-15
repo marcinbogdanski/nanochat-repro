@@ -205,8 +205,7 @@ def main():
     params_lm_head = list(model.lm_head.parameters())
     params_resid = [model.resid_lambdas]
     params_x0 = [model.x0_lambdas]
-    params_v0 = [model.v0_lambdas]
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) +  len(params_v0)
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0)
 
     reference_batch_size = 2**19
     batch_ratio = total_batch_size / reference_batch_size
@@ -276,11 +275,6 @@ def main():
         },
         {
             'params': params_x0,
-            'lr': scalar_lr,
-            'is_small': True,
-        },
-        {
-            'params': params_v0,
             'lr': scalar_lr,
             'is_small': True,
         },

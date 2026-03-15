@@ -25,10 +25,9 @@ class GPTConfig:
             'window_pattern': self.window_pattern,
         }
 
-
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
-    def __init__(self, config):
+    def __init__(self, config, ve_enable):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.n_head = config.n_head
@@ -37,6 +36,10 @@ class CausalSelfAttentionRoPE(nn.Module):
         self.c_k = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.c_v = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+
+        # VE Gate
+        self.ve_gate_size = 32
+        self.ve_gate = nn.Linear(32, config.n_head, bias=False) if ve_enable else None
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
@@ -67,7 +70,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 
-    def forward(self, x, cos, sin, window_size, v0, v0_lambda):
+    def forward(self, x, ve, cos, sin, window_size):
         B, T, C = x.size()
         q = self.c_q(x)    # B, T, nh*hs
         k = self.c_k(x)    # B, T, nh*hs
@@ -76,9 +79,10 @@ class CausalSelfAttentionRoPE(nn.Module):
         k = k.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
         v = v.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
 
-        if v0 is not None:
-            v0 = v0.view(B, T, self.n_head, C//self.n_head)
-            v = v + v0_lambda * v0
+        if self.ve_gate is not None:
+            ve = ve.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
+            gate = 2.0 * F.sigmoid(self.ve_gate(x[..., :self.ve_gate_size]))  # B, T, nh
+            v = v + gate.unsqueeze(-1) * ve
 
         q_rot = self._apply_rope(q, cos, sin)
         k_rot = self._apply_rope(k, cos, sin)
@@ -114,16 +118,16 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, ve_enable):
         super().__init__()
-        self.attn = CausalSelfAttentionRoPE(config)
+        self.attn = CausalSelfAttentionRoPE(config, ve_enable)
         self.mlp = MLP(config)
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
 
-    def forward(self, x, cos, sin, window_size, v0, v0_lambda):
-        x = x + self.attn(self._norm(x), cos, sin, window_size, v0, v0_lambda)        # B,T,E pre-norm
+    def forward(self, x, ve, cos, sin, window_size):
+        x = x + self.attn(self._norm(x), ve, cos, sin, window_size)        # B,T,E pre-norm
         x = x + self.mlp(self._norm(x))
         return x
 
@@ -135,7 +139,7 @@ class GPTModel(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer)) for i in range(config.n_layer)]),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
@@ -144,8 +148,9 @@ class GPTModel(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
 
         # Value embeddings for each layer
-        self.value_embeds = nn.ModuleList([nn.Embedding(config.vocab_size, config.n_embd) for _ in range(config.n_layer)])
-        self.v0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+        self.value_embeds = nn.ModuleDict({
+            str(i) : nn.Embedding(config.vocab_size, config.n_embd) for i in range(config.n_layer) if self._has_ve(i, config.n_layer)
+        })
 
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
             config.block_size * 10, config.n_embd // config.n_head
@@ -167,6 +172,10 @@ class GPTModel(nn.Module):
             window_sizes.append(chat_to_window_type[window_type])
         window_sizes[-1] = (config.block_size, 0)  # Last layer always full attention
         return window_sizes
+    
+    def _has_ve(self, layer_idx, n_layer):
+        # Every other layer, last always included
+        return layer_idx % 2 == (n_layer-1) % 2
 
     def init_weights(self):
         """Initialization following NanoChat
@@ -197,9 +206,13 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
-        for i in range(self.config.n_layer):
-            torch.nn.init.uniform_(self.value_embeds[i].weight, -s, s)
-        torch.nn.init.zeros_(self.v0_lambdas)
+        for block in self.transformer.h:
+            if block.attn.ve_gate is not None:
+                # Init to zero, so sigmoid(0) -> 0.5, 2*0.5 = 1, i.e. enabled neutral at the start
+                torch.nn.init.zeros_(block.attn.ve_gate.weight)
+
+        for ve in self.value_embeds.values():
+            torch.nn.init.uniform_(ve.weight, -s, s)
 
         self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(          ### MARCIN - init here as well as in constructor (remove?)
             self.config.block_size * 10, self.config.n_embd // self.config.n_head,
@@ -209,8 +222,8 @@ class GPTModel(nn.Module):
         # Cast to bfloat16 to align with NanoChat
         if self.transformer.wte.weight.device.type == "cuda":
             self.transformer.wte.to(dtype=torch.bfloat16)
-            for v0 in self.value_embeds:
-                v0.to(dtype=torch.bfloat16)
+            for ve in self.value_embeds.values():
+                ve.to(dtype=torch.bfloat16)
 
 
 
@@ -228,8 +241,8 @@ class GPTModel(nn.Module):
         # Transformer
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            v0, v0_lambda = self.value_embeds[i](idx), self.v0_lambdas[i]
-            x = block(x, self.cos, self.sin, self.window_sizes[i], v0, v0_lambda)
+            ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
+            x = block(x, ve, self.cos, self.sin, self.window_sizes[i])
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits
