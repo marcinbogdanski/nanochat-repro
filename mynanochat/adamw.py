@@ -108,52 +108,52 @@ class DistAdamW(torch.optim.Optimizer):
         world_size = torch.distributed.get_world_size()
 
         for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
+            for params in group['params']:
+                if params.grad is None:
                     continue
                 # Lazy Init
                 if group['is_small']:
                     # Don't slice
-                    slice_width = p.size(0)
+                    slice_width = params.size(0)
                     slice_start = 0
-                    slice_end = p.size(0)
+                    slice_end = params.size(0)
                 else:
-                    assert p.size(0) % world_size == 0
-                    slice_width = p.size(0) // world_size
+                    assert params.size(0) % world_size == 0
+                    slice_width = params.size(0) // world_size
                     slice_start = rank * slice_width
                     slice_end = slice_start + slice_width
 
-                if p not in self.state:
-                    self.state[p] = {
-                        'step': torch.tensor(0, dtype=torch.int64, device=p.device),
-                        'exp_avg': torch.zeros_like(p[:slice_width]),
-                        'exp_avg_sq': torch.zeros_like(p[:slice_width]),
+                if params not in self.state:
+                    self.state[params] = {
+                        'step': torch.tensor(0, dtype=torch.int64, device=params.device),
+                        'exp_avg': torch.zeros_like(params[:slice_width]),
+                        'exp_avg_sq': torch.zeros_like(params[:slice_width]),
                     }
-                self.state[p]['step'] += 1
+                self.state[params]['step'] += 1
 
                 # Weight Decay
                 if group['weight_decay'] != 0.0:
                     # AdamW
                     # p = p - lr * weight_decay * p
-                    p.mul_(1 - group['lr'] * group['weight_decay'])
+                    params.mul_(1 - group['lr'] * group['weight_decay'])
 
                 # Sync point 1
-                grad_slice = torch.empty_like(p.grad[:slice_width])
+                grad_slice = torch.empty_like(params.grad[:slice_width])
                 if group['is_small']:
                     # Don't slice
-                    torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG)
-                    grad_slice = p.grad
+                    torch.distributed.all_reduce(params.grad, op=torch.distributed.ReduceOp.AVG)
+                    grad_slice = params.grad
                 else:
-                    torch.distributed.reduce_scatter_tensor(grad_slice, p.grad, op=torch.distributed.ReduceOp.AVG)
+                    torch.distributed.reduce_scatter_tensor(grad_slice, params.grad, op=torch.distributed.ReduceOp.AVG)
 
                 # Update v
                 # v = B1 * v + (1-B1) * g
-                v = self.state[p]['exp_avg']
+                v = self.state[params]['exp_avg']
                 v.mul_(group['betas'][0]).add_(grad_slice, alpha=1-group['betas'][0])
 
                 # Update s
                 # s = B2 * s + (1-B2) * g**2
-                s = self.state[p]['exp_avg_sq']
+                s = self.state[params]['exp_avg_sq']
                 s.mul_(group['betas'][1])
                 s.addcmul_(grad_slice, grad_slice, value=1-group['betas'][1])
 
@@ -162,7 +162,7 @@ class DistAdamW(torch.optim.Optimizer):
                 # v_corrected = v / (1-B1**t)
                 # s_corrected = s / (1-B2**t)
                 # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
-                t = self.state[p]['step']
+                t = self.state[params]['step']
                 bias1 = 1-group['betas'][0]**t
                 bias2 = 1-group['betas'][1]**t
                 denom = (s / bias2).sqrt().add_(group['eps'])
@@ -170,8 +170,8 @@ class DistAdamW(torch.optim.Optimizer):
 
                 # Sync point 2
                 if group['is_small']:
-                    p.add_(update)
+                    params.add_(update)
                 else:
-                    p_slice = p[slice_start:slice_end] + update
-                    torch.distributed.all_gather_into_tensor(p, p_slice)                    
+                    p_slice = params[slice_start:slice_end] + update
+                    torch.distributed.all_gather_into_tensor(params, p_slice)                    
 
