@@ -1,5 +1,6 @@
 import torch
 
+@torch.compile(dynamic=False, fullgraph=True)
 def fused_adamw_step(
     params,
     grad,
@@ -18,15 +19,12 @@ def fused_adamw_step(
 
     # Update v
     # v = B1 * v + (1-B1) * g
-    v = exp_avg
-    v.mul_(beta1).add_(grad, alpha=1-beta1)
+    exp_avg.lerp_(grad, 1-beta1)
 
     # Update s
     # s = B2 * s + (1-B2) * g**2
-    s = exp_avg_sq
-    s.mul_(beta2)
-    s.addcmul_(grad, grad, value=1-beta2)
-
+    exp_avg_sq.lerp_(grad.square(), 1-beta2)
+    
     # Correction
     # Somewhat convoluted way to do:
     # v_corrected = v / (1-B1**t)
@@ -34,9 +32,9 @@ def fused_adamw_step(
     # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
     bias1 = 1-beta1**step
     bias2 = 1-beta2**step
-    denom = (s / bias2).sqrt().add_(eps)
-    update = v.div(denom).mul_(lr / bias1)
-    params.data.add_(update, alpha=-1.0)
+    denom = (exp_avg_sq / bias2).sqrt().add_(eps)
+    update = exp_avg.div(denom).mul_(lr / bias1)
+    params.add_(update, alpha=-1.0)
 
 
 class AdamW(torch.optim.Optimizer):
@@ -65,7 +63,7 @@ class AdamW(torch.optim.Optimizer):
                 # Lazy Init
                 if params not in self.state:
                     self.state[params] = {
-                        'step': torch.tensor(0, dtype=torch.int64, device=params.device),
+                        'step': 0,
                         'exp_avg': torch.zeros_like(params),
                         'exp_avg_sq': torch.zeros_like(params),
                     }
@@ -75,12 +73,12 @@ class AdamW(torch.optim.Optimizer):
                 exp_avg = self.state[params]['exp_avg']
                 exp_avg_sq = self.state[params]['exp_avg_sq']                
 
-                lr = group['lr']
-                wd = group['weight_decay']
-                beta1 = group['betas'][0]
-                beta2 = group['betas'][1]
-                eps = group['eps']
-                step = self.state[params]['step']
+                step = torch.tensor(self.state[params]['step'], device='cpu', dtype=torch.float32)
+                lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
+                beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
+                beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
+                eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
+                wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
                 fused_adamw_step(
                     params=params,
