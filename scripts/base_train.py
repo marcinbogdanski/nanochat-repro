@@ -276,6 +276,7 @@ def main():
         {
             'params': params_x0,
             'lr': scalar_lr,
+            'betas': (0.96, 0.95),
             'is_small': True,
         },
     ]

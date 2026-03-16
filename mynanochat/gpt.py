@@ -194,7 +194,7 @@ class GPTModel(nn.Module):
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
         torch.nn.init.constant_(self.resid_lambdas, 1.0)
-        torch.nn.init.constant_(self.x0_lambdas, 0.0)
+        torch.nn.init.constant_(self.x0_lambdas, 0.1)
 
         # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
         s = 3**0.5 * self.config.n_embd**-0.5
