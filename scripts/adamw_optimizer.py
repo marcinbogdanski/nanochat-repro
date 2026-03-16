@@ -7,7 +7,7 @@ import time
 import torch
 import torch.nn as nn
 from mynanochat.adamw import AdamW, DistAdamW
-# from mynanochat.adamw_karpathy import DistAdamW as DistAdamWKarpathy
+# from mynanochat.optim import MuonAdamW, DistMuonAdamW
 
 # Run like this
 # CUDA_VISIBLE_DEVICES=0 python -m scripts.adamw_optimizer
@@ -50,6 +50,9 @@ def main():
     embedding_lr = 0.3
     unembedding_lr = 0.004
     scalar_lr = 0.5
+    betas = (0.8, 0.95)
+    eps = 1e-10
+    weight_decay=0.0
 
     params_lm_head = [
         torch.nn.parameter.Parameter(torch.randn(65536, 256, dtype=torch.float32, device=device))
@@ -68,41 +71,47 @@ def main():
         {
             'params': params_lm_head,
             'lr': unembedding_lr,
+            'betas': betas,
+            'eps': eps,
+            'weight_decay': weight_decay,
+            'kind': 'adamw',
             'is_small': False,
         },
         {
             'params': params_embedding,
             'lr': embedding_lr,
+            'betas': betas,
+            'eps': eps,
+            'weight_decay': weight_decay,
+            'kind': 'adamw',
             'is_small': False,
         },
         {
             'params': params_resid,
             'lr': scalar_lr * 0.01,
+            'betas': betas,
+            'eps': eps,
+            'weight_decay': weight_decay,
+            'kind': 'adamw',
             'is_small': True,
         },
         {
             'params': params_x0,
             'lr': scalar_lr,
+            'betas': betas,
+            'eps': eps,
+            'weight_decay': weight_decay,
+            'kind': 'adamw',
             'is_small': True,
         }
     ]
 
     # My version
     adamw_factory = DistAdamW if ddp else AdamW
-    adamw_optimizer = adamw_factory(
-        adam_groups,
-        betas=(0.8, 0.95),
-        eps=1e-10,
-        weight_decay=0.0,
-    )
+    adamw_optimizer = adamw_factory(adam_groups)
     # Karpathy version
-    # adamw_factory = DistAdamWKarpathy if ddp else AdamW
-    # adamw_optimizer = adamw_factory(
-    #     adam_groups,
-    #     betas=(0.8, 0.95),
-    #     eps=1e-10,
-    #     weight_decay=0.0,
-    # )
+    # adamw_factory = DistMuonAdamW if ddp else MuonAdamW
+    # adamw_optimizer = adamw_factory(adam_groups)
 
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
     print0(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
