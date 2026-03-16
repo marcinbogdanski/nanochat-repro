@@ -11,15 +11,20 @@
             "module": "scripts.base_train",
             "env": {
                 "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                "CUDA_VISIBLE_DEVICES": "1"
+                "CUDA_VISIBLE_DEVICES": "0"
             },
             "args": [
-                "--num-layers=10",
-                "--block-size=1024",
-                "--max-steps=10",
-                "--micro-batch=2",
-                "--total-batch-size=8192",
-                "--eval-every=-1"
+                "--depth=4",
+                "--device-batch-size=8",
+                "--eval-every=10",
+                "--eval-tokens=524288",
+                "--core-metric-every=0",
+                "--sample-every=0",
+                "--save-every=10",
+                "--num-iterations=4",
+                "--log-every=1",
+                "--deterministic",
+                "--window-pattern=L"                
             ]
         }
     ]

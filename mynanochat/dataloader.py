@@ -107,7 +107,8 @@ class DataLoader:
                     longest_doc_that_fits = self.document_buffer.pop(longest_doc_idx)
                     row_tokens.extend(longest_doc_that_fits)
                 else:
-                    doc_to_trim = self.document_buffer.pop(0)
+                    shortest_idx = min(range(len(self.document_buffer)), key=lambda i: len(self.document_buffer[i]))
+                    doc_to_trim = self.document_buffer.pop(shortest_idx)
                     row_tokens.extend(doc_to_trim[:num_tokens_to_fill])
             batch_rows.append(row_tokens)
 
