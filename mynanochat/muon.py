@@ -32,17 +32,20 @@ def fused_muon_step(
     # Polar express orthogonalization
     # https://arxiv.org/pdf/2505.16932
     X = grad.bfloat16()
-    if grad.size(-2) > grad.size(-1):
-        X = X.mT
     # Ensure spectral norm is at most 1 (with 2% safety factor)
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
-    for i in range(steps):
-        a, b, c = polar_express_coeffs[i]
-        A = X @ X.mT
-        B = b * A + c * (A @ A)
-        X = a * X + B @ X
     if grad.size(-2) > grad.size(-1):
-        X = X.mT
+        for i in range(steps):
+            a, b, c = polar_express_coeffs[i]
+            A = X.mT @ X
+            B = b * A + c * (A @ A)
+            X = a * X + X @ B
+    else:
+        for i in range(steps):
+            a, b, c = polar_express_coeffs[i]
+            A = X @ X.mT
+            B = b * A + c * (A @ A)
+            X = a * X + B @ X
     grad = X
 
     ################################################
