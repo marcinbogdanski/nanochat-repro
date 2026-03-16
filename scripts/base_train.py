@@ -225,7 +225,7 @@ def main():
         if ddp_master:
             print(f"Init: Calculated max_steps={max_steps} based on total_batch_size and model size.")
     lr_warmup_ratio = 0.0
-    lr_warmdown_ratio = 0.4
+    lr_warmdown_ratio = 0.5
     lr_final_frac = 0.0
 
     # WD for Optimizers
