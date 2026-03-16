@@ -7,8 +7,7 @@ import time
 import torch
 import torch.nn as nn
 from mynanochat.muon import Muon, DistMuon
-# from mynanochat.muon_karpathy import Muon as MuonKarpathy
-# from mynanochat.muon_karpathy import DistMuon as DistMuonKarpathy
+# from mynanochat.optim import MuonAdamW, DistMuonAdamW
 
 # Run like this
 # python -m scripts.muon_optimizer
@@ -55,33 +54,31 @@ def main():
 
     matrix_lr = 0.02
     weight_decay = 0.2
+    momentum = 0.95
+    ns_steps = 5
+    beta2 = 0.95
 
     muon_groups = []
     for shape, count in params_def_d12:
         group_params = [
             torch.nn.parameter.Parameter(torch.randn(*shape, device=device)) for _ in range(count)
         ]
-        muon_groups.append({'params': group_params})
+        muon_groups.append({
+            'params': group_params,
+            'lr': matrix_lr,
+            'momentum': momentum,
+            'ns_steps': ns_steps,
+            'beta2': beta2,
+            'weight_decay': weight_decay,
+            'kind': 'muon',
+        })
 
     # My version
     muon_factory = DistMuon if ddp else Muon
-    muon_optimizer = muon_factory(
-        muon_groups,
-        lr=matrix_lr,
-        momentum=0.95,
-        ns_steps=5,
-        weight_decay=weight_decay,
-    )
+    muon_optimizer = muon_factory(muon_groups)
     # Karpathy version
-    # muon_factory = DistMuonKarpathy if ddp else MuonKarpathy
-    # all_params = [p for group in muon_groups for p in group['params']]
-    # muon_optimizer = muon_factory(
-    #     all_params,
-    #     lr=matrix_lr,
-    #     momentum=0.95,
-    #     ns_steps=5,
-    #     weight_decay=weight_decay,
-    # )
+    # muon_factory = DistMuonAdamW if ddp else MuonAdamW
+    # muon_optimizer = muon_factory(muon_groups)
 
     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
     print0(f"Memory allocated after optimizer init: {mem_alloc:.2f} GB")
@@ -157,8 +154,6 @@ def main():
     
 if __name__ == "__main__":
     main()
-
-
 
 
 
