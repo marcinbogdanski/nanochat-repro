@@ -145,14 +145,7 @@ def main():
     token_bytes_path = base_path + "token_bytes.pkl"
     token_bytes = pickle.load(open(token_bytes_path, "rb"))
     token_bytes = torch.tensor(token_bytes, device=device)
-
-    # Model Hyperparameters
-    vocab_size = tokenizer.n_vocab
-    depth = args.depth
-    num_embed = depth * args.aspect_ratio
-    assert num_embed % args.head_dim == 0
-    num_heads = num_embed // args.head_dim
-    
+   
     # Reproducibility
     if args.deterministic:
         torch.manual_seed(42)
@@ -177,6 +170,13 @@ def main():
         # torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
 
+    # Hyperparameters
+    vocab_size = tokenizer.n_vocab
+    depth = args.depth
+    base_dim = depth * args.aspect_ratio
+    model_dim = ((base_dim + args.head_dim-1) // args.head_dim) * args.head_dim  # nudge up towards closest multiple of head_dim
+    num_heads = model_dim // args.head_dim
+
     # Model
     block_size = args.max_seq_len
     model_config = GPTConfig(
@@ -184,7 +184,7 @@ def main():
         vocab_size=vocab_size,
         n_layer=depth,
         n_head=num_heads,
-        n_embd=num_embed,
+        n_embd=model_dim,
         window_pattern=args.window_pattern,
     )
     model = GPTModel(model_config)
