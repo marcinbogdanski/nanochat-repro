@@ -1,4 +1,5 @@
 import os
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels prograss bars
 import json
 import time
 import math
@@ -74,11 +75,14 @@ def main():
     # Model
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
-    parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
+    parser.add_argument('--head-dim', type=int, default=128, help='Head dimension for multi-head attention. Total embedding dimension must be divisible by this.')
+    parser.add_argument('--max-seq-len', type=int, default=2048, help='Context length (block size).')
     parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
-    # Optimization
+    # Training horizon
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
-    parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
+    parser.add_argument('--target-param-data-ratio', type=float, default=10.5, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
+    # Optimization
+    parser.add_argument('--device-batch-size', type=int, default=32, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
     parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
@@ -87,15 +91,18 @@ def main():
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
+    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iteratioins for LR warmup')
+    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iteratioins for LR warmdown')
+    parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
-    parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
+    parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
     parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation.')
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
-    parser.add_argument('--log-every', type=int, default=100, help='Log training metrics every N steps.')
+    parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     args = parser.parse_args()
     user_config = vars(args).copy()
 
@@ -144,14 +151,13 @@ def main():
     vocab_size = tokenizer.n_vocab
     depth = args.depth
     num_embed = depth * args.aspect_ratio
-    head_size = 128
-    assert num_embed % head_size == 0
-    num_heads = num_embed // head_size
+    assert num_embed % args.head_dim == 0
+    num_heads = num_embed // args.head_dim
     
     # Training Hyperparameters
     total_batch_size = args.total_batch_size
     micro_batch = args.device_batch_size
-    block_size = args.block_size
+    block_size = args.max_seq_len
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
 
@@ -217,16 +223,19 @@ def main():
     scalar_lr = args.scalar_lr * batch_lr
     scaled_weight_decay = args.weight_decay * (12 / args.depth)**2  # NanoChat wd tuned for 12 layers
 
-    # LR Scheduler params
-    max_steps = args.num_iterations
-    if max_steps <= 0:
-        num_model_params = sum(p.numel() for p in model.parameters())
-        max_steps = (num_model_params * 8) // args.total_batch_size  # match Nanochat
+    if ddp_master:
+        print("WD", args.weight_decay, " -> ", scaled_weight_decay)
+
+    # Calc Max Steps
+    if args.num_iterations > 0:
+        max_steps = args.num_iterations
+    else:
+        param_counts: dict = model.number_scaling_params()
+        scaling_params = param_counts['transformer_matrices'] + param_counts['lm_head']
+        target_tokens = int(args.target_param_data_ratio * scaling_params)
+        max_steps = target_tokens // args.total_batch_size  # floor the division
         if ddp_master:
-            print(f"Init: Calculated max_steps={max_steps} based on total_batch_size and model size.")
-    lr_warmup_ratio = 0.0
-    lr_warmdown_ratio = 0.5
-    lr_final_frac = 0.0
+            print(f"Init: Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
 
     # WD for Optimizers
     def get_wd(step: int):
@@ -234,15 +243,15 @@ def main():
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
-        warmup_steps = round(lr_warmup_ratio * max_steps)
-        warmdown_steps = round(lr_warmdown_ratio * max_steps)
+        warmup_steps = round(args.warmup_ratio * max_steps)
+        warmdown_steps = round(args.warmdown_ratio * max_steps)
         if step < warmup_steps:
             return (step+1) / warmup_steps
         if step <= max_steps - warmdown_steps:
             return 1.0
         else:
             progress = (max_steps - step) / warmdown_steps
-            return (progress * 1.0) + (1.0 - progress) * lr_final_frac
+            return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
     def get_muon_momentum(step: int):
         muon_frac = min(step / 300, 1.0)
