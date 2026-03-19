@@ -1,4 +1,5 @@
 import os
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels prograss bars
 import json
 import time
 import math
@@ -74,12 +75,15 @@ def main():
     # Model
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
-    parser.add_argument('--block-size', type=int, default=2048, help='Context length (block size).')
+    parser.add_argument('--head-dim', type=int, default=128, help='Head dimension for multi-head attention. Total embedding dimension must be divisible by this.')
+    parser.add_argument('--max-seq-len', type=int, default=2048, help='Context length (block size).')
     parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
-    # Optimization
+    # Training horizon
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
-    parser.add_argument('--device-batch-size', type=int, default=8, help='Micro batch size per device.')
-    parser.add_argument('--total-batch-size', type=int, default=524288, help='Total batch size across all devices.')
+    parser.add_argument('--target-param-data-ratio', type=float, default=10.5, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
+    # Optimization
+    parser.add_argument('--device-batch-size', type=int, default=32, help='Micro batch size per device.')
+    parser.add_argument('--total-batch-size', type=int, default=-1, help='Total batch size across all devices. (default: -1, auto-calculate)')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
     parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
     parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
@@ -87,15 +91,18 @@ def main():
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
+    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iteratioins for LR warmup')
+    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iteratioins for LR warmdown')
+    parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
-    parser.add_argument('--eval-tokens', type=int, default=20*524288, help='Number of tokens to use for evaluation.')
+    parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
     parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation.')
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
-    parser.add_argument('--log-every', type=int, default=100, help='Log training metrics every N steps.')
+    parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     args = parser.parse_args()
     user_config = vars(args).copy()
 
@@ -138,23 +145,7 @@ def main():
     token_bytes_path = base_path + "token_bytes.pkl"
     token_bytes = pickle.load(open(token_bytes_path, "rb"))
     token_bytes = torch.tensor(token_bytes, device=device)
-
-
-    # Model Hyperparameters
-    vocab_size = tokenizer.n_vocab
-    depth = args.depth
-    num_embed = depth * args.aspect_ratio
-    head_size = 128
-    assert num_embed % head_size == 0
-    num_heads = num_embed // head_size
-    
-    # Training Hyperparameters
-    total_batch_size = args.total_batch_size
-    micro_batch = args.device_batch_size
-    block_size = args.block_size
-    assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
-    grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
-
+   
     # Reproducibility
     if args.deterministic:
         torch.manual_seed(42)
@@ -169,9 +160,7 @@ def main():
     ################################ EQUIVALENCE ###############################
     # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
-        # if args.window_pattern != 'L':
-        #     print("In deterministinc mode window_pattern must be 'L' due to lack of support in upstream library")
-        #     return 1
+        assert args.window_pattern == 'L', "In deterministinc mode window_pattern must be 'L' due to lack of support in upstream library"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -181,14 +170,21 @@ def main():
         # torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
 
+    # Hyperparameters
+    vocab_size = tokenizer.n_vocab
+    depth = args.depth
+    base_dim = depth * args.aspect_ratio
+    model_dim = ((base_dim + args.head_dim-1) // args.head_dim) * args.head_dim  # nudge up towards closest multiple of head_dim
+    num_heads = model_dim // args.head_dim
 
     # Model
+    block_size = args.max_seq_len
     model_config = GPTConfig(
         block_size=block_size,
         vocab_size=vocab_size,
         n_layer=depth,
         n_head=num_heads,
-        n_embd=num_embed,
+        n_embd=model_dim,
         window_pattern=args.window_pattern,
     )
     model = GPTModel(model_config)
@@ -197,7 +193,51 @@ def main():
     orig_model = model
     if not args.deterministic:
         model = torch.compile(model)
-    
+
+    # (1) Scaling laws / transfer recipe
+    # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
+    #   find the compute-optimal tokens/param ratio
+    # - choose d12 as the main reference tuning point
+    # - at/around d12, sweep batch size
+    # - at/around d12, sweep learning-rate-related hyperparameters
+    # - sweep weight decay across several depths, fit a transfer rule
+    # - then use paper-based / empirical scaling rules to map reference hyperparams
+    #   from d12 to the actual target model
+    param_counts: dict = model.number_scaling_params()
+    scaling_params = param_counts['transformer_matrices'] + param_counts['lm_head']
+    target_tokens = int(args.target_param_data_ratio * scaling_params)
+
+    ref_d12_scaling_params = 135267456  # transformer_matrices + lm_head for d12 model, from nanochat
+    ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
+    ref_d12_batch_size_B_REF = 2**19    # 2**19=524288, measured empirically in nanochat for d12
+
+    # (2) Batch size calculation
+    if args.total_batch_size > 0:
+        total_batch_size = args.total_batch_size
+    else:
+        # Power Lines paper (Bopt=D^0.383), https://arxiv.org/abs/2505.13738
+        target_token_ratio = target_tokens / ref_d12_target_tokens_D_REF
+        proposed_batch_size = ref_d12_batch_size_B_REF * target_token_ratio**0.383
+        total_batch_size = 2 ** round(math.log2(proposed_batch_size))
+
+    # (3) Learning rate scaling
+    # SGD - linear is standard
+    # AdamW - sqrt scaling is standard (lr_scale = batch_ratio ** 0.5)
+    # Muon - blindly use AdamW scaling in our case
+    batch_ratio = total_batch_size / ref_d12_batch_size_B_REF
+    batch_lr_scale = batch_ratio ** 0.5
+
+    # (4) Weight decay scaling
+    # T_epoch framework, https://arxiv.org/abs/2405.13698
+    scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
+    if ddp_master:
+        print("WD", args.weight_decay, " -> ", scaled_weight_decay)
+
+    # Training Hyperparameters
+    micro_batch = args.device_batch_size
+    assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
+    grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
+
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
     params_embedding = list(model.transformer.wte.parameters())
@@ -207,26 +247,19 @@ def main():
     params_x0 = [model.x0_lambdas]
     assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0)
 
-    reference_batch_size = 2**19
-    batch_ratio = total_batch_size / reference_batch_size
-    batch_lr = batch_ratio ** 0.5
-    unembedding_lr = args.unembedding_lr * batch_lr
-    embedding_lr = args.embedding_lr * batch_lr
-    matrix_lr = args.matrix_lr * batch_lr
+    unembedding_lr = args.unembedding_lr * batch_lr_scale
+    embedding_lr = args.embedding_lr * batch_lr_scale
+    matrix_lr = args.matrix_lr * batch_lr_scale
     adam_betas = (args.adam_beta1, args.adam_beta2)
-    scalar_lr = args.scalar_lr * batch_lr
-    scaled_weight_decay = args.weight_decay * (12 / args.depth)**2  # NanoChat wd tuned for 12 layers
+    scalar_lr = args.scalar_lr * batch_lr_scale
 
-    # LR Scheduler params
-    max_steps = args.num_iterations
-    if max_steps <= 0:
-        num_model_params = sum(p.numel() for p in model.parameters())
-        max_steps = (num_model_params * 8) // args.total_batch_size  # match Nanochat
+    # Calc Max Steps
+    if args.num_iterations > 0:
+        max_steps = args.num_iterations
+    else:
+        max_steps = target_tokens // total_batch_size  # floor the division
         if ddp_master:
-            print(f"Init: Calculated max_steps={max_steps} based on total_batch_size and model size.")
-    lr_warmup_ratio = 0.0
-    lr_warmdown_ratio = 0.5
-    lr_final_frac = 0.0
+            print(f"Init: Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
 
     # WD for Optimizers
     def get_wd(step: int):
@@ -234,15 +267,15 @@ def main():
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
-        warmup_steps = round(lr_warmup_ratio * max_steps)
-        warmdown_steps = round(lr_warmdown_ratio * max_steps)
+        warmup_steps = round(args.warmup_ratio * max_steps)
+        warmdown_steps = round(args.warmdown_ratio * max_steps)
         if step < warmup_steps:
             return (step+1) / warmup_steps
         if step <= max_steps - warmdown_steps:
             return 1.0
         else:
             progress = (max_steps - step) / warmdown_steps
-            return (progress * 1.0) + (1.0 - progress) * lr_final_frac
+            return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
     def get_muon_momentum(step: int):
         muon_frac = min(step / 300, 1.0)

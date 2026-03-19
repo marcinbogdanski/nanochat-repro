@@ -161,6 +161,24 @@ class GPTModel(nn.Module):
         # Pre-calculate window size tuples (context_length, 0) for each layer
         self.window_sizes = self._calc_window_sizes(self.config)
 
+    def number_scaling_params(self):
+        wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
+        lm_head = sum(p.numel() for p in self.lm_head.parameters())
+        transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
+        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
+        result = {
+            'wte': wte,
+            'value_embeds': value_embeds,
+            'lm_head': lm_head,
+            'transformer_matrices': transformer_matrices,
+            'scalars': scalars,
+            'total': total
+        }
+        return result
+
     def _calc_window_sizes(self, config):
         chat_to_window_type = {
             'L': (config.block_size, 0),
