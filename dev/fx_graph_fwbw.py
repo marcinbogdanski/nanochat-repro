@@ -5,6 +5,7 @@ import torch.nn as nn
 from functorch.compile import make_boxed_func
 from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.graph_drawer import FxGraphDrawer
+from torch._dynamo.backends.inductor import inductor
 
 
 class SmallModel(nn.Module):
@@ -25,11 +26,13 @@ backward_graphs = []
 
 def capture_forward_backend(gm, example_inputs):
     forward_graphs.append(gm)
-    return make_boxed_func(gm.forward)
+    return make_boxed_func(gm.forward)  # no compile
+    # return make_boxed_func(inductor(gm, example_inputs))  # with compile
 
 def capture_backward_backend(gm, example_inputs):
     backward_graphs.append(gm)
-    return make_boxed_func(gm.forward)
+    return make_boxed_func(gm.forward)  # no compile
+    # return make_boxed_func(inductor(gm, example_inputs))  # with compile
 
 # Create model, capture the graph
 model = SmallModel().cuda()
@@ -93,5 +96,5 @@ def dump_graph(gm, title, svg_path):
     print(f"\nGraph saved to {svg_path}")
 
 
-dump_graph(forward_graphs[0], "FORWARD", "fx_graph.svg")
-dump_graph(backward_graphs[0], "BACKWARD", "fx_graph_backward.svg")
+dump_graph(forward_graphs[0], "FORWARD", "fx_graph_fw.svg")
+dump_graph(backward_graphs[0], "BACKWARD", "fx_graph_bw.svg")

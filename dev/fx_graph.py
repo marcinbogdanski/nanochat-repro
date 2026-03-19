@@ -2,6 +2,7 @@ import os
 os.environ["TORCH_LOGS"] = "graph_breaks,recompiles"
 import torch
 import torch.nn as nn
+from torch._dynamo.backends.inductor import inductor
 
 
 class SmallModel(nn.Module):
@@ -20,7 +21,8 @@ class SmallModel(nn.Module):
 captured_graphs = []
 def capture_backend(gm, example_inputs):
     captured_graphs.append(gm)
-    return gm.forward
+    return gm.forward  # no compile
+    # return inductor(gm, example_inputs)  # with compile
 
 # Create model, capture the graph
 model = SmallModel().cuda()
