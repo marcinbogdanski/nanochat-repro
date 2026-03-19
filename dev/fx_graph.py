@@ -97,5 +97,5 @@ for dot_node in dot.get_nodes():
         new_label = f"{old_label}\\n{dtype}\\n{shape}"
     dot_node.set("label", new_label)
 
-dot.write_svg("dev/fx_graph.svg")
-print(f"\nGraph saved to dev/fx_graph.svg")
+dot.write_svg("fx_graph.svg")
+print(f"\nGraph saved to fx_graph.svg")
