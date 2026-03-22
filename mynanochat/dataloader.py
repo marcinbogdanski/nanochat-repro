@@ -4,15 +4,31 @@ import torch
 import pyarrow.parquet as pq
 
 class DataLoader:
-    def __init__(self, folderpath, first_shard, last_shard, batch_size, block_size, tokenizer, rank, world_size):
+    def __init__(self, folderpath, split, batch_size, block_size, tokenizer, rank, world_size):
         self.batch_size = batch_size
         self.block_size = block_size
 
         # Dataset
         assert os.path.isdir(folderpath)
         self.folderpath = folderpath
-        self.first_shard = first_shard
-        self.last_shard = last_shard
+
+        shard_files = sorted(fn for fn in os.listdir(folderpath) if fn.endswith('.parquet'))
+        shard_indices = []
+        for shard_fn in shard_files:
+            print(shard_fn)
+            fn_root, fn_index = shard_fn.replace('.parquet', '').split('_')
+            shard_indices.append(int(fn_index))
+
+        self.split = split
+        if split == 'train':        
+            self.first_shard = shard_indices[0]
+            self.last_shard = shard_indices[-2]  # inclusive
+            assert shard_indices[:-1] == list(range(self.first_shard, self.first_shard+self.last_shard+1))
+        elif split == 'val':
+            self.first_shard = shard_indices[-1]
+            self.last_shard = shard_indices[-1]
+        else:
+            raise ValueError("Param 'split' must be one of: 'train', 'val'")
 
         # Tokenizer
         self.tokenizer = tokenizer

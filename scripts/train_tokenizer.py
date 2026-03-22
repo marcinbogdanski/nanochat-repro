@@ -26,7 +26,7 @@ SPECIAL_TOKENS = [
 ]
 
 BASE_DATA_PATH = os.path.expanduser("~/.cache/nanochat/base_data")
-BASE_TOKENIZER_PATH = os.path.expanduser("~/.cache/nanochat/tokenizer_2")
+BASE_TOKENIZER_PATH = os.path.expanduser("~/.cache/nanochat/tokenizer")
 
 def doc_generator():
     for shard_idx in range(9999):

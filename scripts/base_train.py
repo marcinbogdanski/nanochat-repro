@@ -139,10 +139,10 @@ def main():
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
 
     # Tokenizer
-    base_path = os.path.dirname(__file__)+"/../data/"
-    tokenizer_path = base_path + "tokenizer.pkl"
+    tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
+    tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
     tokenizer = pickle.load(open(tokenizer_path, "rb"))
-    token_bytes_path = base_path + "token_bytes.pkl"
+    token_bytes_path = os.path.join(tok_base_path, "token_bytes.pkl")
     token_bytes = pickle.load(open(token_bytes_path, "rb"))
     token_bytes = torch.tensor(token_bytes, device=device)
    
@@ -344,14 +344,15 @@ def main():
     folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
     train_loader = DataLoader(
         folderpath=folderpath,
-        first_shard=0,
-        last_shard=238,
+        split="train",
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
+    if ddp_master:
+        print(f"Init: Train dataloader initialised with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
@@ -359,14 +360,15 @@ def main():
         print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         folderpath=folderpath,
-        first_shard=239,
-        last_shard=239,
+        split="val",
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
+    if ddp_master:
+        print(f"Init: Eval dataloader initialised with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
 
 
     total_ntok = 0
