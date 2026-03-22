@@ -14,6 +14,7 @@ def download_file(filename):
     remote_url = BASE_URL + filename
     filepath_tmp = os.path.join(BASE_PATH, filename + ".tmp")
     filepath_final = os.path.join(BASE_PATH, filename)
+    os.makedirs(BASE_PATH, exist_ok=True)
 
     if os.path.exists(filepath_final):
         print(f"Skipping {filepath_final}: already exists")
