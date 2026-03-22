@@ -139,10 +139,10 @@ def main():
     autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
 
     # Tokenizer
-    base_path = os.path.dirname(__file__)+"/../data/"
-    tokenizer_path = base_path + "tokenizer.pkl"
+    tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
+    tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
     tokenizer = pickle.load(open(tokenizer_path, "rb"))
-    token_bytes_path = base_path + "token_bytes.pkl"
+    token_bytes_path = os.path.join(tok_base_path, "token_bytes.pkl")
     token_bytes = pickle.load(open(token_bytes_path, "rb"))
     token_bytes = torch.tensor(token_bytes, device=device)
    
@@ -341,37 +341,34 @@ def main():
                 group["initial_lr"] = group["lr"]
 
     # Dataset
-    # Match nanochat repackage_data_reference.py seed
-    dataset = datasets.load_dataset("HuggingFaceFW/fineweb-edu", name="sample-100BT", split="train")
-    dataset = dataset.shuffle(seed=42)
-
+    folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
     train_loader = DataLoader(
-        dataset=dataset,
-        first_shard=0,
-        last_shard=238,
+        folderpath=folderpath,
+        split="train",
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
-        group_size=1024,   # same as nanochat row_group_size
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
+    if ddp_master:
+        print(f"Init: Train dataloader initialised with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
     if ddp_master:
         print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
-        dataset=dataset,
-        first_shard=239,
-        last_shard=239,
+        folderpath=folderpath,
+        split="val",
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
-        group_size=1024,   # same as nanochat row_group_size
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
+    if ddp_master:
+        print(f"Init: Eval dataloader initialised with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
 
 
     total_ntok = 0
@@ -421,7 +418,7 @@ def main():
             ts = time.time()
             model.eval()
             with autocast_ctx:
-                bundle_path = os.path.dirname(__file__)+"/../data/eval_bundle"
+                bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
                 # Original model because shapes keep chaning
                 results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
             core_metric = results['core_metric']
