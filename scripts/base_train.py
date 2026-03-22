@@ -352,7 +352,6 @@ def main():
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
-        group_size=1024,   # same as nanochat row_group_size
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
@@ -368,7 +367,6 @@ def main():
         batch_size=micro_batch,
         block_size=block_size,
         tokenizer=tokenizer,
-        group_size=1024,   # same as nanochat row_group_size
         rank=ddp_rank,
         world_size=ddp_world_size,
     )

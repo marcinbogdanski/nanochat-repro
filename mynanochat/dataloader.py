@@ -3,7 +3,7 @@ import json
 import torch
 
 class DataLoader:
-    def __init__(self, dataset, first_shard, last_shard, batch_size, block_size, tokenizer, group_size, rank, world_size):
+    def __init__(self, dataset, first_shard, last_shard, batch_size, block_size, tokenizer, rank, world_size):
         self.batch_size = batch_size
         self.block_size = block_size
 
@@ -19,7 +19,7 @@ class DataLoader:
         self.document_buffer = []
 
         # Distributed
-        self.group_size = group_size
+        self.group_size = 1024  # same as nanochat
         self.rank = rank
         self.world_size = world_size
 
@@ -34,6 +34,10 @@ class DataLoader:
         self.group_idx = self.rank
         self.idx_in_group = 0
 
+        self.loaded_shard_idx = None
+        self.loaded_shard_row_groups = None
+        self.loaded_shard_num_row_groups = None
+
     def reset(self):
         """Called to reset eval dataloader."""
         self.shard_idx = self.first_shard
@@ -42,26 +46,29 @@ class DataLoader:
         self.token_buffer = []
         self.document_buffer = []
 
+    def _get_shard_num_row_groups(self, shard_idx):
+        return self.shards[shard_idx]["num_row_groups"]
+    
+    def _get_example_text(self):
+        shard_offset = self.shards[self.shard_idx]["start_idx"]
+        group_offset = self.group_idx * self.group_size
+        dataset_pos =  shard_offset + group_offset + self.idx_in_group
+        example = self.dataset[dataset_pos]
+        return example['text']
+
     def _step_cursor(self):
         self.idx_in_group += 1
         if self.idx_in_group >= self.group_size:
             self.idx_in_group = 0
             self.group_idx += self.world_size
-            if self.group_idx >= self.shards[self.shard_idx]["num_row_groups"]:
+            if self.group_idx >= self._get_shard_num_row_groups(self.shard_idx):
                 self.group_idx = self.rank
                 self.shard_idx += 1
                 if self.shard_idx > self.last_shard:
                     self.shard_idx = self.first_shard
 
-    def _map_cursor_to_pos(self):
-        shard_offset = self.shards[self.shard_idx]["start_idx"]
-        group_offset = self.group_idx * self.group_size
-        return shard_offset + group_offset + self.idx_in_group
-
     def _get_next_document(self):
-        dataset_pos = self._map_cursor_to_pos()
-        example = self.dataset[dataset_pos]
-        prompt = example['text']
+        prompt = self._get_example_text()        
         self._step_cursor()
         return [self.bos_token] + self.tokenizer.encode_ordinary(prompt)        
 
