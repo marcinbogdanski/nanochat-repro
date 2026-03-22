@@ -1,14 +1,16 @@
 import os
 import json
 import torch
+import pyarrow.parquet as pq
 
 class DataLoader:
-    def __init__(self, dataset, first_shard, last_shard, batch_size, block_size, tokenizer, rank, world_size):
+    def __init__(self, dataset_folderpath, first_shard, last_shard, batch_size, block_size, tokenizer, rank, world_size):
         self.batch_size = batch_size
         self.block_size = block_size
 
         # Dataset
-        self.dataset = dataset
+        self.dataset_folderpath = os.path.expanduser(dataset_folderpath)
+        assert os.path.isdir(self.dataset_folderpath)
         self.first_shard = first_shard
         self.last_shard = last_shard
 
@@ -35,8 +37,7 @@ class DataLoader:
         self.idx_in_group = 0
 
         self.loaded_shard_idx = None
-        self.loaded_shard_row_groups = None
-        self.loaded_shard_num_row_groups = None
+        self.loaded_shard_row_groups = None   # list of list or str
 
     def reset(self):
         """Called to reset eval dataloader."""
@@ -46,22 +47,29 @@ class DataLoader:
         self.token_buffer = []
         self.document_buffer = []
 
-    def _get_shard_num_row_groups(self, shard_idx):
-        return self.shards[shard_idx]["num_row_groups"]
-    
     def _get_example_text(self):
-        shard_offset = self.shards[self.shard_idx]["start_idx"]
-        group_offset = self.group_idx * self.group_size
-        dataset_pos =  shard_offset + group_offset + self.idx_in_group
-        example = self.dataset[dataset_pos]
-        return example['text']
+        # Lead the requested shard
+        # Note we load full shard, even though in ddp we skip a lot, potentially can be improved
+        if self.shard_idx != self.loaded_shard_idx:
+            filepath = os.path.join(self.dataset_folderpath, f"shard_{self.shard_idx:05d}.parquet")
+            pf = pq.ParquetFile(filepath)
+            self.loaded_shard_row_groups = []
+            for rg_index in range(pf.num_row_groups):
+                rg = pf.read_row_group(rg_index)
+                documents = rg.column('text').to_pylist()
+                self.loaded_shard_row_groups.append(documents)  # list of lists or str
+            self.loaded_shard_idx = self.shard_idx
+        return self.loaded_shard_row_groups[self.group_idx][self.idx_in_group]
+
+    def _get_cuurent_shard_num_row_groups(self):
+        return len(self.loaded_shard_row_groups)
 
     def _step_cursor(self):
         self.idx_in_group += 1
         if self.idx_in_group >= self.group_size:
             self.idx_in_group = 0
             self.group_idx += self.world_size
-            if self.group_idx >= self._get_shard_num_row_groups(self.shard_idx):
+            if self.group_idx >= self._get_cuurent_shard_num_row_groups():
                 self.group_idx = self.rank
                 self.shard_idx += 1
                 if self.shard_idx > self.last_shard:
