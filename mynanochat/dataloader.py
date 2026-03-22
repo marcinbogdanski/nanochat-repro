@@ -46,7 +46,6 @@ class DataLoader:
         # Note we load full shard, even though in ddp we skip a lot, potentially can be improved
         if self.shard_idx != self.loaded_shard_idx:
             filepath = os.path.join(self.folderpath, f"shard_{self.shard_idx:05d}.parquet")
-            print("DEBUG:", filepath)
             pf = pq.ParquetFile(filepath)
             self.loaded_shard_row_groups = []
             for rg_index in range(pf.num_row_groups):

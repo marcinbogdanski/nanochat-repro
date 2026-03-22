@@ -416,7 +416,7 @@ def main():
             ts = time.time()
             model.eval()
             with autocast_ctx:
-                bundle_path = os.path.dirname(__file__)+"/../data/eval_bundle"
+                bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
                 # Original model because shapes keep chaning
                 results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
             core_metric = results['core_metric']
