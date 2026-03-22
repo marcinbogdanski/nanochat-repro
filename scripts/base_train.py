@@ -341,12 +341,9 @@ def main():
                 group["initial_lr"] = group["lr"]
 
     # Dataset
-    # Match nanochat repackage_data_reference.py seed
-    dataset = datasets.load_dataset("HuggingFaceFW/fineweb-edu", name="sample-100BT", split="train")
-    dataset = dataset.shuffle(seed=42)
-
+    folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
     train_loader = DataLoader(
-        dataset=dataset,
+        folderpath=folderpath,
         first_shard=0,
         last_shard=238,
         batch_size=micro_batch,
@@ -361,7 +358,7 @@ def main():
     if ddp_master:
         print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
-        dataset=dataset,
+        folderpath=folderpath,
         first_shard=239,
         last_shard=239,
         batch_size=micro_batch,

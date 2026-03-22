@@ -18,8 +18,9 @@ tokenizer = pickle.load(open(tokenizer_path, "rb"))
 micro_batch=8
 block_size=2048
 
+folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
 train_loader = DataLoader(
-    dataset_folderpath="~/.cache/nanochat/base_data",
+    folderpath=folderpath,
     first_shard=0,
     last_shard=238,
     batch_size=micro_batch,

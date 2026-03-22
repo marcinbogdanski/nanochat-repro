@@ -4,13 +4,13 @@ import torch
 import pyarrow.parquet as pq
 
 class DataLoader:
-    def __init__(self, dataset_folderpath, first_shard, last_shard, batch_size, block_size, tokenizer, rank, world_size):
+    def __init__(self, folderpath, first_shard, last_shard, batch_size, block_size, tokenizer, rank, world_size):
         self.batch_size = batch_size
         self.block_size = block_size
 
         # Dataset
-        self.dataset_folderpath = os.path.expanduser(dataset_folderpath)
-        assert os.path.isdir(self.dataset_folderpath)
+        assert os.path.isdir(folderpath)
+        self.folderpath = folderpath
         self.first_shard = first_shard
         self.last_shard = last_shard
 
@@ -24,12 +24,6 @@ class DataLoader:
         self.group_size = 1024  # same as nanochat
         self.rank = rank
         self.world_size = world_size
-
-        # Read Shard Map
-        with open(os.path.dirname(__file__) + "/../data/rowgroup_index.json", "r") as f:
-            self.shards = json.load(f)
-        assert isinstance(self.shards, list)
-        assert all(isinstance(s["num_row_groups"], int) and isinstance(s["start_idx"], int) for s in self.shards)
 
         # Create Cursor
         self.shard_idx = self.first_shard
@@ -51,7 +45,8 @@ class DataLoader:
         # Lead the requested shard
         # Note we load full shard, even though in ddp we skip a lot, potentially can be improved
         if self.shard_idx != self.loaded_shard_idx:
-            filepath = os.path.join(self.dataset_folderpath, f"shard_{self.shard_idx:05d}.parquet")
+            filepath = os.path.join(self.folderpath, f"shard_{self.shard_idx:05d}.parquet")
+            print("DEBUG:", filepath)
             pf = pq.ParquetFile(filepath)
             self.loaded_shard_row_groups = []
             for rg_index in range(pf.num_row_groups):
