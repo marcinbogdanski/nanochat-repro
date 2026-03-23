@@ -103,6 +103,7 @@ def main():
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
+    parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
     args = parser.parse_args()
     user_config = vars(args).copy()
 
@@ -190,6 +191,20 @@ def main():
     model = GPTModel(model_config)
     model.to(device)
     model.init_weights()
+    if ddp_master:
+        print(f"Init: FP8 Summary:")
+        num_linears = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+        num_eligible = 0
+        for name, mod in model.named_modules():
+            if isinstance(mod, torch.nn.Linear):
+                eligible = (mod.in_features % 16 == 0 and mod.out_features % 16 == 0)
+                if eligible:
+                    num_eligible += 1
+                if args.print_details:
+                    print(name, mod.in_features, mod.out_features, mod.weight.dtype, mod.weight.device, eligible)
+        print(f"  Eligible for FP8: {num_eligible}/{num_linears} linear layers")
+
+
     orig_model = model
     if not args.deterministic:
         model = torch.compile(model)
