@@ -497,6 +497,7 @@ def main():
         model.train()
         if device.startswith('cuda'):
             torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
@@ -532,6 +533,7 @@ def main():
         # Sync & Time
         if device.startswith('cuda'):
             torch.cuda.synchronize()  # wait for the GPU to finish work
+        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
         dt = (time.time() - ts)
         smooth_dt = 0.9 * smooth_dt + 0.1 * dt
         debiased_smooth_dt = smooth_dt / (1 - 0.9**(step+1))
@@ -551,7 +553,7 @@ def main():
         if ddp_master:
             print(f"Step {step}/{max_steps} ({pct:.2f}%) | "
                   f"loss {debiased_smooth_train_loss:.16f} {loss_accum.item():.4f} | "
-                  f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                  f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | mem {max_mem:.3f} GB | "
                   f"time {total_time_str} | eta {eta_str}")
         if step % args.log_every == 0:
             wandb_logger.log({
