@@ -2,6 +2,7 @@ import os
 import rustbpe
 import tiktoken
 import pickle
+import torch
 import pyarrow.parquet as pq
 
 # from nanochat tokenizer.py
@@ -100,10 +101,10 @@ def main():
             token_bytes.append(0)
         else:
             token_bytes.append(len(tok_str.encode("utf-8")))
-
-    token_bytes_path = os.path.join(BASE_TOKENIZER_PATH, "token_bytes.pkl")
+    token_bytes_pt = torch.tensor(token_bytes, dtype=torch.int32, device='cpu')
+    token_bytes_path = os.path.join(BASE_TOKENIZER_PATH, "token_bytes.pt")
     with open(token_bytes_path, "wb") as f:
-        pickle.dump(token_bytes, f)
+        torch.save(token_bytes_pt, f)
 
 
 if __name__ == '__main__':

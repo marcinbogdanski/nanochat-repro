@@ -142,9 +142,9 @@ def main():
     tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
     tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
     tokenizer = pickle.load(open(tokenizer_path, "rb"))
-    token_bytes_path = os.path.join(tok_base_path, "token_bytes.pkl")
-    token_bytes = pickle.load(open(token_bytes_path, "rb"))
-    token_bytes = torch.tensor(token_bytes, device=device)
+    token_bytes_path = os.path.join(tok_base_path, "token_bytes.pt")
+    with open(token_bytes_path, "rb") as f:
+        token_bytes = torch.load(f, map_location=device)
    
     # Reproducibility
     if args.deterministic:

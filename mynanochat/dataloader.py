@@ -15,7 +15,6 @@ class DataLoader:
         shard_files = sorted(fn for fn in os.listdir(folderpath) if fn.endswith('.parquet'))
         shard_indices = []
         for shard_fn in shard_files:
-            print(shard_fn)
             fn_root, fn_index = shard_fn.replace('.parquet', '').split('_')
             shard_indices.append(int(fn_index))
 
