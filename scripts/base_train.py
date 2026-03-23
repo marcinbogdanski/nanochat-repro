@@ -590,7 +590,8 @@ def main():
         if ddp_master:
             print(f"Step {step}/{max_steps} ({pct:.2f}%) | "
                   f"loss {debiased_smooth_train_loss:.16f} {loss_accum.item():.4f} | "
-                  f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | mem {max_mem:.3f} GB | "
+                  f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                  f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                   f"time {total_time_str} | eta {eta_str}")
         if step % args.log_every == 0:
             wandb_logger.log({
