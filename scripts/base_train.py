@@ -193,6 +193,13 @@ def main():
     orig_model = model
     if not args.deterministic:
         model = torch.compile(model)
+    if ddp_master:
+        print("Init: Model info:")
+        print(f"  {block_size=}")
+        print(f"  {vocab_size=}")
+        print(f"  {depth=}")
+        print(f"  {model_dim=}")
+        print(f"  {num_heads=}")
 
     # (1) Scaling laws / transfer recipe
     # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
@@ -206,6 +213,10 @@ def main():
     param_counts: dict = model.number_scaling_params()
     scaling_params = param_counts['transformer_matrices'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
+    if ddp_master:
+        print(f"Init: Scaling info:")
+        print(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
+        print(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
     ref_d12_scaling_params = 135267456  # transformer_matrices + lm_head for d12 model, from nanochat
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
@@ -214,11 +225,15 @@ def main():
     # (2) Batch size calculation
     if args.total_batch_size > 0:
         total_batch_size = args.total_batch_size
+        if ddp_master:
+            print(f"Init: Using user-provided total_batch_size={total_batch_size} without scaling.")
     else:
         # Power Lines paper (Bopt=D^0.383), https://arxiv.org/abs/2505.13738
         target_token_ratio = target_tokens / ref_d12_target_tokens_D_REF
         proposed_batch_size = ref_d12_batch_size_B_REF * target_token_ratio**0.383
         total_batch_size = 2 ** round(math.log2(proposed_batch_size))
+        if ddp_master:
+            print(f"Init: Calculated total_batch_size={total_batch_size} based on Power Lines scaling with target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
 
     # (3) Learning rate scaling
     # SGD - linear is standard
@@ -231,12 +246,17 @@ def main():
     # T_epoch framework, https://arxiv.org/abs/2405.13698
     scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
     if ddp_master:
-        print("WD", args.weight_decay, " -> ", scaled_weight_decay)
+        print(f"Init: Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
     # Training Hyperparameters
     micro_batch = args.device_batch_size
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
+    if ddp_master:
+        print(f"Init: Training hyperparameters:")
+        print(f"  {micro_batch=}")
+        print(f"  {total_batch_size=}")
+        print(f"  {grad_accum=}")
 
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
@@ -256,6 +276,8 @@ def main():
     # Calc Max Steps
     if args.num_iterations > 0:
         max_steps = args.num_iterations
+        if ddp_master:
+            print(f"Init: Using user-provided num_iterations={max_steps} without scaling.")
     else:
         max_steps = target_tokens // total_batch_size  # floor the division
         if ddp_master:
