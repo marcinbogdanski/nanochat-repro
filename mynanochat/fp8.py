@@ -20,10 +20,9 @@ def to_fp8(x, dtype):
 class FP8Matmul(torch.autograd.Function):
     @staticmethod
     # ctx is the first argument to forward
-    def forward(ctx, input, weight, bias=None):
+    def forward(ctx, input, weight):
         # The forward pass can use ctx.
-        ctx.save_for_backward(input, weight, bias)
-
+        ctx.save_for_backward(input, weight)
 
         input_fp8, input_scale_inv = to_fp8(input, torch.float8_e4m3fn)
         weight_fp8, weight_scale_inv = to_fp8(weight, torch.float8_e4m3fn)
@@ -35,27 +34,24 @@ class FP8Matmul(torch.autograd.Function):
             out_dtype=input.dtype,
             use_fast_accum=True
         )
-
-
-        if bias is not None:
-            output += bias.unsqueeze(0).expand_as(output)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weight, bias = ctx.saved_tensors
-        grad_input = grad_weight = grad_bias = None
+        input, weight = ctx.saved_tensors
+        grad_input = grad_weight = None
 
         if ctx.needs_input_grad[0]:
             grad_input = grad_output.mm(weight)
         if ctx.needs_input_grad[1]:
             grad_weight = grad_output.t().mm(input)
-        if bias is not None and ctx.needs_input_grad[2]:
-            grad_bias = grad_output.sum(0)
 
-        return grad_input, grad_weight, grad_bias
+        return grad_input, grad_weight
 
 
 class FP8Linear(torch.nn.Linear):
     def forward(self, input):
-        return FP8Matmul.apply(input, self.weight, self.bias)
+        output = FP8Matmul.apply(input, self.weight)
+        if self.bias is not None:
+            output = output + self.bias.to(output.dtype)
+        return output
