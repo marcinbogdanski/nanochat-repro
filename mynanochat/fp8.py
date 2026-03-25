@@ -75,7 +75,9 @@ class FP8Matmul(torch.autograd.Function):
 
 class FP8Linear(torch.nn.Linear):
     def forward(self, input):
-        output = FP8Matmul.apply(input, self.weight)
+        input_2d = input.reshape(-1, input.shape[-1])
+        output_2d = FP8Matmul.apply(input_2d, self.weight)
+        output = output_2d.reshape(*input.shape[:-1], output_2d.shape[-1])
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
         return output
