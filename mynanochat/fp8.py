@@ -41,10 +41,34 @@ class FP8Matmul(torch.autograd.Function):
         input, weight = ctx.saved_tensors
         grad_input = grad_weight = None
 
+        if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
+            grad_out_fp8, grad_out_scale_inv = to_fp8(grad_output, torch.float8_e5m2)
+
         if ctx.needs_input_grad[0]:
-            grad_input = grad_output.mm(weight)
+            # grad_input = grad_output.mm(weight)
+            weight_fp8, weight_scale_inv = to_fp8(weight, torch.float8_e4m3fn)
+            weight_fp8_cont = weight_fp8.t().contiguous().t()
+            grad_input = torch._scaled_mm(
+                input=grad_out_fp8,
+                mat2=weight_fp8_cont,
+                scale_a=grad_out_scale_inv,
+                scale_b=weight_scale_inv,
+                out_dtype=input.dtype,
+                use_fast_accum=False
+            )
+        
         if ctx.needs_input_grad[1]:
-            grad_weight = grad_output.t().mm(input)
+            # grad_weight = grad_output.t().mm(input)
+            input_fp8, input_scale_inv = to_fp8(input, torch.float8_e4m3fn)
+            input_fp8_cont = input_fp8.t().contiguous().t()
+            grad_weight = torch._scaled_mm(
+                input=grad_out_fp8.t().contiguous(),
+                mat2=input_fp8_cont,
+                scale_a=grad_out_scale_inv,
+                scale_b=input_scale_inv,
+                out_dtype=weight.dtype,
+                use_fast_accum=False
+            )
 
         return grad_input, grad_weight
 

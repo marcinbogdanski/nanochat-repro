@@ -71,7 +71,7 @@ class SmallModelPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear1 = nn.Linear(64, 128, bias=False)
-        self.linear2 = nn.Linear(128, 16, bias=False)
+        self.linear2 = nn.Linear(128, 32, bias=False)
     def forward(self, x):
         x = self.linear1(x)
         x = torch.relu(x)
@@ -82,7 +82,7 @@ class SmallModelFP32(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear1 = FP32Linear(64, 128, bias=False)
-        self.linear2 = FP32Linear(128, 16, bias=False)
+        self.linear2 = FP32Linear(128, 32, bias=False)
     def forward(self, x):
         x = self.linear1(x)
         x = torch.relu(x)
@@ -93,7 +93,7 @@ class SmallModelFP8(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear1 = FP8Linear(64, 128, bias=False)
-        self.linear2 = FP8Linear(128, 16, bias=False)
+        self.linear2 = FP8Linear(128, 32, bias=False)
 
     def forward(self, x):
         x = self.linear1(x)
@@ -106,9 +106,9 @@ class SmallModelFP8(nn.Module):
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
-x = torch.randn(8, 64, device="cuda")
+x = torch.randn(16, 64, device="cuda")
 ref1 = nn.Linear(64, 128, bias=False)
-ref2 = nn.Linear(128, 16, bias=False)
+ref2 = nn.Linear(128, 32, bias=False)
 
 # FX Capture
 fx_capture_pt = FXGraphCapture()
@@ -150,40 +150,23 @@ loss_fp8 = out_fp8.float().square().mean()
 loss_fp8.backward()
 
 
+def check_diff(title, t1, t2):
+    print(f"--- {title} ---")
+    abs_diff = (t1 - t2).abs()
+    rel_diff = abs_diff / t1.abs().clamp_min(1e-6)
+    cos_sim = F.cosine_similarity(t1.flatten(), t2.flatten(), dim=0)
+    norm_ratio = t2.norm() / t1.norm()
+    print( f"{abs_diff.max()=}" )
+    print( f"{abs_diff.mean()=}" )
+    print( f"{rel_diff.max()=}")
+    print( f"{rel_diff.mean()=}")
+    print( f"{cos_sim=}")
+    print( f"{norm_ratio=}")
 
-print('---')
-print(out_pt)
-print('---')
-print(out_fp32)
-print('---')
-print(out_fp8)
-print('---')
+check_diff("out_pt, out_fp8", out_pt, out_fp8)
+check_diff("pt-fp8, linear1.weight.grad", model_pt.linear1.weight.grad, model_fp8.linear1.weight.grad)
+check_diff("pt-fp8, linear2.weight.grad", model_pt.linear2.weight.grad, model_fp8.linear2.weight.grad)
 
-print("--- diff pt fp32 ---")
-
-abs_diff = (out_pt - out_fp32).abs()
-rel_diff = abs_diff / out_pt.abs().clamp_min(1e-6)
-cos_sim = F.cosine_similarity(out_pt.flatten(), out_fp32.flatten(), dim=0)
-
-print( f"{abs_diff.max()=}" )
-print( f"{abs_diff.mean()=}" )
-print( f"{rel_diff.max()=}")
-print( f"{rel_diff.mean()=}")
-print( f"{cos_sim=}")
-
-print("--- diff pt fp8 ---")
-
-abs_diff = (out_pt - out_fp8).abs()
-rel_diff = abs_diff / out_pt.abs().clamp_min(1e-6)
-cos_sim = F.cosine_similarity(out_pt.flatten(), out_fp8.flatten(), dim=0)
-
-print( f"{abs_diff.max()=}" )
-print( f"{abs_diff.mean()=}" )
-print( f"{rel_diff.max()=}")
-print( f"{rel_diff.mean()=}")
-print( f"{cos_sim=}")
-
-print("---------------------")
 
 #-------------------------------------------------------------------------------
 # Print captured graphs
