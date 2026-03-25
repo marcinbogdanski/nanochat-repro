@@ -26,11 +26,13 @@ backward_graphs = []
 
 def capture_forward_backend(gm, example_inputs):
     forward_graphs.append(gm)
+    # Note this does not change graph capture, just exec mode *after* capture
     return make_boxed_func(gm.forward)  # no compile
     # return make_boxed_func(inductor(gm, example_inputs))  # with compile
 
 def capture_backward_backend(gm, example_inputs):
     backward_graphs.append(gm)
+    # Note this does not change graph capture, just exec mode *after* capture
     return make_boxed_func(gm.forward)  # no compile
     # return make_boxed_func(inductor(gm, example_inputs))  # with compile
 

@@ -1,5 +1,6 @@
 import os
 import time
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -137,15 +138,23 @@ compiled_fp8 = torch.compile(model_fp8, backend=fx_capture_fp8.capture_backend)
 #-------------------------------------------------------------------------------
 # Forward / backward pass
 
-out_pt = compiled_pt(x)
+# autocast_ctx = nullcontext()
+autocast_ctx = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+
+with autocast_ctx:
+    out_pt = compiled_pt(x)
 loss_pt = out_pt.float().square().mean()
 loss_pt.backward()
 
-out_fp32 = compiled_fp32(x)
+print(); fx_capture_pt.print_captured_graph()
+
+with autocast_ctx:
+    out_fp32 = compiled_fp32(x)
 loss_fp32 = out_fp32.float().square().mean()
 loss_fp32.backward()
 
-out_fp8 = compiled_fp8(x)
+with autocast_ctx:
+    out_fp8 = compiled_fp8(x)
 loss_fp8 = out_fp8.float().square().mean()
 loss_fp8.backward()
 
