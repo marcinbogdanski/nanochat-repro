@@ -28,13 +28,13 @@ class GPTConfig:
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
-    def __init__(self, config, ve_enable, attn_backend):
+    def __init__(self, config, ve_enable, enable_fa3):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        assert attn_backend in ['sdpa', 'fa3']
+        assert isinstance(enable_fa3, bool)
         self.n_head = config.n_head
         self.block_size = config.block_size
-        self.attn_backend = attn_backend
+        self.enable_fa3 = enable_fa3
 
         self.c_q = LinearFP8(config.n_embd, config.n_embd, bias=False)
         self.c_k = LinearFP8(config.n_embd, config.n_embd, bias=False)
@@ -95,19 +95,17 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
 
-        if self.attn_backend == 'fa3':
-            # FA3 ok in ddp, this is super wonky
-            y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size, deterministic=True)
-        elif self.attn_backend == 'sdpa':
-            # SDPA fallback for solo mode
+        if self.enable_fa3:
+            # Flash Attention 3
+            y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+        else:
+            # SDPA fallback
             assert window_size == (self.block_size, 0)  # only window_pattern=='L' supported
             q_rot = q_rot.transpose(1, 2)  # B,nh,T,hs
             k_rot = k_rot.transpose(1, 2)  # B,nh,T,hs
             v = v.transpose(1, 2)  # B,nh,T,hs
             y = F.scaled_dot_product_attention(q_rot, k_rot, v, is_causal=True)
             y = y.transpose(1, 2)  # B,T,nh,hs
-        else:
-            raise ValueError("attn_backend must be 'fa3' or 'sdpa'")
 
         y = y.contiguous()
         y = y.view(B,T,C)
@@ -129,9 +127,9 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, ve_enable, attn_backend):
+    def __init__(self, config, ve_enable, enable_fa3):
         super().__init__()
-        self.attn = CausalSelfAttentionRoPE(config, ve_enable, attn_backend)
+        self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
         self.mlp = MLP(config)
 
     def _norm(self, x):
@@ -144,8 +142,8 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, attn_backend, fp8_training):
-        assert attn_backend in ['sdpa', 'fa3']
+    def __init__(self, config, enable_fa3, fp8_training):
+        assert isinstance(enable_fa3, bool)
         assert isinstance(fp8_training, bool)
         super().__init__()
         self.config = config
@@ -153,7 +151,7 @@ class GPTModel(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), attn_backend) for i in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), enable_fa3) for i in range(config.n_layer)]),
         ))
         self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
 

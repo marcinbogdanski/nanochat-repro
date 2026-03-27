@@ -74,6 +74,7 @@ def main():
     # Logging
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # FP8 training
+    parser.add_argument('--fa3', action='store_true', help="Enable Flash Attention 3.")
     parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in bfloat16.")
     # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
@@ -165,7 +166,7 @@ def main():
     # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
         assert args.window_pattern == 'L', "In deterministic mode window_pattern must be 'L' due to lack of support in upstream library"
-        # assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
+        assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -192,8 +193,7 @@ def main():
         n_embd=model_dim,
         window_pattern=args.window_pattern,
     )
-    attn_backend = 'sdpa' if args.deterministic else 'fa3'  # FA3 has a bug where backward is not deterministic
-    model = GPTModel(model_config, attn_backend=attn_backend, fp8_training=args.fp8)
+    model = GPTModel(model_config, enable_fa3=args.fa3, fp8_training=args.fp8)
     model.to(device)
     model.init_weights()
 
