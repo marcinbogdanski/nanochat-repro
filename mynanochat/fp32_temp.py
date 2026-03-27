@@ -1,7 +1,7 @@
 import torch
 
 class FP32Matmul(torch.autograd.Function):
-    """Drop-in nn.Linear replacemnt for testing how custom Function behaves."""
+    """Drop-in nn.Linear replacement for testing how custom Function behaves."""
     
     @staticmethod
     # ctx is the first argument to forward

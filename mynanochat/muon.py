@@ -62,11 +62,11 @@ def fused_muon_step(
     beta2 = beta2.to(grad.dtype)
     momentum_buffer2.lerp_(s_squared_column.to(dtype=momentum_buffer2.dtype), 1-beta2)
     # Compute scaling factor
-    step_size_solumn = momentum_buffer2.clamp_min(1e-10).rsqrt()
-    xx = (s_squared_column * reduction_dim_size) * step_size_solumn.float().square()
+    step_size_column = momentum_buffer2.clamp_min(1e-10).rsqrt()
+    xx = (s_squared_column * reduction_dim_size) * step_size_column.float().square()
     norm_new = xx.sum(dim=(-2,-1), keepdim=True).sqrt()
     # Final scale
-    final_scale = step_size_solumn * (norm_current / norm_new.clamp_min(1e-10))
+    final_scale = step_size_column * (norm_current / norm_new.clamp_min(1e-10))
     update = grad.mul(final_scale.to(grad.dtype))
 
     ##################################
@@ -115,7 +115,7 @@ class Muon(torch.optim.Optimizer):
             lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
             beta2 = group['beta2'] if group['beta2'] is not None else 0.0
 
-            # 0-D CPU tesnsors to avoid re-compilation when values change
+            # 0-D CPU tensors to avoid re-compilation when values change
             lr = torch.tensor(lr, device='cpu', dtype=torch.float32)
             momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
             wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
@@ -215,7 +215,7 @@ class DistMuon(torch.optim.Optimizer):
                 lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
                 beta2 = group['beta2'] if group['beta2'] is not None else 0.0
 
-                # 0-D CPU tesnsors to avoid re-compilation when values change
+                # 0-D CPU tensors to avoid re-compilation when values change
                 lr = torch.tensor(lr, device='cpu', dtype=torch.float32)
                 momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)

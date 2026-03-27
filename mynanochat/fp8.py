@@ -10,7 +10,7 @@ def to_fp8(x, dtype):
     # Go to fp63 so eager/compiled paths are numerically identical
     scale = (fp8_max / x_max.double().clamp(min=1e-12)).float()
     x_scaled = x * scale
-    # Expclict clamp, protect agains small numercial error if scale is imperfect
+    # Explicit clamp, protect against small numerical error if scale is imperfect
     x_scaled_clipped = x_scaled.clamp(-fp8_max, fp8_max)
     x_fp8 = x_scaled_clipped.to(dtype)
     scale_inv = scale.reciprocal()

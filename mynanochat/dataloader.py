@@ -70,7 +70,7 @@ class DataLoader:
             self.loaded_shard_idx = self.shard_idx
         return self.loaded_shard_row_groups[self.group_idx][self.idx_in_group]
 
-    def _get_cuurent_shard_num_row_groups(self):
+    def _get_current_shard_num_row_groups(self):
         return len(self.loaded_shard_row_groups)
 
     def _step_cursor(self):
@@ -78,7 +78,7 @@ class DataLoader:
         if self.idx_in_group >= self.group_size:
             self.idx_in_group = 0
             self.group_idx += self.world_size
-            if self.group_idx >= self._get_cuurent_shard_num_row_groups():
+            if self.group_idx >= self._get_current_shard_num_row_groups():
                 self.group_idx = self.rank
                 self.shard_idx += 1
                 if self.shard_idx > self.last_shard:

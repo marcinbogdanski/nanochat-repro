@@ -69,7 +69,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         pos = torch.arange(0, seq_len, dtype=torch.float32, device=device)       # seq_len   ### MARCIN added dtype= device=
         tmp = torch.outer(pos, theta)        # seq_len, head_size//2
         sin, cos = torch.sin(tmp), torch.cos(tmp)
-        sin, cos = sin[None, :, None, :], cos[None, :, None, :]  # 1,seq_len,1,head_size//2  ### MARCIN different sclicing
+        sin, cos = sin[None, :, None, :], cos[None, :, None, :]  # 1,seq_len,1,head_size//2  ### MARCIN different slicing
         cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 

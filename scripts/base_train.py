@@ -1,5 +1,5 @@
 import os
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels prograss bars
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import json
 import time
 import math
@@ -91,8 +91,8 @@ def main():
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
-    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iteratioins for LR warmup')
-    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iteratioins for LR warmdown')
+    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iterations for LR warmup')
+    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iterations for LR warmdown')
     parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
@@ -159,9 +159,9 @@ def main():
         torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
 
     ################################ EQUIVALENCE ###############################
-    # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
+    # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
-        assert args.window_pattern == 'L', "In deterministinc mode window_pattern must be 'L' due to lack of support in upstream library"
+        assert args.window_pattern == 'L', "In deterministic mode window_pattern must be 'L' due to lack of support in upstream library"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -194,7 +194,7 @@ def main():
     model.init_weights()
     if ddp_master:
         print(f"Init: FP8 Summary:")
-        num_linears = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+        num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
         num_eligible = 0
         for name, mod in model.named_modules():
             if isinstance(mod, torch.nn.Linear):
@@ -203,7 +203,7 @@ def main():
                     num_eligible += 1
                 if args.print_details:
                     print(name, mod.in_features, mod.out_features, mod.weight.dtype, mod.weight.device, eligible)
-        print(f"  Eligible for FP8: {num_eligible}/{num_linears} linear layers")
+        print(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
 
 
     orig_model = model
@@ -224,7 +224,7 @@ def main():
     # - at/around d12, sweep batch size
     # - at/around d12, sweep learning-rate-related hyperparameters
     # - sweep weight decay across several depths, fit a transfer rule
-    # - then use paper-based / empirical scaling rules to map reference hyperparams
+    # - then use paper-based / empirical scaling rules to map reference hyperparameters
     #   from d12 to the actual target model
     param_counts: dict = model.number_scaling_params()
     scaling_params = param_counts['transformer_matrices'] + param_counts['lm_head']
@@ -249,7 +249,8 @@ def main():
         proposed_batch_size = ref_d12_batch_size_B_REF * target_token_ratio**0.383
         total_batch_size = 2 ** round(math.log2(proposed_batch_size))
         if ddp_master:
-            print(f"Init: Calculated total_batch_size={total_batch_size} based on Power Lines scaling with target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
+            print(f"Init: Calculated total_batch_size={total_batch_size} based on Power Lines scaling with "
+                  f"target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
 
     # (3) Learning rate scaling
     # SGD - linear is standard
@@ -389,7 +390,7 @@ def main():
         world_size=ddp_world_size,
     )
     if ddp_master:
-        print(f"Init: Train dataloader initialised with shards {train_loader.first_shard} - {train_loader.last_shard}")
+        print(f"Init: Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
@@ -405,7 +406,7 @@ def main():
         world_size=ddp_world_size,
     )
     if ddp_master:
-        print(f"Init: Eval dataloader initialised with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+        print(f"Init: Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
 
 
     total_ntok = 0
@@ -424,7 +425,7 @@ def main():
             with torch.no_grad():
                 for _ in range(eval_steps):
                     x, y = eval_loader.get_batch_bos()
-                    assert (y >= 0).all()  # maskig with -1 not supported
+                    assert (y >= 0).all()  # masking with -1 not supported
                     x = x.to(device)
                     y = y.to(device)
                     with autocast_ctx:
@@ -456,7 +457,7 @@ def main():
             model.eval()
             with autocast_ctx:
                 bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
-                # Original model because shapes keep chaning
+                # Original model because shapes keep changing
                 results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
             core_metric = results['core_metric']
             accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
@@ -509,7 +510,7 @@ def main():
 
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
-            print("Saveing model...")
+            print("Saving model...")
             models_path = os.path.dirname(__file__)+"/../models/"
             os.makedirs(models_path, exist_ok=True)
             model_data = model.state_dict()
