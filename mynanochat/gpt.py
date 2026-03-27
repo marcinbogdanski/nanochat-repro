@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from mynanochat.fp8 import LinearFP8
 
 # Flash Attention 3, source wheel with 3090 support
 from kernels import get_kernel
@@ -35,14 +36,14 @@ class CausalSelfAttentionRoPE(nn.Module):
         self.block_size = config.block_size
         self.attn_backend = attn_backend
 
-        self.c_q = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_k = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_v = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.c_q = LinearFP8(config.n_embd, config.n_embd, bias=False)
+        self.c_k = LinearFP8(config.n_embd, config.n_embd, bias=False)
+        self.c_v = LinearFP8(config.n_embd, config.n_embd, bias=False)
+        self.c_proj = LinearFP8(config.n_embd, config.n_embd, bias=False)
 
         # VE Gate
         self.ve_gate_size = 32
-        self.ve_gate = nn.Linear(32, config.n_head, bias=False) if ve_enable else None
+        self.ve_gate = LinearFP8(32, config.n_head, bias=False) if ve_enable else None
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
@@ -118,8 +119,8 @@ class MLP(nn.Module):
     """Linear transform and activation"""
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4*config.n_embd, config.n_embd, bias=False)
+        self.c_fc = LinearFP8(config.n_embd, 4*config.n_embd, bias=False)
+        self.c_proj = LinearFP8(4*config.n_embd, config.n_embd, bias=False)
     
     def forward(self, x):
         x = self.c_fc(x)
@@ -143,16 +144,18 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, attn_backend):
+    def __init__(self, config, attn_backend, fp8_training):
+        assert attn_backend in ['sdpa', 'fa3']
+        assert isinstance(fp8_training, bool)
         super().__init__()
         self.config = config
-        assert attn_backend in ['sdpa', 'fa3']
+        self.fp8_training = fp8_training
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), attn_backend) for i in range(config.n_layer)]),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
 
         # Params for merging x0 across network and blending residual stream
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
@@ -254,7 +257,13 @@ class GPTModel(nn.Module):
             for ve in self.value_embeds.values():
                 ve.to(dtype=torch.bfloat16)
 
-
+    def train(self, mode=True):
+        if self.fp8_training:
+            fp8_mode = 'fp8' if mode else 'native'
+            for module in self.modules():
+                if isinstance(module, LinearFP8):
+                    module.switch_mode_if_legal(fp8_mode)
+        return super().train(mode)
 
     def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape

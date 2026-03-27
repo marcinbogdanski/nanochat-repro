@@ -16,6 +16,7 @@ from mynanochat.dataloader import DataLoader
 from mynanochat.adamw import AdamW, DistAdamW
 from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
+from mynanochat.fp8 import LinearFP8
 
 class WandBDummy:
     def __init__(self):
@@ -70,9 +71,11 @@ def generate(model, autocast_ctx, idx, max_new_tokens, temperature=0.0, top_k=No
 def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
-    # WandB
+    # Logging
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
-    # Model
+    # FP8 training
+    parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in bfloat16.")
+    # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
     parser.add_argument('--head-dim', type=int, default=128, help='Head dimension for multi-head attention. Total embedding dimension must be divisible by this.')
@@ -162,6 +165,7 @@ def main():
     # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
         assert args.window_pattern == 'L', "In deterministic mode window_pattern must be 'L' due to lack of support in upstream library"
+        # assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -188,23 +192,15 @@ def main():
         n_embd=model_dim,
         window_pattern=args.window_pattern,
     )
-    attn_backend = 'sdpa' if args.deterministic else 'sdpa'  # FA3 has a bug where backward is not deterministic
-    model = GPTModel(model_config, attn_backend=attn_backend)
+    attn_backend = 'sdpa' if args.deterministic else 'fa3'  # FA3 has a bug where backward is not deterministic
+    model = GPTModel(model_config, attn_backend=attn_backend, fp8_training=args.fp8)
     model.to(device)
     model.init_weights()
-    if ddp_master:
-        print(f"Init: FP8 Summary:")
-        num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
-        num_eligible = 0
-        for name, mod in model.named_modules():
-            if isinstance(mod, torch.nn.Linear):
-                eligible = (mod.in_features % 16 == 0 and mod.out_features % 16 == 0)
-                if eligible:
-                    num_eligible += 1
-                if args.print_details:
-                    print(name, mod.in_features, mod.out_features, mod.weight.dtype, mod.weight.device, eligible)
-        print(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
 
+    num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+    num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
+    if ddp_master:
+        print(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
 
     orig_model = model
     if not args.deterministic:

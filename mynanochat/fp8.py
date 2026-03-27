@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 @torch.no_grad()
 def to_fp8(x, dtype):
@@ -20,7 +21,7 @@ def to_fp8(x, dtype):
 
 # Allow treating as black box
 @torch._dynamo.allow_in_graph
-class FP8Matmul(torch.autograd.Function):
+class MatmulFP8(torch.autograd.Function):
     # ctx is the first argument to forward
     @staticmethod
     def forward(ctx, input, weight):
@@ -78,12 +79,37 @@ class FP8Matmul(torch.autograd.Function):
         return grad_input, grad_weight
 
 
-class FP8Linear(torch.nn.Linear):
+class LinearFP8(torch.nn.Linear):
+    def __init__(self, in_features, out_features, bias=False, mode='native'):
+        super().__init__(in_features, out_features, bias=bias)
+        assert mode in ['fp8', 'native']
+        if mode == 'fp8':
+            assert in_features % 16 == 0
+            assert out_features % 16 == 0
+        self.mode = mode
+
+    def is_fp8_legal(self):
+        # Input dim also matters, but we can't check ahead of time - we trust user to handle it
+        return self.weight.size(0) % 16 == 0 and self.weight.size(1) % 16 == 0
+
+    def switch_mode_if_legal(self, mode):
+        """Switch mode. For fp8 only switch if dims allow, otherwise quietly do nothing."""
+        if mode == 'native':
+            self.mode = mode
+        elif mode == 'fp8':
+            if self.is_fp8_legal():
+                self.mode = mode
+        else:
+            raise ValueError("Mode must be 'native' or 'fp8'")
+
     def forward(self, input):
+        if self.mode == 'native':
+            return F.linear(input, self.weight, self.bias)
+
         if torch.is_autocast_enabled():
             input = input.to(torch.get_autocast_gpu_dtype())
         input_2d = input.reshape(-1, input.shape[-1])
-        output_2d = FP8Matmul.apply(input_2d, self.weight)
+        output_2d = MatmulFP8.apply(input_2d, self.weight)
         output = output_2d.reshape(*input.shape[:-1], output_2d.shape[-1])
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
