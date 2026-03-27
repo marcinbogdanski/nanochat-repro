@@ -188,7 +188,8 @@ def main():
         n_embd=model_dim,
         window_pattern=args.window_pattern,
     )
-    model = GPTModel(model_config)
+    attn_backend = 'sdpa' if args.deterministic else 'sdpa'  # FA3 has a bug where backward is not deterministic
+    model = GPTModel(model_config, attn_backend=attn_backend)
     model.to(device)
     model.init_weights()
     if ddp_master:

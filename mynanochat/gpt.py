@@ -27,10 +27,13 @@ class GPTConfig:
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
-    def __init__(self, config, ve_enable):
+    def __init__(self, config, ve_enable, attn_backend):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        assert attn_backend in ['sdpa', 'fa3']
         self.n_head = config.n_head
+        self.block_size = config.block_size
+        self.attn_backend = attn_backend
 
         self.c_q = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.c_k = nn.Linear(config.n_embd, config.n_embd, bias=False)
@@ -91,13 +94,20 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
 
-        # q = q_rot.transpose(1, 2)  # B,nh,T,hs
-        # k = k_rot.transpose(1, 2)  # B,nh,T,hs
-        # v = v.transpose(1, 2)  # B,nh,T,hs
+        if self.attn_backend == 'fa3':
+            # FA3 ok in ddp, this is super wonky
+            y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size, deterministic=True)
+        elif self.attn_backend == 'sdpa':
+            # SDPA fallback for solo mode
+            assert window_size == (self.block_size, 0)  # only window_pattern=='L' supported
+            q_rot = q_rot.transpose(1, 2)  # B,nh,T,hs
+            k_rot = k_rot.transpose(1, 2)  # B,nh,T,hs
+            v = v.transpose(1, 2)  # B,nh,T,hs
+            y = F.scaled_dot_product_attention(q_rot, k_rot, v, is_causal=True)
+            y = y.transpose(1, 2)  # B,T,nh,hs
+        else:
+            raise ValueError("attn_backend must be 'fa3' or 'sdpa'")
 
-        y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size, deterministic=True)
-
-        # y = y.transpose(1, 2)  # B,T,nh,hs
         y = y.contiguous()
         y = y.view(B,T,C)
 
@@ -118,9 +128,9 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, ve_enable):
+    def __init__(self, config, ve_enable, attn_backend):
         super().__init__()
-        self.attn = CausalSelfAttentionRoPE(config, ve_enable)
+        self.attn = CausalSelfAttentionRoPE(config, ve_enable, attn_backend)
         self.mlp = MLP(config)
 
     def _norm(self, x):
@@ -133,13 +143,14 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, attn_backend):
         super().__init__()
         self.config = config
+        assert attn_backend in ['sdpa', 'fa3']
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer)) for i in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), attn_backend) for i in range(config.n_layer)]),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
