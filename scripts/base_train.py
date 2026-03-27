@@ -13,7 +13,7 @@ from contextlib import nullcontext
 import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
-from mynanochat.adamw import DistAdamW
+from mynanochat.adamw import AdamW, DistAdamW
 from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
 
@@ -351,13 +351,12 @@ def main():
             'is_small': True,
         },
     ]
-    adamw_factory = DistAdamW if ddp else torch.optim.AdamW
+    adamw_factory = DistAdamW if ddp else AdamW
     adamw_optimizer = adamw_factory(
         adam_groups,
         betas=adam_betas,
         eps=1e-10,
         weight_decay=0.0,
-        fused=True,
     )
     muon_groups = []
     for shape in sorted({p.shape for p in params_matrix}):
