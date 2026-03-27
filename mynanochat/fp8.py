@@ -25,11 +25,9 @@ class MatmulFP8(torch.autograd.Function):
     # ctx is the first argument to forward
     @staticmethod
     def forward(ctx, input, weight):
-        # The forward pass can use ctx.
-        ctx.save_for_backward(input, weight)
-
         input_fp8, input_scale_inv = to_fp8(input, torch.float8_e4m3fn)
         weight_fp8, weight_scale_inv = to_fp8(weight, torch.float8_e4m3fn)
+        ctx.save_for_backward(input_fp8, input_scale_inv, weight_fp8, weight_scale_inv)
         output = torch._scaled_mm(
             input=input_fp8,
             mat2=weight_fp8.t(),
@@ -42,7 +40,7 @@ class MatmulFP8(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weight = ctx.saved_tensors
+        input_fp8, input_scale_inv, weight_fp8, weight_scale_inv = ctx.saved_tensors
         grad_input = grad_weight = None
 
         if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
@@ -50,7 +48,6 @@ class MatmulFP8(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             # grad_input = grad_output.mm(weight)
-            weight_fp8, weight_scale_inv = to_fp8(weight, torch.float8_e4m3fn)
             weight_fp8_cont = weight_fp8.t().contiguous().t()
             grad_input = torch._scaled_mm(
                 input=grad_out_fp8,
@@ -64,7 +61,6 @@ class MatmulFP8(torch.autograd.Function):
         
         if ctx.needs_input_grad[1]:
             # grad_weight = grad_output.t().mm(input)
-            input_fp8, input_scale_inv = to_fp8(input, torch.float8_e4m3fn)
             input_fp8_cont = input_fp8.t().contiguous().t()
             grad_weight = torch._scaled_mm(
                 input=grad_out_fp8.t().contiguous(),
