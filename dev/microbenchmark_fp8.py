@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mynanochat.fp8 import FP8Linear
-from mynanochat.fp32_temp import FP32Linear
+from dev.fp32_temp import FP32Linear
 
 
 # Run like this
