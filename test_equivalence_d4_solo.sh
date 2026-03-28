@@ -2,6 +2,6 @@
 set -euo pipefail
 
 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m scripts.base_train \
-  --depth=4 --total-batch-size=262144 --device-batch-size=8 --fp8 \
+  --depth=4 --total-batch-size=262144 --device-batch-size=8 \
   --eval-every=10 --eval-tokens=524288 --core-metric-every=0 --sample-every=0 --save-every=10 --num-iterations=4 \
-  --log-every=1 --deterministic --window-pattern=L
+  --log-every=1 --deterministic --window-pattern=SSSL

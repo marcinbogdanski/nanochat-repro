@@ -165,7 +165,6 @@ def main():
     ################################ EQUIVALENCE ###############################
     # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
-        assert args.window_pattern == 'L', "In deterministic mode window_pattern must be 'L' due to lack of support in upstream library"
         assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False

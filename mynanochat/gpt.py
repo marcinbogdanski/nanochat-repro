@@ -2,10 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mynanochat.fp8 import LinearFP8
-
-# Flash Attention 3, source wheel with 3090 support
-from kernels import get_kernel
-flash_attn = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+from mynanochat.flash_attention import sdpa_attn_func, fa3_attn_func
 
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern):
@@ -97,15 +94,10 @@ class CausalSelfAttentionRoPE(nn.Module):
 
         if self.enable_fa3:
             # Flash Attention 3
-            y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+            y = fa3_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
         else:
             # SDPA fallback
-            assert window_size == (self.block_size, 0)  # only window_pattern=='L' supported
-            q_rot = q_rot.transpose(1, 2)  # B,nh,T,hs
-            k_rot = k_rot.transpose(1, 2)  # B,nh,T,hs
-            v = v.transpose(1, 2)  # B,nh,T,hs
-            y = F.scaled_dot_product_attention(q_rot, k_rot, v, is_causal=True)
-            y = y.transpose(1, 2)  # B,T,nh,hs
+            y = sdpa_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
 
         y = y.contiguous()
         y = y.view(B,T,C)
