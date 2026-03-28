@@ -13,9 +13,11 @@ dependencies = [
   "rustbpe==0.1.0",
   "wandb==0.24.2",
   "kernels==0.11.7",
+  "tabulate==0.10.0",
+  "pydot==4.0.1",
 ]
 
-# Don't allow non-wheel installs (no copile from source)
+# Don't allow non-wheel installs (no compile from source)
 [tool.uv.pip]
 # Alias for --only-binary :all:
 no-build = true

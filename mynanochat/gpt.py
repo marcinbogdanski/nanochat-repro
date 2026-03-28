@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# Flash Attention 3, source wheel with 3090 support
-from kernels import get_kernel
-flash_attn = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+from mynanochat.fp8 import LinearFP8
+from mynanochat.flash_attention import sdpa_attn_func, fa3_attn_func
 
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern):
@@ -27,19 +25,22 @@ class GPTConfig:
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
-    def __init__(self, config, ve_enable):
+    def __init__(self, config, ve_enable, enable_fa3):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        assert isinstance(enable_fa3, bool)
         self.n_head = config.n_head
+        self.block_size = config.block_size
+        self.enable_fa3 = enable_fa3
 
-        self.c_q = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_k = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_v = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.c_q = LinearFP8(config.n_embd, config.n_embd, bias=False)
+        self.c_k = LinearFP8(config.n_embd, config.n_embd, bias=False)
+        self.c_v = LinearFP8(config.n_embd, config.n_embd, bias=False)
+        self.c_proj = LinearFP8(config.n_embd, config.n_embd, bias=False)
 
         # VE Gate
         self.ve_gate_size = 32
-        self.ve_gate = nn.Linear(32, config.n_head, bias=False) if ve_enable else None
+        self.ve_gate = LinearFP8(32, config.n_head, bias=False) if ve_enable else None
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
@@ -66,7 +67,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         pos = torch.arange(0, seq_len, dtype=torch.float32, device=device)       # seq_len   ### MARCIN added dtype= device=
         tmp = torch.outer(pos, theta)        # seq_len, head_size//2
         sin, cos = torch.sin(tmp), torch.cos(tmp)
-        sin, cos = sin[None, :, None, :], cos[None, :, None, :]  # 1,seq_len,1,head_size//2  ### MARCIN different sclicing
+        sin, cos = sin[None, :, None, :], cos[None, :, None, :]  # 1,seq_len,1,head_size//2  ### MARCIN different slicing
         cos, sin = cos.bfloat16(), sin.bfloat16()
         return cos, sin
 
@@ -91,13 +92,13 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
 
-        # q = q_rot.transpose(1, 2)  # B,nh,T,hs
-        # k = k_rot.transpose(1, 2)  # B,nh,T,hs
-        # v = v.transpose(1, 2)  # B,nh,T,hs
+        if self.enable_fa3:
+            # Flash Attention 3
+            y = fa3_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+        else:
+            # SDPA fallback
+            y = sdpa_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
 
-        y = flash_attn.flash_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size, deterministic=True)
-
-        # y = y.transpose(1, 2)  # B,T,nh,hs
         y = y.contiguous()
         y = y.view(B,T,C)
 
@@ -108,8 +109,8 @@ class MLP(nn.Module):
     """Linear transform and activation"""
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4*config.n_embd, config.n_embd, bias=False)
+        self.c_fc = LinearFP8(config.n_embd, 4*config.n_embd, bias=False)
+        self.c_proj = LinearFP8(4*config.n_embd, config.n_embd, bias=False)
     
     def forward(self, x):
         x = self.c_fc(x)
@@ -118,9 +119,9 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, ve_enable):
+    def __init__(self, config, ve_enable, enable_fa3):
         super().__init__()
-        self.attn = CausalSelfAttentionRoPE(config, ve_enable)
+        self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
         self.mlp = MLP(config)
 
     def _norm(self, x):
@@ -133,15 +134,18 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, enable_fa3, fp8_training):
+        assert isinstance(enable_fa3, bool)
+        assert isinstance(fp8_training, bool)
         super().__init__()
         self.config = config
+        self.fp8_training = fp8_training
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer)) for i in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), enable_fa3) for i in range(config.n_layer)]),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
 
         # Params for merging x0 across network and blending residual stream
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
@@ -243,7 +247,13 @@ class GPTModel(nn.Module):
             for ve in self.value_embeds.values():
                 ve.to(dtype=torch.bfloat16)
 
-
+    def train(self, mode=True):
+        if self.fp8_training:
+            fp8_mode = 'fp8' if mode else 'native'
+            for module in self.modules():
+                if isinstance(module, LinearFP8):
+                    module.switch_mode_if_legal(fp8_mode)
+        return super().train(mode)
 
     def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape

@@ -1,5 +1,5 @@
 import os
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels prograss bars
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import json
 import time
 import math
@@ -13,9 +13,10 @@ from contextlib import nullcontext
 import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
-from mynanochat.adamw import DistAdamW
+from mynanochat.adamw import AdamW, DistAdamW
 from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
+from mynanochat.fp8 import LinearFP8
 
 class WandBDummy:
     def __init__(self):
@@ -70,9 +71,12 @@ def generate(model, autocast_ctx, idx, max_new_tokens, temperature=0.0, top_k=No
 def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
-    # WandB
+    # Logging
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
-    # Model
+    # FP8 training
+    parser.add_argument('--fa3', action='store_true', help="Enable Flash Attention 3.")
+    parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in bfloat16.")
+    # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
     parser.add_argument('--head-dim', type=int, default=128, help='Head dimension for multi-head attention. Total embedding dimension must be divisible by this.')
@@ -91,8 +95,8 @@ def main():
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
     parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
-    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iteratioins for LR warmup')
-    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iteratioins for LR warmdown')
+    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iterations for LR warmup')
+    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iterations for LR warmdown')
     parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
@@ -103,6 +107,7 @@ def main():
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
+    parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
     args = parser.parse_args()
     user_config = vars(args).copy()
 
@@ -158,9 +163,9 @@ def main():
         torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
 
     ################################ EQUIVALENCE ###############################
-    # Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
+    # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
     if args.deterministic:
-        assert args.window_pattern == 'L', "In deterministinc mode window_pattern must be 'L' due to lack of support in upstream library"
+        assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -187,12 +192,25 @@ def main():
         n_embd=model_dim,
         window_pattern=args.window_pattern,
     )
-    model = GPTModel(model_config)
+    model = GPTModel(model_config, enable_fa3=args.fa3, fp8_training=args.fp8)
     model.to(device)
     model.init_weights()
+
+    num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+    num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
+    if ddp_master:
+        print(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
+
     orig_model = model
     if not args.deterministic:
         model = torch.compile(model)
+    if ddp_master:
+        print("Init: Model info:")
+        print(f"  {block_size=}")
+        print(f"  {vocab_size=}")
+        print(f"  {depth=}")
+        print(f"  {model_dim=}")
+        print(f"  {num_heads=}")
 
     # (1) Scaling laws / transfer recipe
     # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
@@ -201,11 +219,15 @@ def main():
     # - at/around d12, sweep batch size
     # - at/around d12, sweep learning-rate-related hyperparameters
     # - sweep weight decay across several depths, fit a transfer rule
-    # - then use paper-based / empirical scaling rules to map reference hyperparams
+    # - then use paper-based / empirical scaling rules to map reference hyperparameters
     #   from d12 to the actual target model
     param_counts: dict = model.number_scaling_params()
     scaling_params = param_counts['transformer_matrices'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
+    if ddp_master:
+        print(f"Init: Scaling info:")
+        print(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
+        print(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
     ref_d12_scaling_params = 135267456  # transformer_matrices + lm_head for d12 model, from nanochat
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
@@ -214,11 +236,16 @@ def main():
     # (2) Batch size calculation
     if args.total_batch_size > 0:
         total_batch_size = args.total_batch_size
+        if ddp_master:
+            print(f"Init: Using user-provided total_batch_size={total_batch_size} without scaling.")
     else:
         # Power Lines paper (Bopt=D^0.383), https://arxiv.org/abs/2505.13738
         target_token_ratio = target_tokens / ref_d12_target_tokens_D_REF
         proposed_batch_size = ref_d12_batch_size_B_REF * target_token_ratio**0.383
         total_batch_size = 2 ** round(math.log2(proposed_batch_size))
+        if ddp_master:
+            print(f"Init: Calculated total_batch_size={total_batch_size} based on Power Lines scaling with "
+                  f"target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
 
     # (3) Learning rate scaling
     # SGD - linear is standard
@@ -231,12 +258,17 @@ def main():
     # T_epoch framework, https://arxiv.org/abs/2405.13698
     scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
     if ddp_master:
-        print("WD", args.weight_decay, " -> ", scaled_weight_decay)
+        print(f"Init: Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
     # Training Hyperparameters
     micro_batch = args.device_batch_size
     assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
+    if ddp_master:
+        print(f"Init: Training hyperparameters:")
+        print(f"  {micro_batch=}")
+        print(f"  {total_batch_size=}")
+        print(f"  {grad_accum=}")
 
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
@@ -256,6 +288,8 @@ def main():
     # Calc Max Steps
     if args.num_iterations > 0:
         max_steps = args.num_iterations
+        if ddp_master:
+            print(f"Init: Using user-provided num_iterations={max_steps} without scaling.")
     else:
         max_steps = target_tokens // total_batch_size  # floor the division
         if ddp_master:
@@ -313,13 +347,12 @@ def main():
             'is_small': True,
         },
     ]
-    adamw_factory = DistAdamW if ddp else torch.optim.AdamW
+    adamw_factory = DistAdamW if ddp else AdamW
     adamw_optimizer = adamw_factory(
         adam_groups,
         betas=adam_betas,
         eps=1e-10,
         weight_decay=0.0,
-        fused=True,
     )
     muon_groups = []
     for shape in sorted({p.shape for p in params_matrix}):
@@ -352,7 +385,7 @@ def main():
         world_size=ddp_world_size,
     )
     if ddp_master:
-        print(f"Init: Train dataloader initialised with shards {train_loader.first_shard} - {train_loader.last_shard}")
+        print(f"Init: Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
@@ -368,7 +401,7 @@ def main():
         world_size=ddp_world_size,
     )
     if ddp_master:
-        print(f"Init: Eval dataloader initialised with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+        print(f"Init: Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
 
 
     total_ntok = 0
@@ -387,7 +420,7 @@ def main():
             with torch.no_grad():
                 for _ in range(eval_steps):
                     x, y = eval_loader.get_batch_bos()
-                    assert (y >= 0).all()  # maskig with -1 not supported
+                    assert (y >= 0).all()  # masking with -1 not supported
                     x = x.to(device)
                     y = y.to(device)
                     with autocast_ctx:
@@ -419,7 +452,7 @@ def main():
             model.eval()
             with autocast_ctx:
                 bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
-                # Original model because shapes keep chaning
+                # Original model because shapes keep changing
                 results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
             core_metric = results['core_metric']
             accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
@@ -472,7 +505,7 @@ def main():
 
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
-            print("Saveing model...")
+            print("Saving model...")
             models_path = os.path.dirname(__file__)+"/../models/"
             os.makedirs(models_path, exist_ok=True)
             model_data = model.state_dict()
@@ -497,6 +530,7 @@ def main():
         model.train()
         if device.startswith('cuda'):
             torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
@@ -532,6 +566,7 @@ def main():
         # Sync & Time
         if device.startswith('cuda'):
             torch.cuda.synchronize()  # wait for the GPU to finish work
+        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
         dt = (time.time() - ts)
         smooth_dt = 0.9 * smooth_dt + 0.1 * dt
         debiased_smooth_dt = smooth_dt / (1 - 0.9**(step+1))
@@ -552,6 +587,7 @@ def main():
             print(f"Step {step}/{max_steps} ({pct:.2f}%) | "
                   f"loss {debiased_smooth_train_loss:.16f} {loss_accum.item():.4f} | "
                   f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                  f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                   f"time {total_time_str} | eta {eta_str}")
         if step % args.log_every == 0:
             wandb_logger.log({
