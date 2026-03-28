@@ -1,12 +1,15 @@
 import torch
 import torch.nn.functional as F
 
+# Flash Attention 3, source wheel with 3090 support
+from kernels import get_kernel
+_fa3 = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+
+
 def fa3_attn_func(q, k, v, causal, window_size):
-    # Flash Attention 3, source wheel with 3090 support
-    from kernels import get_kernel
-    flash_attn = get_kernel('kernels-community/flash-attn3').flash_attn_interface
     # q, k, v are [B,T,nh,hs] dims
-    return flash_attn.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+
 
 def _sdpa_attn_func(q, k, v, causal, window_size):
     """SDPA wrapper to implement window_size"""
