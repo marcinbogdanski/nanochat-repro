@@ -1,4 +1,4 @@
-
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -56,7 +56,7 @@ class SmallModelMOE(nn.Module):
             start_idx += num_expert
         out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
         
-        out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=x.dtype)
+        out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=out_flat_stacked_flat_sorted.dtype)
         out_flat_stacked_flat[indices_flat_sorted_indices] = out_flat_stacked_flat_sorted   # B*T*K, C
         out_flat_stacked = out_flat_stacked_flat.reshape(B*T, K, C)
         out_flat = out_flat_stacked.sum(dim=1)   # B*T, C
@@ -79,7 +79,6 @@ with torch.no_grad():
 
 
 x = torch.randn(B, T, C)  # B,T,C
-
 with torch.no_grad():
     out_m = model_m(x)
     out_k = model_k(x)
@@ -90,7 +89,38 @@ with torch.no_grad():
 
 print(out_m[0, :5, :5])
 print(out_k[0, :5, :5])
-
 print(f"(out_m-out_k).abs().max().item(): {(out_m-out_k).abs().max().item()}")  # 0.0
+
+model_m = model_m.cuda()
+model_m = torch.compile(model_m)
+model_k = model_k.cuda()
+model_k = torch.compile(model_k)
+
+torch.cuda.synchronize()
+start_time = time.time()
+for i in range(100):
+    x = torch.randn(B, T, C).cuda()  # B,T,C
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        out = model_m(x)
+    loss = out.float().square().mean()
+    loss.backward()
+    model_m.zero_grad()
+torch.cuda.synchronize()
+end_time = time.time()
+print(f"Time taken for 100 iterations: {end_time - start_time} seconds")
+
+torch.cuda.synchronize()
+start_time = time.time()
+for i in range(100):
+    x = torch.randn(B, T, C).cuda()  # B,T,C
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        out = model_k(x)
+    loss = out.float().square().mean()
+    loss.backward()
+    model_k.zero_grad()
+torch.cuda.synchronize()
+end_time = time.time()
+print(f"Time taken for 100 iterations: {end_time - start_time} seconds")
+
 
 print("Bye")
