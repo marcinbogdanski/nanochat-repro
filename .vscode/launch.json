@@ -12,6 +12,12 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "Python Debugger: Module (moe)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "dev.microbenchmark_moe",
+        },
+        {
             "name": "Python Debugger: Module",
             "type": "debugpy",
             "request": "launch",

@@ -1,6 +1,6 @@
 import torch
 
-class FP32Matmul(torch.autograd.Function):
+class MatmulFP32(torch.autograd.Function):
     """Drop-in nn.Linear replacement for testing how custom Function behaves."""
     
     @staticmethod
@@ -32,9 +32,9 @@ class FP32Matmul(torch.autograd.Function):
         return grad_input, grad_weight
 
 
-class FP32Linear(torch.nn.Linear):
+class LinearFP32(torch.nn.Linear):
     def forward(self, input):
-        output = FP32Matmul.apply(input, self.weight)
+        output = MatmulFP32.apply(input, self.weight)
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
         return output
