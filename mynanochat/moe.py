@@ -11,8 +11,10 @@ class MoE(nn.Module):
         self.router.register_buffer('expert_bias', torch.zeros(E))
         self.router.register_buffer('tokens_per_expert_counter', torch.zeros(E))
         self.experts = nn.Module()
-        self.experts.w_ups = nn.ParameterList([nn.Parameter(torch.empty(C*4//K, C)) for _ in range(E)])
-        self.experts.w_downs = nn.ParameterList([nn.Parameter(torch.empty(C, C*4//K)) for _ in range(E)])
+        # Keep as 2D nn.Parameters so Muon can work on them easily. Also easier to stack before grouped_mm.
+        scale = C**-0.5  # Xavier-style 1/sqrt(fan_in), overridden by init_weights in gpt.py
+        self.experts.w_ups = nn.ParameterList([nn.Parameter(torch.randn(C*4//K, C)*scale) for _ in range(E)])
+        self.experts.w_downs = nn.ParameterList([nn.Parameter(torch.zeros(C, C*4//K)) for _ in range(E)])
 
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
