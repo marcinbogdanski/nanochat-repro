@@ -276,6 +276,16 @@ class GPTModel(nn.Module):
                     module.switch_mode_if_legal(fp8_mode)
         return super().train(mode)
 
+    def update_moe_balancing(self):
+        for block in self.transformer.h:
+            if block.moe_enable:
+                block.moe.update_expert_bias()
+
+    def zero_moe_counters(self):
+        for block in self.transformer.h:
+            if block.moe_enable:
+                block.moe.zero_token_counters()
+
     def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."

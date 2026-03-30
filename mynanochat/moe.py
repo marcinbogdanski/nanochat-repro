@@ -21,8 +21,11 @@ class MoE(nn.Module):
         E = len(self.experts.w_ups)
         x_flat = x.reshape(-1, C)          # B*T, C
         logits = self.router.gate(x_flat)       # B*T, E
+        # Bias the expert selection, but *not* weighting (Nanochat, DeepSeekV3)
         weights = torch.sigmoid(logits.float())    # B*T, E
-        values, indices = torch.topk(weights, K, dim=-1)     # B*T, K
+        weights_biased = weights + self.router.expert_bias   # B*T, E
+        _, indices = torch.topk(weights_biased, K, dim=-1)   # B*T, K
+        values = torch.gather(weights, dim=-1, index=indices)   # B*T, K
         x_flat_stacked = torch.stack([x_flat]*K, dim=1)      # B*T, K, C
         x_flat_stacked_flat = x_flat_stacked.reshape(-1, C)  # B*T*K, C
         indices_flat = indices.reshape(-1)                   # B*T*K
@@ -31,6 +34,13 @@ class MoE(nn.Module):
         x_flat_stacked_flat_sorted = x_flat_stacked_flat[indices_flat_sorted_indices]  # B*T*K, C
         values_flat_sorted = values_flat[indices_flat_sorted_indices]  # B*T*K
         x_flat_stacked_flat_sorted_weighted = x_flat_stacked_flat_sorted * values_flat_sorted.unsqueeze(-1)  # B*T*K, C
+
+        # Update expert token counts for load balancing
+        # This probably should be disabled during evaluation
+        expert_ids = torch.arange(E, device=indices.device)
+        indices_column = indices_flat.unsqueeze(1)                           # B*T*K, 1
+        num_tokens_per_expert = (indices_column == expert_ids).sum(dim=0).to(self.router.tokens_per_expert_counter.dtype)
+        self.router.tokens_per_expert_counter += num_tokens_per_expert
         
         start_idx = 0
         outs = []
@@ -50,3 +60,15 @@ class MoE(nn.Module):
         out_flat = out_flat_stacked.sum(dim=1)   # B*T, C
         outputs = out_flat.reshape(B, T, C)
         return outputs
+
+    def update_expert_bias(self, coeff=1e-3):
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(self.router.tokens_per_expert_counter)
+        # Push experts with low token counts up, and vice-versa
+        token_count_mean = self.router.tokens_per_expert_counter.mean()
+        token_count_centered = self.router.tokens_per_expert_counter - token_count_mean
+        self.router.expert_bias -= coeff * torch.sign(token_count_centered)
+        self.router.expert_bias = self.router.expert_bias - self.router.expert_bias.mean()
+
+    def zero_token_counters(self):
+        self.router.tokens_per_expert_counter.zero_()

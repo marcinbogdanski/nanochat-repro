@@ -565,6 +565,10 @@ def main():
             group['momentum'] = muon_momentum
             group['weight_decay'] = muon_weight_decay
 
+        # Update MoE balancing
+        model.update_moe_balancing()
+        model.zero_moe_counters()
+
         # Optimizer Step
         for opt in optimizers:
             opt.step()
