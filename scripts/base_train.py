@@ -82,6 +82,7 @@ def main():
     parser.add_argument('--head-dim', type=int, default=128, help='Head dimension for multi-head attention. Total embedding dimension must be divisible by this.')
     parser.add_argument('--max-seq-len', type=int, default=2048, help='Context length (block size).')
     parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
+    parser.add_argument('--moe', action='store_true', help='Use Mixture of Experts (MoE) layers instead of dense MLPs.')
     # Training horizon
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
     parser.add_argument('--target-param-data-ratio', type=float, default=10.5, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
@@ -191,6 +192,9 @@ def main():
         n_head=num_heads,
         n_embd=model_dim,
         window_pattern=args.window_pattern,
+        moe_enable=args.moe,
+        moe_n_experts=8,
+        moe_top_k=2,
     )
     model = GPTModel(model_config, enable_fa3=args.fa3, fp8_training=args.fp8)
     model.to(device)
@@ -230,6 +234,8 @@ def main():
         print(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
     ref_d12_scaling_params = 135267456  # transformer_matrices + lm_head for d12 model, from nanochat
+    if args.moe:
+        ref_d12_scaling_params = 305210496  # After MoE, from nanochat
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
     ref_d12_batch_size_B_REF = 2**19    # 2**19=524288, measured empirically in nanochat for d12
 

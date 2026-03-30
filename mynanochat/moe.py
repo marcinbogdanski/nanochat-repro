@@ -6,18 +6,22 @@ class MoE(nn.Module):
     def __init__(self, C, E, K):
         super().__init__()
         self.K = K
-        self.router = nn.Linear(C, E, bias=False)
-        self.experts_up = nn.ModuleList([nn.Linear(C, C*4//K, bias=False) for _ in range(E)])
-        self.experts_down = nn.ModuleList([nn.Linear(C*4//K, C, bias=False) for _ in range(E)])
+        self.router = nn.Module()
+        self.router.gate = nn.Linear(C, E, bias=False)
+        self.router.register_buffer('expert_bias', torch.zeros(E))
+        self.router.register_buffer('tokens_per_expert_counter', torch.zeros(E))
+        self.experts = nn.Module()
+        self.experts.w_ups = nn.ParameterList([nn.Parameter(torch.empty(C*4//K, C)) for _ in range(E)])
+        self.experts.w_downs = nn.ParameterList([nn.Parameter(torch.empty(C, C*4//K)) for _ in range(E)])
 
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
         B, T, C = x.shape
         K = self.K
-        E = len(self.experts_up)
+        E = len(self.experts.w_ups)
         x_flat = x.reshape(-1, C)          # B*T, C
-        logits = self.router(x_flat)       # B*T, E
-        weights = torch.sigmoid(logits)    # B*T, E
+        logits = self.router.gate(x_flat)       # B*T, E
+        weights = torch.sigmoid(logits.float())    # B*T, E
         values, indices = torch.topk(weights, K, dim=-1)     # B*T, K
         x_flat_stacked = torch.stack([x_flat]*K, dim=1)      # B*T, K, C
         x_flat_stacked_flat = x_flat_stacked.reshape(-1, C)  # B*T*K, C
@@ -33,9 +37,9 @@ class MoE(nn.Module):
         for i in range(E):
             num_expert = (indices==i).sum().item()
             end_idx = start_idx + num_expert
-            h = self.experts_up[i](x_flat_stacked_flat_sorted_weighted[start_idx:end_idx])
+            h = x_flat_stacked_flat_sorted_weighted[start_idx:end_idx] @ self.experts.w_ups[i].T
             z = F.relu(h).square()
-            o = self.experts_down[i](z)
+            o = z @ self.experts.w_downs[i].T
             outs.append(o)
             start_idx += num_expert
         out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C

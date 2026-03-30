@@ -2,16 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mynanochat.fp8 import LinearFP8
+from mynanochat.moe import MoE
 from mynanochat.flash_attention import sdpa_attn_func, fa3_attn_func
 
 class GPTConfig:
-    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern):
+    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_n_experts, moe_top_k):
         self.block_size = block_size
         self.vocab_size = vocab_size
         self.n_layer = n_layer
         self.n_head = n_head
         self.n_embd = n_embd
         self.window_pattern = window_pattern
+        self.moe_enable = moe_enable
+        self.moe_n_experts = moe_n_experts
+        self.moe_top_k = moe_top_k
 
     def to_dict(self):
         return {
@@ -21,6 +25,9 @@ class GPTConfig:
             'n_head': self.n_head,
             'n_embd': self.n_embd,
             'window_pattern': self.window_pattern,
+            'moe_enable': self.moe_enable,
+            'moe_experts': self.moe_n_experts,
+            'moe_top_k': self.moe_top_k,
         }
 
 class CausalSelfAttentionRoPE(nn.Module):
@@ -122,14 +129,21 @@ class Block(nn.Module):
     def __init__(self, config, ve_enable, enable_fa3):
         super().__init__()
         self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
-        self.mlp = MLP(config)
+        self.moe_enable = config.moe_enable
+        if not config.moe_enable:
+            self.mlp = MLP(config)
+        else:
+            self.moe = MoE(C=config.n_embd, E=config.moe_n_experts, K=config.moe_top_k)
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
 
     def forward(self, x, ve, cos, sin, window_size):
         x = x + self.attn(self._norm(x), ve, cos, sin, window_size)        # B,T,E pre-norm
-        x = x + self.mlp(self._norm(x))
+        if not self.moe_enable:
+            x = x + self.mlp(self._norm(x))
+        else:
+            x = x + self.moe(self._norm(x))
         return x
 
 
@@ -225,8 +239,15 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
-            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            if not self.config.moe_enable:
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
+                torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            else:
+                torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
+                for expert_up in block.moe.experts.w_ups:
+                    torch.nn.init.uniform_(expert_up, -s, s)
+                for expert_down in block.moe.experts.w_downs:
+                    torch.nn.init.zeros_(expert_down)
 
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:
