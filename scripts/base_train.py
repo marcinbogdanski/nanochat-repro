@@ -235,7 +235,7 @@ def main():
 
     ref_d12_scaling_params = 135267456  # transformer_matrices + lm_head for d12 model, from nanochat
     if args.moe:
-        ref_d12_scaling_params = 305210496  # After MoE, from nanochat
+        ref_d12_scaling_params = 248587392  # After shared-expert MoE, from nanochat
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
     ref_d12_batch_size_B_REF = 2**19    # 2**19=524288, measured empirically in nanochat for d12
 

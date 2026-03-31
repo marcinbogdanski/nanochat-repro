@@ -244,8 +244,8 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             else:
                 torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
-                torch.nn.init.uniform_(block.moe.experts.w_ups, -s, s)
-                torch.nn.init.zeros_(block.moe.experts.w_downs)
+                torch.nn.init.uniform_(block.moe.experts.w_up, -s, s)
+                torch.nn.init.zeros_(block.moe.experts.w_down)
                 torch.nn.init.uniform_(block.moe.shared_expert.w_up.weight, -s, s)
                 torch.nn.init.zeros_(block.moe.shared_expert.w_down.weight)
 

@@ -14,8 +14,8 @@ class MoE(nn.Module):
         scale = C**-0.5  # Xavier-style 1/sqrt(fan_in), overridden by init_weights in gpt.py
         active_experts = 1 + K  # 1 shared expert + K routed experts
         hidden_dim = round(C*4/active_experts/128) * 128  # Nearest multiple of 128
-        self.experts.w_ups = nn.Parameter(torch.randn(E, hidden_dim, C)*scale)
-        self.experts.w_downs = nn.Parameter(torch.zeros(E, C, hidden_dim))
+        self.experts.w_up = nn.Parameter(torch.randn(E, hidden_dim, C)*scale)
+        self.experts.w_down = nn.Parameter(torch.zeros(E, C, hidden_dim))
         self.shared_expert = nn.Module()
         self.shared_expert.w_up = nn.Linear(C, hidden_dim, bias=False)
         self.shared_expert.w_down = nn.Linear(hidden_dim, C, bias=False)
@@ -24,20 +24,15 @@ class MoE(nn.Module):
     def forward(self, x):
         B, T, C = x.shape
         K = self.K
-        E = self.experts.w_ups.size(0)
+        E = self.experts.w_up.size(0)
         x_flat = x.reshape(-1, C)          # B*T, C
 
-        # Shared expert path
-        h_shared = self.shared_expert.w_up(x_flat)
-        z_shared = F.relu(h_shared).square()
-        out_flat_shared = self.shared_expert.w_down(z_shared)
-        
         # Routed expert path start
         # Bias the expert selection, but *not* weighting (Nanochat, DeepSeekV3)
         logits = self.router.gate(x_flat)       # B*T, E
         weights = torch.sigmoid(logits.float())    # B*T, E
         weights_biased = weights + self.router.expert_bias   # B*T, E
-        _, indices = torch.topk(weights_biased, K, dim=-1)   # B*T, K
+        _, indices = torch.topk(weights_biased, K, dim=-1, sorted=False)   # B*T, K
         values = torch.gather(weights, dim=-1, index=indices)   # B*T, K
         x_flat_stacked = torch.stack([x_flat]*K, dim=1)      # B*T, K, C
         x_flat_stacked_flat = x_flat_stacked.reshape(-1, C)  # B*T*K, C
@@ -47,6 +42,11 @@ class MoE(nn.Module):
         x_flat_stacked_flat_sorted = x_flat_stacked_flat[indices_flat_sorted_indices]  # B*T*K, C
         values_flat_sorted = values_flat[indices_flat_sorted_indices]  # B*T*K
         x_flat_stacked_flat_sorted_weighted = x_flat_stacked_flat_sorted * values_flat_sorted.unsqueeze(-1)  # B*T*K, C
+
+        # Shared expert path
+        h_shared = self.shared_expert.w_up(x_flat)
+        z_shared = F.relu(h_shared).square()
+        out_flat_shared = self.shared_expert.w_down(z_shared)
 
         # Update expert token counts for load balancing
         # This probably should be disabled during evaluation
@@ -61,9 +61,9 @@ class MoE(nn.Module):
         for i in range(E):
             num_expert = (indices==i).sum().item()
             end_idx = start_idx + num_expert
-            h = x_flat_stacked_flat_sorted_weighted[start_idx:end_idx] @ self.experts.w_ups[i].T
+            h = x_flat_stacked_flat_sorted_weighted[start_idx:end_idx] @ self.experts.w_up[i].T
             z = F.relu(h).square()
-            o = z @ self.experts.w_downs[i].T
+            o = z @ self.experts.w_down[i].T
             outs.append(o)
             start_idx += num_expert
         
