@@ -11,10 +11,14 @@ class MoE(nn.Module):
         self.router.register_buffer('expert_bias', torch.zeros(E))
         self.router.register_buffer('tokens_per_expert_counter', torch.zeros(E))
         self.experts = nn.Module()
-        # Keep as 2D nn.Parameters so Muon can work on them easily. Also easier to stack before grouped_mm.
         scale = C**-0.5  # Xavier-style 1/sqrt(fan_in), overridden by init_weights in gpt.py
-        self.experts.w_ups = nn.Parameter(torch.randn(E, C*4//K, C)*scale)
-        self.experts.w_downs = nn.Parameter(torch.zeros(E, C, C*4//K))
+        active_experts = 1 + K  # 1 shared expert + K routed experts
+        hidden_dim = round(C*4/active_experts/128) * 128  # Nearest multiple of 128
+        self.experts.w_ups = nn.Parameter(torch.randn(E, hidden_dim, C)*scale)
+        self.experts.w_downs = nn.Parameter(torch.zeros(E, C, hidden_dim))
+        self.shared_expert = nn.Module()
+        self.shared_expert.w_up = nn.Linear(C, hidden_dim, bias=False)
+        self.shared_expert.w_down = nn.Linear(hidden_dim, C, bias=False)
 
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
@@ -22,8 +26,15 @@ class MoE(nn.Module):
         K = self.K
         E = self.experts.w_ups.size(0)
         x_flat = x.reshape(-1, C)          # B*T, C
-        logits = self.router.gate(x_flat)       # B*T, E
+
+        # Shared expert path
+        h_shared = self.shared_expert.w_up(x_flat)
+        z_shared = F.relu(h_shared).square()
+        out_flat_shared = self.shared_expert.w_down(z_shared)
+        
+        # Routed expert path start
         # Bias the expert selection, but *not* weighting (Nanochat, DeepSeekV3)
+        logits = self.router.gate(x_flat)       # B*T, E
         weights = torch.sigmoid(logits.float())    # B*T, E
         weights_biased = weights + self.router.expert_bias   # B*T, E
         _, indices = torch.topk(weights_biased, K, dim=-1)   # B*T, K
@@ -44,6 +55,7 @@ class MoE(nn.Module):
         num_tokens_per_expert = (indices_column == expert_ids).sum(dim=0).to(self.router.tokens_per_expert_counter.dtype)
         self.router.tokens_per_expert_counter += num_tokens_per_expert
         
+        # Loop over routed experts
         start_idx = 0
         outs = []
         for i in range(E):
@@ -54,13 +66,17 @@ class MoE(nn.Module):
             o = z @ self.experts.w_downs[i].T
             outs.append(o)
             start_idx += num_expert
-        out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
         
+        # Combine routed experts and project back
+        out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
         out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=out_flat_stacked_flat_sorted.dtype)
         out_flat_stacked_flat[indices_flat_sorted_indices] = out_flat_stacked_flat_sorted   # B*T*K, C
         out_flat_stacked = out_flat_stacked_flat.reshape(B*T, K, C)
         out_flat = out_flat_stacked.sum(dim=1)   # B*T, C
-        outputs = out_flat.reshape(B, T, C)
+
+        # Combine shared and routed expert paths
+        outputs = out_flat + out_flat_shared   # B*T, C
+        outputs = outputs.reshape(B, T, C)
         return outputs
 
     def update_expert_bias(self, coeff=1e-3):
