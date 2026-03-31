@@ -12,19 +12,13 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "Python Debugger: Module (moe)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "dev.microbenchmark_moe",
-        },
-        {
             "name": "Python Debugger: Module",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.base_train",
             "env": {
                 "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                "CUDA_VISIBLE_DEVICES": "0"
+                "CUDA_VISIBLE_DEVICES": "3"
             },
             "args": [
                 "--depth=4",
@@ -38,7 +32,8 @@
                 "--num-iterations=4",
                 "--log-every=1",
                 "--deterministic",
-                "--window-pattern=L"
+                "--window-pattern=SSSL",
+                "--moe"
             ]
         }
     ]

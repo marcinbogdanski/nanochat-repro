@@ -31,6 +31,51 @@ class MoE(nn.Module):
             'active': expert_params_active,
             'inactive': expert_params_inactive,
         }
+    
+    def _exec_experts_loop(self, x_flat_stacked_flat_sorted_weighted, indices_flat, x_dtype):
+        # Loop over routed experts
+        start_idx = 0
+        outs = []
+        E = self.experts.w_up.size(0)
+        for i in range(E):
+            num_expert = (indices_flat==i).sum().item()
+            end_idx = start_idx + num_expert
+            h = x_flat_stacked_flat_sorted_weighted[start_idx:end_idx] @ self.experts.w_up[i].T
+            z = F.relu(h).square()
+            o = z @ self.experts.w_down[i].T
+            outs.append(o)
+            start_idx += num_expert
+        out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
+        return out_flat_stacked_flat_sorted
+
+    def _exec_experts_grouped_mm(self, x_flat_stacked_flat_sorted_weighted, indices_flat, x_dtype):
+        E = self.experts.w_up.size(0)
+        expert_ids = torch.arange(E, device=indices_flat.device).unsqueeze(-1)
+        expert_mask = expert_ids == indices_flat.unsqueeze(0)
+        expert_offsets = expert_mask.sum(dim=1).cumsum(dim=0).to(torch.int32)  # E
+
+        if torch.is_autocast_enabled():
+            autocast_dtype = torch.get_autocast_gpu_dtype()
+            x_flat_stacked_flat_sorted_weighted = x_flat_stacked_flat_sorted_weighted.to(autocast_dtype)
+            expert_w_up = self.experts.w_up.to(autocast_dtype)
+        h_experts = torch._grouped_mm(
+            input=x_flat_stacked_flat_sorted_weighted,
+            mat2=expert_w_up.mT,
+            offs=expert_offsets,
+        )
+        z_experts = F.relu(h_experts).square()
+        if torch.is_autocast_enabled():
+            z_experts = z_experts.to(autocast_dtype)
+            expert_w_down = self.experts.w_down.to(autocast_dtype)
+        out_experts = torch._grouped_mm(
+            input=z_experts,
+            mat2=expert_w_down.mT,
+            offs=expert_offsets,
+        )
+        out_flat_stacked_flat_sorted = out_experts.to(x_dtype)
+        return out_flat_stacked_flat_sorted
+
+
 
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
@@ -75,20 +120,12 @@ class MoE(nn.Module):
         num_tokens_per_expert = (indices_column == expert_ids).sum(dim=0).to(self.router.tokens_per_expert_counter.dtype)
         self.router.tokens_per_expert_counter += num_tokens_per_expert
         
-        # Loop over routed experts
-        start_idx = 0
-        outs = []
-        for i in range(E):
-            num_expert = (indices==i).sum().item()
-            end_idx = start_idx + num_expert
-            h = x_flat_stacked_flat_sorted_weighted[start_idx:end_idx] @ self.experts.w_up[i].T
-            z = F.relu(h).square()
-            o = z @ self.experts.w_down[i].T
-            outs.append(o)
-            start_idx += num_expert
-        
+        if x.is_cuda:
+            out_flat_stacked_flat_sorted = self._exec_experts_grouped_mm(x_flat_stacked_flat_sorted_weighted, indices_flat, x.dtype)
+        else:
+            out_flat_stacked_flat_sorted = self._exec_experts_loop(x_flat_stacked_flat_sorted_weighted, indices_flat, x.dtype)
+
         # Combine routed experts and project back
-        out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
         out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=out_flat_stacked_flat_sorted.dtype)
         out_flat_stacked_flat[indices_flat_sorted_indices] = out_flat_stacked_flat_sorted   # B*T*K, C
         out_flat_stacked = out_flat_stacked_flat.reshape(B*T, K, C)
