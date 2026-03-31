@@ -34,14 +34,22 @@ class MoE(nn.Module):
         weights_biased = weights + self.router.expert_bias   # B*T, E
         _, indices = torch.topk(weights_biased, K, dim=-1, sorted=False)   # B*T, K
         values = torch.gather(weights, dim=-1, index=indices)   # B*T, K
-        x_flat_stacked = torch.stack([x_flat]*K, dim=1)      # B*T, K, C
-        x_flat_stacked_flat = x_flat_stacked.reshape(-1, C)  # B*T*K, C
         indices_flat = indices.reshape(-1)                   # B*T*K
-        values_flat = values.reshape(-1)                     # B*T*K
         indices_flat_sorted_indices = torch.argsort(indices_flat, stable=True)  # B*T*K
-        x_flat_stacked_flat_sorted = x_flat_stacked_flat[indices_flat_sorted_indices]  # B*T*K, C
+        # vv
+        # There are two equivalent formulations, the simpler one required duplicating the x_flat
+        # Te second formulation we are actually using is slightly better on memory
+        # x_flat_stacked = torch.stack([x_flat]*K, dim=1)      # B*T, K, C
+        # x_flat_stacked_flat = x_flat_stacked.reshape(-1, C)  # B*T*K, C
+        # x_flat_stacked_flat_sorted = x_flat_stacked_flat[indices_flat_sorted_indices]  # B*T*K, C
+        # --
+        token_ids = indices_flat_sorted_indices // K         # B*T*K
+        x_flat_stacked_flat_sorted = x_flat[token_ids]       # B*T*K, C
+        # ^^
+        values_flat = values.reshape(-1)                     # B*T*K
         values_flat_sorted = values_flat[indices_flat_sorted_indices]  # B*T*K
-        x_flat_stacked_flat_sorted_weighted = x_flat_stacked_flat_sorted * values_flat_sorted.unsqueeze(-1)  # B*T*K, C
+        x_flat_stacked_flat_sorted_weighted = x_flat_stacked_flat_sorted.float() * values_flat_sorted.unsqueeze(-1)  # B*T*K, C
+        x_flat_stacked_flat_sorted_weighted = x_flat_stacked_flat_sorted_weighted.to(x.dtype)
 
         # Shared expert path
         h_shared = self.shared_expert.w_up(x_flat)
