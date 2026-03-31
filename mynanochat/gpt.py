@@ -244,10 +244,8 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             else:
                 torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
-                for expert_up in block.moe.experts.w_ups:
-                    torch.nn.init.uniform_(expert_up, -s, s)
-                for expert_down in block.moe.experts.w_downs:
-                    torch.nn.init.zeros_(expert_down)
+                torch.nn.init.uniform_(block.moe.experts.w_ups, -s, s)
+                torch.nn.init.zeros_(block.moe.experts.w_downs)
 
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:

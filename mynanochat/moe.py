@@ -13,14 +13,14 @@ class MoE(nn.Module):
         self.experts = nn.Module()
         # Keep as 2D nn.Parameters so Muon can work on them easily. Also easier to stack before grouped_mm.
         scale = C**-0.5  # Xavier-style 1/sqrt(fan_in), overridden by init_weights in gpt.py
-        self.experts.w_ups = nn.ParameterList([nn.Parameter(torch.randn(C*4//K, C)*scale) for _ in range(E)])
-        self.experts.w_downs = nn.ParameterList([nn.Parameter(torch.zeros(C, C*4//K)) for _ in range(E)])
+        self.experts.w_ups = nn.Parameter(torch.randn(E, C*4//K, C)*scale)
+        self.experts.w_downs = nn.Parameter(torch.zeros(E, C, C*4//K))
 
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
         B, T, C = x.shape
         K = self.K
-        E = len(self.experts.w_ups)
+        E = self.experts.w_ups.size(0)
         x_flat = x.reshape(-1, C)          # B*T, C
         logits = self.router.gate(x_flat)       # B*T, E
         # Bias the expert selection, but *not* weighting (Nanochat, DeepSeekV3)
