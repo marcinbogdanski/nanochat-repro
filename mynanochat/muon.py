@@ -105,14 +105,13 @@ class Muon(torch.optim.Optimizer):
             # Create buffers
             if 'momentum_buffer' not in self.state[p]:
                 self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_params)
-                if p.size(0) >= p.size(1):
+                if p.size(-2) >= p.size(-1):
                     self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1])
                 else:
                     self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1, :])
 
             # Update
-            assert p.grad.ndim == 2
-            lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+            lr = group['lr'] * (max(1, p.size(-2) / p.size(-1)))**0.5
             beta2 = group['beta2'] if group['beta2'] is not None else 0.0
 
             # 0-D CPU tensors to avoid re-compilation when values change
@@ -201,18 +200,17 @@ class DistMuon(torch.optim.Optimizer):
 
             # Create buffers
             if 'momentum_buffer' not in self.state[p]:
-                self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_params)
-                if p.size(0) >= p.size(1):
-                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_params[..., :1])
+                self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_grads)
+                if p.size(-2) >= p.size(-1):
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1])
                 else:
-                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_params[..., :1, :])
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1, :])
 
             num_params_this_rank = min(num_params_per_rank, max(0, num_params - idx_start))
             if num_params_this_rank > 0:
 
                 # Update
-                assert p.grad.ndim == 2
-                lr = group['lr'] * (max(1, p.size(0) / p.size(1)))**0.5
+                lr = group['lr'] * (max(1, p.size(-2) / p.size(-1)))**0.5
                 beta2 = group['beta2'] if group['beta2'] is not None else 0.0
 
                 # 0-D CPU tensors to avoid re-compilation when values change
