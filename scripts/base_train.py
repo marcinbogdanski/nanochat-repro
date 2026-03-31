@@ -223,7 +223,7 @@ def main():
     # - then use paper-based / empirical scaling rules to map reference hyperparameters
     #   from d12 to the actual target model
     param_counts: dict = model.number_scaling_params()
-    scaling_params = param_counts['transformer_matrices'] + param_counts['lm_head']
+    scaling_params = param_counts['active_transformer_matrices'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
     if ddp_master:
         print(f"Init: Scaling info:")
@@ -231,7 +231,7 @@ def main():
         print(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
     d12_params_dict = model_d12_ref.number_scaling_params()
-    ref_d12_scaling_params = d12_params_dict['transformer_matrices'] + d12_params_dict['lm_head']
+    ref_d12_scaling_params = d12_params_dict['active_transformer_matrices'] + d12_params_dict['lm_head']
     if ddp_master:
         print(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params

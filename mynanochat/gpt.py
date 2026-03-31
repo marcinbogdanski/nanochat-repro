@@ -187,13 +187,19 @@ class GPTModel(nn.Module):
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
+        moe_inactive = sum(
+            block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
+        )
         result = {
             'wte': wte,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
             'transformer_matrices': transformer_matrices,
+            'active_transformer_matrices': transformer_matrices - moe_inactive,
             'scalars': scalars,
-            'total': total
+            'moe_inactive': moe_inactive,
+            'total': total,
+            'active_total': total - moe_inactive,
         }
         return result
 

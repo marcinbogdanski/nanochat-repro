@@ -20,6 +20,18 @@ class MoE(nn.Module):
         self.shared_expert.w_up = nn.Linear(C, hidden_dim, bias=False)
         self.shared_expert.w_down = nn.Linear(hidden_dim, C, bias=False)
 
+    def num_expert_params(self):
+        E = self.experts.w_up.size(0)
+        single_expert_params = self.shared_expert.w_up.weight.numel() + self.shared_expert.w_down.weight.numel()
+        expert_params_active = (1 + self.K) * single_expert_params
+        expert_params_total = (1 + E) * single_expert_params
+        expert_params_inactive = expert_params_total - expert_params_active
+        return {
+            'total': expert_params_total,
+            'active': expert_params_active,
+            'inactive': expert_params_inactive,
+        }
+
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
         B, T, C = x.shape
