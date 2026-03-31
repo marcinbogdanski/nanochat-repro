@@ -248,6 +248,8 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.moe.experts.w_down)
                 torch.nn.init.uniform_(block.moe.shared_expert.w_up.weight, -s, s)
                 torch.nn.init.zeros_(block.moe.shared_expert.w_down.weight)
+                torch.nn.init.zeros_(block.moe.router.expert_bias)
+                torch.nn.init.zeros_(block.moe.router.tokens_per_expert_counter)
 
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:

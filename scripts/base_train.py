@@ -176,29 +176,33 @@ def main():
         # torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
 
-    # Hyperparameters
-    vocab_size = tokenizer.n_vocab
-    depth = args.depth
-    base_dim = depth * args.aspect_ratio
-    model_dim = ((base_dim + args.head_dim-1) // args.head_dim) * args.head_dim  # nudge up towards closest multiple of head_dim
-    num_heads = model_dim // args.head_dim
+    def create_model_meta(depth):
+        # Hyperparameters
+        vocab_size = tokenizer.n_vocab
+        base_dim = depth * args.aspect_ratio
+        model_dim = ((base_dim + args.head_dim-1) // args.head_dim) * args.head_dim  # nudge up towards closest multiple of head_dim
+        num_heads = model_dim // args.head_dim
 
-    # Model
-    block_size = args.max_seq_len
-    model_config = GPTConfig(
-        block_size=block_size,
-        vocab_size=vocab_size,
-        n_layer=depth,
-        n_head=num_heads,
-        n_embd=model_dim,
-        window_pattern=args.window_pattern,
-        moe_enable=args.moe,
-        moe_n_experts=8,
-        moe_top_k=2,
-    )
-    model = GPTModel(model_config, enable_fa3=args.fa3, fp8_training=args.fp8)
-    model.to(device)
+        # Model
+        model_config = GPTConfig(
+            block_size=args.max_seq_len,
+            vocab_size=vocab_size,
+            n_layer=depth,
+            n_head=num_heads,
+            n_embd=model_dim,
+            window_pattern=args.window_pattern,
+            moe_enable=args.moe,
+            moe_n_experts=8,
+            moe_top_k=2,
+        )
+        with torch.device('meta'):
+            model_meta = GPTModel(model_config, enable_fa3=args.fa3, fp8_training=args.fp8)
+        return model_meta
+    model = create_model_meta(args.depth)
+    model.to_empty(device=device)
     model.init_weights()
+
+    model_d12_ref = create_model_meta(depth=12)
 
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
     num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
@@ -208,13 +212,6 @@ def main():
     orig_model = model
     if not args.deterministic:
         model = torch.compile(model)
-    if ddp_master:
-        print("Init: Model info:")
-        print(f"  {block_size=}")
-        print(f"  {vocab_size=}")
-        print(f"  {depth=}")
-        print(f"  {model_dim=}")
-        print(f"  {num_heads=}")
 
     # (1) Scaling laws / transfer recipe
     # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
@@ -233,9 +230,10 @@ def main():
         print(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
         print(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
-    ref_d12_scaling_params = 135267456  # transformer_matrices + lm_head for d12 model, from nanochat
-    if args.moe:
-        ref_d12_scaling_params = 248587392  # After shared-expert MoE, from nanochat
+    d12_params_dict = model_d12_ref.number_scaling_params()
+    ref_d12_scaling_params = d12_params_dict['transformer_matrices'] + d12_params_dict['lm_head']
+    if ddp_master:
+        print(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
     ref_d12_batch_size_B_REF = 2**19    # 2**19=524288, measured empirically in nanochat for d12
 
@@ -268,8 +266,8 @@ def main():
 
     # Training Hyperparameters
     micro_batch = args.device_batch_size
-    assert total_batch_size % (block_size*micro_batch*ddp_world_size) == 0
-    grad_accum = total_batch_size // (block_size*micro_batch*ddp_world_size)
+    assert total_batch_size % (args.max_seq_len*micro_batch*ddp_world_size) == 0
+    grad_accum = total_batch_size // (args.max_seq_len*micro_batch*ddp_world_size)
     if ddp_master:
         print(f"Init: Training hyperparameters:")
         print(f"  {micro_batch=}")
@@ -322,9 +320,7 @@ def main():
         muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
         return muon_momentum
 
-    model_dim = model.config.n_embd
-    dmodel_lr_scale = (model_dim / 768) ** -0.5
-
+    dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
     adam_groups = [
         {
             'params': params_lm_head,
@@ -385,7 +381,7 @@ def main():
         folderpath=folderpath,
         split="train",
         batch_size=micro_batch,
-        block_size=block_size,
+        block_size=args.max_seq_len,
         tokenizer=tokenizer,
         rank=ddp_rank,
         world_size=ddp_world_size,
@@ -393,15 +389,15 @@ def main():
     if ddp_master:
         print(f"Init: Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
-    assert args.eval_tokens % (micro_batch * block_size * ddp_world_size) == 0
-    eval_steps = args.eval_tokens // (micro_batch * block_size * ddp_world_size)
+    assert args.eval_tokens % (micro_batch * args.max_seq_len * ddp_world_size) == 0
+    eval_steps = args.eval_tokens // (micro_batch * args.max_seq_len * ddp_world_size)
     if ddp_master:
         print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         folderpath=folderpath,
         split="val",
         batch_size=micro_batch,
-        block_size=block_size,
+        block_size=args.max_seq_len,
         tokenizer=tokenizer,
         rank=ddp_rank,
         world_size=ddp_world_size,
@@ -522,7 +518,7 @@ def main():
             
             metadata = {
                 'step': step,
-                'model_config': model_config.to_dict(),
+                'model_config': model.config.to_dict(),
                 'user_config': user_config,
             }
             with open(models_path+f"meta_{step:06d}.json", "w") as f:
@@ -583,7 +579,7 @@ def main():
         total_time += dt
 
         # Logs
-        ntok = (micro_batch * block_size * grad_accum * ddp_world_size)
+        ntok = (micro_batch * args.max_seq_len * grad_accum * ddp_world_size)
         total_ntok += ntok
         tps = int(ntok / dt)
         pct = (step) / max_steps * 100
