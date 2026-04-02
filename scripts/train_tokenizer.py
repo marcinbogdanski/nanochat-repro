@@ -26,7 +26,7 @@ SPECIAL_TOKENS = [
     "<|output_end|>",
 ]
 
-BASE_DATA_PATH = os.path.expanduser("~/.cache/nanochat/base_data")
+BASE_DATA_PATH = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
 BASE_TOKENIZER_PATH = os.path.expanduser("~/.cache/nanochat/tokenizer")
 
 def doc_generator():
@@ -42,10 +42,10 @@ def doc_generator():
 
 def main():
     # Match params used in nanochat speedrun.sh
-    # python -m scripts.tok_train --max_chars=2000000000 --vocab_size=65536
-    max_chars = 2000000000
-    vocab_size = 65536
-    doc_cap = 10000
+    # --max_chars=2_000_000_000 --doc-cap=10_000 --vocab_size=32768
+    max_chars = 2_000_000_000
+    doc_cap = 10_000
+    vocab_size = 32768
 
     # Load training documents
     train_docs = []
@@ -56,7 +56,7 @@ def main():
         train_docs.append(text)
         char_count += len(text)
         
-        if i % 100000 == 0 or char_count >= max_chars:
+        if i % 100000 == 0 or char_count > max_chars:
             pct = (char_count / max_chars) * 100
             print(f"Processed {char_count} / {max_chars} ({pct:.2f}%)")
         
@@ -89,6 +89,16 @@ def main():
     tokenizer_path = os.path.join(BASE_TOKENIZER_PATH, "tokenizer.pkl")
     with open(tokenizer_path, "wb") as f:
         pickle.dump(enc, f)
+
+    # Sanity check
+    test_text = """Hello world! This is a test.
+    Numbers: 123, 4567, 89
+    Contractions: I'm, you're, it's
+    Special chars: @#$%^&*()
+    Unicode: 你好世界 🌍"""
+    encoded = tokenizer.encode(test_text)
+    decoded = tokenizer.decode(encoded)
+    assert decoded == test_text
 
     # Save token bytes
     # Should be bitwise identical to Nanochat version
