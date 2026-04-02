@@ -71,6 +71,7 @@ class MoE(nn.Module):
         expert_mask = expert_ids == sel_experts_flat.unsqueeze(0)
         expert_offsets = expert_mask.sum(dim=1).cumsum(dim=0).to(torch.int32)  # E
 
+        expert_w_up = self.experts.w_up
         if torch.is_autocast_enabled():
             autocast_dtype = torch.get_autocast_gpu_dtype()
             x_flat_sorted_weighted = x_flat_sorted_weighted.to(autocast_dtype)
@@ -81,6 +82,7 @@ class MoE(nn.Module):
             offs=expert_offsets,
         )
         z_experts = F.relu(h_experts).square()
+        expert_w_down = self.experts.w_down
         if torch.is_autocast_enabled():
             z_experts = z_experts.to(autocast_dtype)
             expert_w_down = self.experts.w_down.to(autocast_dtype)
