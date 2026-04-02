@@ -1,3 +1,10 @@
+"""Repackage the raw HuggingFace datasets into the parquet format.
+
+This duplicates the repackage_data_reference.py logic in Nanochat. Our method
+generates bit-for-bit identical parquet files, but since Andrej already
+published them, we download from his HF instead of duplicating the dataset.
+"""
+
 import os
 import time
 import argparse
