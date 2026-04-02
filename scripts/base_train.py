@@ -84,6 +84,7 @@ def main():
     parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
     parser.add_argument('--moe', action='store_true', help='Use Mixture of Experts (MoE) layers instead of dense MLPs.')
     # Training horizon
+    parser.add_argument('--dataset', type=str, default='climbmix', choices=['fineweb', 'climbmix'], help='Training dataset to use.')
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
     parser.add_argument('--target-param-data-ratio', type=float, default=10.5, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
     # Optimization
@@ -175,6 +176,15 @@ def main():
         # torch.backends.cuda.enable_mem_efficient_sdp(False)
         # torch.backends.cuda.enable_math_sdp(True)
     ############################################################################
+
+    if args.dataset == "fineweb":
+        folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
+    elif args.dataset == "climbmix":
+        folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
+    if ddp_master:
+        print(f"Init: Using dataset={args.dataset} from {folderpath}")
 
     def create_model_meta(depth):
         # Hyperparameters
@@ -376,7 +386,6 @@ def main():
                 group["initial_lr"] = group["lr"]
 
     # Dataset
-    folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
     train_loader = DataLoader(
         folderpath=folderpath,
         split="train",
