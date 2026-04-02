@@ -133,7 +133,7 @@ class Block(nn.Module):
         if not config.moe_enable:
             self.mlp = MLP(config)
         else:
-            self.moe = MoE(C=config.n_embd, E=config.moe_n_experts, K=config.moe_top_k)
+            self.moe = MoE(dim=config.n_embd, n_routed_experts=config.moe_n_experts, top_k=config.moe_top_k)
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))

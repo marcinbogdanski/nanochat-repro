@@ -15,7 +15,7 @@ B, T, C = 8, 2048, 768
 E = 8  # num experts
 K = 2  # top_k
 
-model = MoE(C=C, E=E, K=K).cuda()
+model = MoE(dim=C, n_routed_experts=E, top_k=K).cuda()
 # Init weights weights so we can see non-zero results, down projections are zero by default
 for param in model.parameters():
     if param.dim() > 1:
