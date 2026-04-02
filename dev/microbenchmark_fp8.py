@@ -4,8 +4,8 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mynanochat.fp8 import FP8Linear
-from dev.fp32_temp import FP32Linear
+from mynanochat.fp8 import LinearFP8
+from dev.fp32_temp import LinearFP32
 
 
 # Run like this
@@ -82,8 +82,8 @@ class SmallModelPT(nn.Module):
 class SmallModelFP32(nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear1 = FP32Linear(64, 128, bias=False)
-        self.linear2 = FP32Linear(128, 32, bias=False)
+        self.linear1 = LinearFP32(64, 128, bias=False)
+        self.linear2 = LinearFP32(128, 32, bias=False)
     def forward(self, x):
         x = self.linear1(x)
         x = torch.relu(x)
@@ -93,8 +93,8 @@ class SmallModelFP32(nn.Module):
 class SmallModelFP8(nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear1 = FP8Linear(64, 128, bias=False)
-        self.linear2 = FP8Linear(128, 32, bias=False)
+        self.linear1 = LinearFP8(64, 128, bias=False)
+        self.linear2 = LinearFP8(128, 32, bias=False)
 
     def forward(self, x):
         x = self.linear1(x)

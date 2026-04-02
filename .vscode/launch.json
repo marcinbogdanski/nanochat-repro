@@ -5,13 +5,20 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "Python Debugger: Module",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.base_train",
             "env": {
                 "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                "CUDA_VISIBLE_DEVICES": "0"
+                "CUDA_VISIBLE_DEVICES": "3"
             },
             "args": [
                 "--depth=4",
@@ -25,7 +32,8 @@
                 "--num-iterations=4",
                 "--log-every=1",
                 "--deterministic",
-                "--window-pattern=L"                
+                "--window-pattern=SSSL",
+                "--moe"
             ]
         }
     ]
