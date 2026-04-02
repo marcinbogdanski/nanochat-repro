@@ -7,6 +7,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class Linear(nn.Linear):
+    """Linear that casts weights/biases to input dtype"""
+    def forward(self, input):
+        bias = self.bias.to(input.dtype) if self.bias is not None else None
+        output = F.linear(input, self.weight.to(input.dtype), bias)
+        assert output.dtype == input.dtype
+        return output
+
 class MoE(nn.Module):
     def __init__(self, dim, n_routed_experts, top_k):
         """Initialize the MoE layer.
@@ -22,7 +30,7 @@ class MoE(nn.Module):
         active_experts = 1 + K  # 1 shared expert + K routed experts
         # Router - keep names consistent with Nanochat for save compatibility
         self.router = nn.Module()
-        self.router.gate = nn.Linear(C, E, bias=False)
+        self.router.gate = Linear(C, E, bias=False)
         self.router.register_buffer('expert_bias', torch.zeros(E))
         self.router.register_buffer('tokens_per_expert_counter', torch.zeros(E))
         # Routed experts
@@ -32,8 +40,8 @@ class MoE(nn.Module):
         self.experts.w_down = nn.Parameter(torch.zeros(E, C, hidden_dim))
         # Shared expert
         self.shared_expert = nn.Module()
-        self.shared_expert.w_up = nn.Linear(C, hidden_dim, bias=False)
-        self.shared_expert.w_down = nn.Linear(hidden_dim, C, bias=False)
+        self.shared_expert.w_up = Linear(C, hidden_dim, bias=False)
+        self.shared_expert.w_down = Linear(hidden_dim, C, bias=False)
 
     def num_expert_params(self):
         """Number of parameters in the experts, total, active, and inactive."""
@@ -49,7 +57,7 @@ class MoE(nn.Module):
         }
     
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
-    def _exec_experts_loop(self, x_flat_sorted_weighted, sel_experts_flat, x_dtype):
+    def _exec_experts_loop(self, x_flat_sorted_weighted, sel_experts_flat):
         """Execute the experts using a loop - fallback when torch._grouped_mm is not available (e.g. on CPU)"""
         start_idx = 0
         outs = []
@@ -57,42 +65,37 @@ class MoE(nn.Module):
         for i in range(E):
             num_expert = (sel_experts_flat==i).sum().item()
             end_idx = start_idx + num_expert
-            h = x_flat_sorted_weighted[start_idx:end_idx] @ self.experts.w_up[i].T
+            expert_w_up = self.experts.w_up[i].to(x_flat_sorted_weighted.dtype)
+            h = x_flat_sorted_weighted[start_idx:end_idx] @ expert_w_up.T
             z = F.relu(h).square()
-            o = z @ self.experts.w_down[i].T
+            expert_w_down = self.experts.w_down[i].to(x_flat_sorted_weighted.dtype)
+            o = z @ expert_w_down.T
             outs.append(o)
             start_idx += num_expert
         out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
         return out_flat_stacked_flat_sorted
 
-    def _exec_experts_grouped_mm(self, x_flat_sorted_weighted, sel_experts_flat, x_dtype):
+    def _exec_experts_grouped_mm(self, x_flat_sorted_weighted, sel_experts_flat):
         """Execute the experts using grouped matrix multiplication - CUDA only"""
         E = self.experts.w_up.size(0)
         expert_ids = torch.arange(E, device=sel_experts_flat.device).unsqueeze(-1)
         expert_mask = expert_ids == sel_experts_flat.unsqueeze(0)
         expert_offsets = expert_mask.sum(dim=1).cumsum(dim=0).to(torch.int32)  # E
 
-        expert_w_up = self.experts.w_up
-        if torch.is_autocast_enabled():
-            autocast_dtype = torch.get_autocast_gpu_dtype()
-            x_flat_sorted_weighted = x_flat_sorted_weighted.to(autocast_dtype)
-            expert_w_up = self.experts.w_up.to(autocast_dtype)
+        expert_w_up = self.experts.w_up.to(x_flat_sorted_weighted.dtype)
         h_experts = torch._grouped_mm(
             input=x_flat_sorted_weighted,
             mat2=expert_w_up.mT,
             offs=expert_offsets,
         )
         z_experts = F.relu(h_experts).square()
-        expert_w_down = self.experts.w_down
-        if torch.is_autocast_enabled():
-            z_experts = z_experts.to(autocast_dtype)
-            expert_w_down = self.experts.w_down.to(autocast_dtype)
+        expert_w_down = self.experts.w_down.to(x_flat_sorted_weighted.dtype)
         out_experts = torch._grouped_mm(
             input=z_experts,
             mat2=expert_w_down.mT,
             offs=expert_offsets,
         )
-        out_flat_stacked_flat_sorted = out_experts.to(x_dtype)
+        out_flat_stacked_flat_sorted = out_experts.to(x_flat_sorted_weighted.dtype)
         return out_flat_stacked_flat_sorted
 
     def forward(self, x):
@@ -139,9 +142,9 @@ class MoE(nn.Module):
             self.router.tokens_per_expert_counter += num_tokens_per_expert
         
         if x.is_cuda:
-            out_flat_sorted = self._exec_experts_grouped_mm(x_flat_sorted_weighted, sel_experts_flat, x.dtype)
+            out_flat_sorted = self._exec_experts_grouped_mm(x_flat_sorted_weighted, sel_experts_flat)
         else:
-            out_flat_sorted = self._exec_experts_loop(x_flat_sorted_weighted, sel_experts_flat, x.dtype)
+            out_flat_sorted = self._exec_experts_loop(x_flat_sorted_weighted, sel_experts_flat)
 
         # Combine routed experts and project back
         out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=out_flat_sorted.dtype)
@@ -152,6 +155,7 @@ class MoE(nn.Module):
         # Combine shared and routed expert paths
         outputs = out_flat + out_flat_shared   # B*T, C
         outputs = outputs.reshape(B, T, C)
+        assert outputs.dtype == x.dtype
         return outputs
 
     def update_expert_bias(self, coeff=1e-3):
