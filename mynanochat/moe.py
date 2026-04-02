@@ -131,12 +131,12 @@ class MoE(nn.Module):
         out_flat_shared = self.shared_expert.w_down(z_shared)
 
         # Update expert token counts for load balancing
-        # This probably should be disabled during evaluation
-        expert_ids = torch.arange(E, device=sel_experts.device)
-        indices_column = sel_experts_flat.unsqueeze(1)                           # B*T*K, 1
-        num_tokens_per_expert = (indices_column == expert_ids).sum(dim=0)
-        num_tokens_per_expert = num_tokens_per_expert.to(self.router.tokens_per_expert_counter.dtype)
-        self.router.tokens_per_expert_counter += num_tokens_per_expert
+        if self.training:
+            expert_ids = torch.arange(E, device=sel_experts.device)
+            indices_column = sel_experts_flat.unsqueeze(1)                           # B*T*K, 1
+            num_tokens_per_expert = (indices_column == expert_ids).sum(dim=0)
+            num_tokens_per_expert = num_tokens_per_expert.to(self.router.tokens_per_expert_counter.dtype)
+            self.router.tokens_per_expert_counter += num_tokens_per_expert
         
         if x.is_cuda:
             out_flat_sorted = self._exec_experts_grouped_mm(x_flat_sorted_weighted, sel_experts_flat, x.dtype)
