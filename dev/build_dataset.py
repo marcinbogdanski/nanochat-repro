@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+import tiktoken
 import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -8,19 +9,36 @@ assert pa.__version__ == '21.0.0'  # bitwise parity with Nanochat
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--dataset", type=str, default="fineweb", choices=["fineweb", "climbmix"], help="Dataset to process (fineweb or climbmax)")
     parser.add_argument("-n", "--num-shards", type=int, default=-1, help="Number of shards to create (-1 to process entire dataset)")
     args = parser.parse_args()
 
     # Parameters
-    dataset_hf_path = "HuggingFaceFW/fineweb-edu"
-    dataset_hf_name = "sample-100BT"
-    dataset_hf_split = "train"
-    output_path = os.path.expanduser("~/.cache/mynanochat/fineweb-edu-100b-shuffle")
-    reference_path = os.path.expanduser("~/.cache/nanochat/base_data_fineweb_edu")
+    if args.dataset == "fineweb":
+        # NOTE: Takes ~750GB disk space!!!
+        dataset_hf_path = "HuggingFaceFW/fineweb-edu"
+        dataset_hf_name = "sample-100BT"
+        dataset_hf_split = "train"
+        data_column = "text"
+        tokenizer = None
+        output_dir_name = "fineweb-edu-100b-shuffle"
+        ref_dir_name = "base_data"
+    elif args.dataset == "climbmix":
+        # NOTE: Takes 2TB+ disk space!!!!!!
+        # Also: note tested vs Nanochat because I couldn't download the whole thing at the time
+        dataset_hf_path = "nvidia/Nemotron-ClimbMix"
+        dataset_hf_name = None
+        dataset_hf_split = "train"
+        data_column = "tokens"
+        tokenizer = tiktoken.encoding_for_model("gpt-2")
+        output_dir_name = "climbmix-400b-shuffle"
+        ref_dir_name = "base_data_climbmix"
+
+    output_path = os.path.expanduser(f"~/.cache/mynanochat/{output_dir_name}")
+    reference_path = os.path.expanduser(f"~/.cache/nanochat/{ref_dir_name}")
     os.makedirs(output_path, exist_ok=True)
 
     # Load the dataset
-    # NOTE: Takes ~750GB disk space!!!
     dataset = datasets.load_dataset(
         dataset_hf_path,
         name=dataset_hf_name,
@@ -39,10 +57,11 @@ def main():
     shard_num_chars = 0
     time_start = time.time()
     for i, example in enumerate(dataset):
-        text = example["text"]
+        data = example[data_column]
+        text = tokenizer.decode(data) if tokenizer is not None else data
         shard_docs.append(text)
         shard_num_chars += len(text)
-        if shard_num_chars > chars_per_shard and len(shard_docs) % row_group_size == 0:
+        if shard_num_chars >= chars_per_shard and len(shard_docs) % row_group_size == 0:
             # Write out the current shard to a parquet file
             shard_table = pa.Table.from_pydict({'text': shard_docs})
             shard_filename = f'shard_{shard_idx:05d}.parquet'
