@@ -48,6 +48,7 @@ class MoE(nn.Module):
             'inactive': expert_params_inactive,
         }
     
+    @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def _exec_experts_loop(self, x_flat_sorted_weighted, sel_experts_flat, x_dtype):
         """Execute the experts using a loop - fallback when torch._grouped_mm is not available (e.g. on CPU)"""
         start_idx = 0
@@ -94,9 +95,6 @@ class MoE(nn.Module):
         out_flat_stacked_flat_sorted = out_experts.to(x_dtype)
         return out_flat_stacked_flat_sorted
 
-
-
-    @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
     def forward(self, x):
         B, T, C = x.shape
         K = self.K
