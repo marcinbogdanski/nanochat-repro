@@ -87,11 +87,13 @@ class CausalSelfAttentionRoPE(nn.Module):
 
         if self.ve_gate is not None:
             ve = ve.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
-            gate = 2.0 * F.sigmoid(self.ve_gate(x[..., :self.ve_gate_size]))  # B, T, nh
+            gate = 3.0 * F.sigmoid(self.ve_gate(x[..., :self.ve_gate_size]))  # B, T, nh
             v = v + gate.unsqueeze(-1) * ve
 
         q_rot = self._apply_rope(q, cos, sin)
         k_rot = self._apply_rope(k, cos, sin)
+        #q_rot = q_rot * 1.15  # Sharper attention
+        #k_rot = k_rot * 1.15
 
         # Normalize q,k
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
