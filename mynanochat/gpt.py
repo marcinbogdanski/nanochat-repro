@@ -271,13 +271,16 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.moe.router.expert_bias)
                 torch.nn.init.zeros_(block.moe.router.tokens_per_expert_counter)
 
-        for block in self.transformer.h:
-            if block.attn.ve_gate is not None:
-                # Init to zero, so sigmoid(0) -> 0.5, 2*0.5 = 1, i.e. enabled neutral at the start
-                torch.nn.init.zeros_(block.attn.ve_gate.weight)
-
+        # VE embeddings
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight, -s, s)
+
+        # Gate weights init
+        for block in self.transformer.h:
+            if block.attn.ve_gate is not None:
+                # Zero init would mean sigmoid(0)->0.5, 2*0.5=1, i.e. neutral at the start
+                # Small positive init means it is slightly above neutral at the start
+                torch.nn.init.uniform_(block.attn.ve_gate.weight, 0.0, 0.02)
 
         # RoPE buffers in compute dtype
         self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
