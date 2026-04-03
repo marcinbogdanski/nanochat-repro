@@ -264,7 +264,7 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             if not self.config.moe_enable:
-                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.5, s*0.5)  # smaller init for feedforward
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.4, s*0.4)  # smaller init for feedforward
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             else:
                 torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
