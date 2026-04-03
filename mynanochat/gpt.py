@@ -64,7 +64,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         return q_rot
     
     @classmethod
-    def precalculate_cos_sin(cls, seq_len, head_size, base=10_000, device=None, dtype=None):
+    def precalculate_cos_sin(cls, seq_len, head_size, base=100_000, device=None, dtype=None):
         # Compute exponent for the RoPE frequencies
         theta = torch.arange(0, head_size, step=2, dtype=torch.float32, device=device)
         # theta = base**-(theta/head_size)       # head_size//2
@@ -185,7 +185,9 @@ class GPTModel(nn.Module):
         })
 
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            config.block_size * 10, config.n_embd // config.n_head
+            seq_len=config.block_size * 10,
+            head_size=config.n_embd // config.n_head,
+            base=100_000,
         )
         self.register_buffer("cos", cos, persistent=False)  # don't save to checkpoint
         self.register_buffer("sin", sin, persistent=False)
@@ -284,7 +286,9 @@ class GPTModel(nn.Module):
 
         # RoPE buffers in compute dtype
         self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            self.config.block_size * 10, self.config.n_embd // self.config.n_head,
+            seq_len=self.config.block_size * 10,
+            head_size=self.config.n_embd // self.config.n_head,
+            base=100_000,
             device=self.transformer.wte.weight.device,
             dtype=self.compute_dtype
         )
