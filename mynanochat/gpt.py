@@ -221,7 +221,7 @@ class GPTModel(nn.Module):
 
     def _calc_window_sizes(self, config):
         long_window = config.block_size
-        short_window = -(-long_window // 3 // 128) * 128  # Nearest multiple of 128 that is at least 1/3 of long_window
+        short_window = -(-long_window // 4 // 128) * 128  # Nearest multiple of 128 that is at least 1/4 of long_window
         chat_to_window_type = {
             'L': (long_window, 0),
             'S': (short_window, 0),
