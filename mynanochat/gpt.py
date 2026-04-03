@@ -253,9 +253,6 @@ class GPTModel(nn.Module):
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
-        torch.nn.init.constant_(self.resid_lambdas, 1.0)
-        torch.nn.init.constant_(self.x0_lambdas, 0.1)
-
         # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
         s = 3**0.5 * self.config.n_embd**-0.5
         for block in self.transformer.h:
@@ -274,6 +271,19 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.moe.shared_expert.w_down.weight)
                 torch.nn.init.zeros_(block.moe.router.expert_bias)
                 torch.nn.init.zeros_(block.moe.router.tokens_per_expert_counter)
+
+        # Per layer scalars
+        n_layer = self.config.n_layer
+        for i in range(n_layer):
+            # Linearly interpolate from 1.15 to 1.05 across layers,
+            # earlier layers benefit more from the sharper attention
+            init_val = 1.15 - (0.10 * i / max(n_layer-1, 1))
+            self.resid_lambdas.data[i] = init_val
+        for i in range(n_layer):
+            # Linearly interpolate from 0.2 to 0.05 across layers
+            # earlier layers get more x0 blending
+            init_val = 0.20 - (0.15 * i / max(n_layer-1, 1))
+            self.x0_lambdas.data[i] = init_val
 
         # VE embeddings
         for ve in self.value_embeds.values():
