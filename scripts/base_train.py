@@ -89,7 +89,7 @@ def main():
     parser.add_argument('--device-batch-size', type=int, default=32, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=-1, help='Total batch size across all devices. (default: -1, auto-calculate)')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
-    parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
+    parser.add_argument('--unembedding-lr', type=float, default=0.008, help='Base learning rate for unembedding parameters.')
     parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
