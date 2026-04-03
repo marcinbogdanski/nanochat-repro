@@ -92,12 +92,14 @@ class CausalSelfAttentionRoPE(nn.Module):
 
         q_rot = self._apply_rope(q, cos, sin)
         k_rot = self._apply_rope(k, cos, sin)
-        #q_rot = q_rot * 1.15  # Sharper attention
-        #k_rot = k_rot * 1.15
 
         # Normalize q,k
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
+
+        # Sharper attention
+        q_rot = q_rot * 1.15
+        k_rot = k_rot * 1.15
 
         if self.enable_fa3:
             # Flash Attention 3
