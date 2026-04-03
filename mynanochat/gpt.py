@@ -46,8 +46,8 @@ class CausalSelfAttentionRoPE(nn.Module):
         self.c_proj = LinearFP8(config.n_embd, config.n_embd, bias=False)
 
         # VE Gate
-        self.ve_gate_size = 32
-        self.ve_gate = LinearFP8(32, config.n_head, bias=False) if ve_enable else None
+        self.ve_gate_size = 12
+        self.ve_gate = LinearFP8(self.ve_gate_size, config.n_head, bias=False) if ve_enable else None
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
@@ -64,7 +64,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         return q_rot
     
     @classmethod
-    def precalculate_cos_sin(cls, seq_len, head_size, base=10_000, device=None, dtype=None):
+    def precalculate_cos_sin(cls, seq_len, head_size, base=100_000, device=None, dtype=None):
         # Compute exponent for the RoPE frequencies
         theta = torch.arange(0, head_size, step=2, dtype=torch.float32, device=device)
         # theta = base**-(theta/head_size)       # head_size//2
@@ -87,7 +87,7 @@ class CausalSelfAttentionRoPE(nn.Module):
 
         if self.ve_gate is not None:
             ve = ve.view(B, T, self.n_head, C//self.n_head)  # B,T,nh,hs
-            gate = 2.0 * F.sigmoid(self.ve_gate(x[..., :self.ve_gate_size]))  # B, T, nh
+            gate = 3.0 * F.sigmoid(self.ve_gate(x[..., :self.ve_gate_size]))  # B, T, nh
             v = v + gate.unsqueeze(-1) * ve
 
         q_rot = self._apply_rope(q, cos, sin)
@@ -96,6 +96,10 @@ class CausalSelfAttentionRoPE(nn.Module):
         # Normalize q,k
         q_rot = F.rms_norm(q_rot, (q_rot.size(-1),))
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
+
+        # Sharper attention
+        q_rot = q_rot * 1.15
+        k_rot = k_rot * 1.15
 
         if self.enable_fa3:
             # Flash Attention 3
@@ -181,7 +185,9 @@ class GPTModel(nn.Module):
         })
 
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            config.block_size * 10, config.n_embd // config.n_head
+            seq_len=config.block_size * 10,
+            head_size=config.n_embd // config.n_head,
+            base=100_000,
         )
         self.register_buffer("cos", cos, persistent=False)  # don't save to checkpoint
         self.register_buffer("sin", sin, persistent=False)
@@ -214,15 +220,17 @@ class GPTModel(nn.Module):
         return result
 
     def _calc_window_sizes(self, config):
+        long_window = config.block_size
+        short_window = -(-long_window // 3 // 128) * 128  # Nearest multiple of 128 that is at least 1/3 of long_window
         chat_to_window_type = {
-            'L': (config.block_size, 0),
-            'S': (config.block_size//2, 0),
+            'L': (long_window, 0),
+            'S': (short_window, 0),
         }
         window_sizes = []
         for layer_idx in range(config.n_layer):
             window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
             window_sizes.append(chat_to_window_type[window_type])
-        window_sizes[-1] = (config.block_size, 0)  # Last layer always full attention
+        window_sizes[-1] = (long_window, 0)  # Last layer always full attention
         return window_sizes
     
     def _has_ve(self, layer_idx, n_layer):
@@ -242,7 +250,7 @@ class GPTModel(nn.Module):
             mlp.c_fc:        uniform, std=1/sqrt(n_embd)
             mlp.c_proj:      zeros
         """
-        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
         torch.nn.init.constant_(self.resid_lambdas, 1.0)
@@ -256,7 +264,7 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             if not self.config.moe_enable:
-                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.5, s*0.5)  # smaller init for feedforward
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             else:
                 torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
@@ -267,17 +275,22 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.moe.router.expert_bias)
                 torch.nn.init.zeros_(block.moe.router.tokens_per_expert_counter)
 
-        for block in self.transformer.h:
-            if block.attn.ve_gate is not None:
-                # Init to zero, so sigmoid(0) -> 0.5, 2*0.5 = 1, i.e. enabled neutral at the start
-                torch.nn.init.zeros_(block.attn.ve_gate.weight)
-
+        # VE embeddings
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight, -s, s)
 
+        # Gate weights init
+        for block in self.transformer.h:
+            if block.attn.ve_gate is not None:
+                # Zero init would mean sigmoid(0)->0.5, 2*0.5=1, i.e. neutral at the start
+                # Small positive init means it is slightly above neutral at the start
+                torch.nn.init.uniform_(block.attn.ve_gate.weight, 0.0, 0.02)
+
         # RoPE buffers in compute dtype
         self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            self.config.block_size * 10, self.config.n_embd // self.config.n_head,
+            seq_len=self.config.block_size * 10,
+            head_size=self.config.n_embd // self.config.n_head,
+            base=100_000,
             device=self.transformer.wte.weight.device,
             dtype=self.compute_dtype
         )
@@ -324,7 +337,7 @@ class GPTModel(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits
-        softcap = 20
+        softcap = 15
         logits = self.lm_head(x)   # B,T,V <- B,T,E
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)

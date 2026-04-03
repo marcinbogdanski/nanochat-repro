@@ -89,15 +89,13 @@ def main():
     parser.add_argument('--device-batch-size', type=int, default=32, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=-1, help='Total batch size across all devices. (default: -1, auto-calculate)')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
-    parser.add_argument('--unembedding-lr', type=float, default=0.004, help='Base learning rate for unembedding parameters.')
-    parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
+    parser.add_argument('--unembedding-lr', type=float, default=0.008, help='Base learning rate for unembedding parameters.')
+    parser.add_argument('--weight-decay', type=float, default=0.28, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
-    parser.add_argument('--adam_beta1', type=float, default=0.8, help='Beta 1 for AdamW optimizer.')
-    parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta 2 for AdamW optimizer.')
-    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iterations for LR warmup')
-    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iterations for LR warmdown')
-    parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
+    parser.add_argument('--warmup-steps', type=int, default=40, help='Number of steps for LR warmup')
+    parser.add_argument('--warmdown-ratio', type=float, default=0.65, help='Ratio of iterations for LR warmdown')
+    parser.add_argument('--final-lr-frac', type=float, default=0.05, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
@@ -291,7 +289,6 @@ def main():
     unembedding_lr = args.unembedding_lr * batch_lr_scale
     embedding_lr = args.embedding_lr * batch_lr_scale
     matrix_lr = args.matrix_lr * batch_lr_scale
-    adam_betas = (args.adam_beta1, args.adam_beta2)
     scalar_lr = args.scalar_lr * batch_lr_scale
 
     # Calc Max Steps
@@ -306,11 +303,12 @@ def main():
 
     # WD for Optimizers
     def get_wd(step: int):
-        return scaled_weight_decay * (1.0 - step / max_steps)  # linearly decay to 0
+        # cosine decay to zero over the course of training
+        return scaled_weight_decay * 0.5 * (1.0 + math.cos(math.pi * step / max_steps))
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
-        warmup_steps = round(args.warmup_ratio * max_steps)
+        warmup_steps = args.warmup_steps
         warmdown_steps = round(args.warmdown_ratio * max_steps)
         if step < warmup_steps:
             return (step+1) / warmup_steps
@@ -321,8 +319,8 @@ def main():
             return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
     def get_muon_momentum(step: int):
-        muon_frac = min(step / 300, 1.0)
-        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
+        muon_frac = min(step / 400, 1.0)
+        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.97
         return muon_momentum
 
     dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
@@ -330,34 +328,42 @@ def main():
         {
             'params': params_lm_head,
             'lr': unembedding_lr * dmodel_lr_scale,
+            'betas': (0.8, 0.96),
+            'weight_decay': 0.01,
             'is_small': False,
         },
         {
             'params': params_embedding,
             'lr': embedding_lr * dmodel_lr_scale,
+            'betas': (0.8, 0.995),
+            'weight_decay': 0.001,
             'is_small': False,
         },
         {
             'params': params_val_embds,
-            'lr': embedding_lr * dmodel_lr_scale,
+            'lr': embedding_lr * dmodel_lr_scale * 0.5,
+            'betas': (0.8, 0.995),
+            'weight_decay': 0.01,
             'is_small': False,
         },
         {
             'params': params_resid,
             'lr': scalar_lr * 0.01,
+            'betas': (0.8, 0.95),
+            'weight_decay': 0.05,
             'is_small': True,
         },
         {
             'params': params_x0,
             'lr': scalar_lr,
             'betas': (0.96, 0.95),
+            'weight_decay': 0.0,
             'is_small': True,
         },
     ]
     adamw_factory = DistAdamW if ddp else AdamW
     adamw_optimizer = adamw_factory(
         adam_groups,
-        betas=adam_betas,
         eps=1e-10,
         weight_decay=0.0,
     )
@@ -372,6 +378,7 @@ def main():
         lr=matrix_lr,
         momentum=0.95,
         ns_steps=5,
+        beta2=0.9,
         weight_decay=scaled_weight_decay,
     )
     
