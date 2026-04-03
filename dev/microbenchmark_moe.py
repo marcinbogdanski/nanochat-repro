@@ -15,6 +15,8 @@ B, T, C = 8, 2048, 768
 E = 8  # num experts
 K = 2  # top_k
 
+compute_dtype = torch.bfloat16
+
 model = MoE(dim=C, n_routed_experts=E, top_k=K).cuda()
 # Init weights weights so we can see non-zero results, down projections are zero by default
 for param in model.parameters():
@@ -22,8 +24,7 @@ for param in model.parameters():
         nn.init.xavier_uniform_(param)
 
 x = torch.randn(B, T, C).cuda()  # B,T,C
-with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-    out = model(x)
+out = model(x.to(compute_dtype))
 loss = out.float().square().mean()
 loss.backward()
 print(loss.item())
@@ -35,8 +36,7 @@ torch.cuda.synchronize()
 start_time = time.time()
 for i in range(100):
     x = torch.randn(B, T, C).cuda()  # B,T,C
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-        out = model(x)
+    out = model(x.to(compute_dtype))
     loss = out.float().square().mean()
     loss.backward()
     model.zero_grad()
