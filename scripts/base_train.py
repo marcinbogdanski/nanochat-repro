@@ -377,6 +377,7 @@ def main():
         lr=matrix_lr,
         momentum=0.95,
         ns_steps=5,
+        beta2=0.9,
         weight_decay=scaled_weight_decay,
     )
     
