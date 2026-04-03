@@ -220,15 +220,17 @@ class GPTModel(nn.Module):
         return result
 
     def _calc_window_sizes(self, config):
+        long_window = config.block_size
+        short_window = -(-long_window // 3 // 128) * 128  # Nearest multiple of 128 that is at least 1/3 of long_window
         chat_to_window_type = {
-            'L': (config.block_size, 0),
-            'S': (config.block_size//2, 0),
+            'L': (long_window, 0),
+            'S': (short_window, 0),
         }
         window_sizes = []
         for layer_idx in range(config.n_layer):
             window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
             window_sizes.append(chat_to_window_type[window_type])
-        window_sizes[-1] = (config.block_size, 0)  # Last layer always full attention
+        window_sizes[-1] = (long_window, 0)  # Last layer always full attention
         return window_sizes
     
     def _has_ve(self, layer_idx, n_layer):
