@@ -178,6 +178,7 @@ class GPTModel(nn.Module):
         # Params for merging x0 across network and blending residual stream
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+        self.backout_lambda = nn.Parameter(0.2 * torch.ones(1))
 
         # Value embeddings for each layer
         self.value_embeds = nn.ModuleDict({
@@ -200,7 +201,7 @@ class GPTModel(nn.Module):
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.backout_lambda.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
         moe_inactive = sum(
@@ -284,6 +285,7 @@ class GPTModel(nn.Module):
             # earlier layers get more x0 blending
             init_val = 0.20 - (0.15 * i / max(n_layer-1, 1))
             self.x0_lambdas.data[i] = init_val
+        torch.nn.init.constant_(self.backout_lambda, 0.2)
 
         # VE embeddings
         for ve in self.value_embeds.values():
@@ -338,12 +340,22 @@ class GPTModel(nn.Module):
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
+        
+        # Backout
+        backout_layer = self.config.n_layer // 2  # backout in middle of network
+        x_backout = None
 
         # Transformer
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
             x = block(x, ve, self.cos, self.sin, self.window_sizes[i])
+            if i == backout_layer:
+                x_backout = x
+
+        # Final backout blending
+        if x_backout is not None:
+            x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits
