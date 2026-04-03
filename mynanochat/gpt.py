@@ -337,7 +337,7 @@ class GPTModel(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits
-        softcap = 20
+        softcap = 15
         logits = self.lm_head(x)   # B,T,V <- B,T,E
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
