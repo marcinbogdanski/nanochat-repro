@@ -319,8 +319,8 @@ def main():
             return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
     def get_muon_momentum(step: int):
-        muon_frac = min(step / 300, 1.0)
-        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.95
+        muon_frac = min(step / 400, 1.0)
+        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.97
         return muon_momentum
 
     dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
