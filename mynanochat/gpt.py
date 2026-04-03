@@ -46,8 +46,8 @@ class CausalSelfAttentionRoPE(nn.Module):
         self.c_proj = LinearFP8(config.n_embd, config.n_embd, bias=False)
 
         # VE Gate
-        self.ve_gate_size = 32
-        self.ve_gate = LinearFP8(32, config.n_head, bias=False) if ve_enable else None
+        self.ve_gate_size = 12
+        self.ve_gate = LinearFP8(self.ve_gate_size, config.n_head, bias=False) if ve_enable else None
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
