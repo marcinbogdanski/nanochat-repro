@@ -95,7 +95,7 @@ def main():
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--warmup-steps', type=int, default=40, help='Number of steps for LR warmup')
     parser.add_argument('--warmdown-ratio', type=float, default=0.65, help='Ratio of iterations for LR warmdown')
-    parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
+    parser.add_argument('--final-lr-frac', type=float, default=0.05, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
