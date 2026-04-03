@@ -319,9 +319,21 @@ def main():
             return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
     def get_muon_momentum(step: int):
-        muon_frac = min(step / 400, 1.0)
-        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.97
-        return muon_momentum
+        warmdown_steps = round(args.warmdown_ratio * max_steps)
+        warmdown_start = max_steps - warmdown_steps
+        if step < 400:
+            # linearly increase momentum from 0.85 to 0.97 over first 400 steps
+            muon_frac = step / 400
+            muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.97
+            return muon_momentum
+        elif step < max_steps - warmdown_steps:
+            # keep momentum at 0.97 during main phase of training
+            return 0.97
+        else:
+            # linearly decrease momentum from 0.97 to 0.90 over warmdown
+            progress = (step - warmdown_start) / warmdown_steps
+            muon_momentum = (1.0 - progress) * 0.97 + progress * 0.90
+            return muon_momentum
 
     dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
     adam_groups = [
