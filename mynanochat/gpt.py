@@ -246,7 +246,7 @@ class GPTModel(nn.Module):
             mlp.c_fc:        uniform, std=1/sqrt(n_embd)
             mlp.c_proj:      zeros
         """
-        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
+        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
         torch.nn.init.constant_(self.resid_lambdas, 1.0)
@@ -260,7 +260,7 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             if not self.config.moe_enable:
-                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.5, s*0.5)  # smaller init for feedforward
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             else:
                 torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
