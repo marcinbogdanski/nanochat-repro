@@ -100,13 +100,13 @@ class LinearFP8(torch.nn.Linear):
 
     def forward(self, input):
         if self.mode == 'native':
-            return F.linear(input, self.weight, self.bias)
-
-        if torch.is_autocast_enabled():
-            input = input.to(torch.get_autocast_gpu_dtype())
-        input_2d = input.reshape(-1, input.shape[-1])
-        output_2d = MatmulFP8.apply(input_2d, self.weight)
-        output = output_2d.reshape(*input.shape[:-1], output_2d.shape[-1])
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
+            bias = self.bias.to(input.dtype) if self.bias is not None else None
+            output = F.linear(input, self.weight.to(input.dtype), bias)
+        else:
+            input_2d = input.reshape(-1, input.shape[-1])
+            output_2d = MatmulFP8.apply(input_2d, self.weight)
+            output = output_2d.reshape(*input.shape[:-1], output_2d.shape[-1])
+            if self.bias is not None:
+                output = output + self.bias.to(output.dtype)
+        assert output.dtype == input.dtype
         return output

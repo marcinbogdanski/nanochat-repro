@@ -9,7 +9,6 @@ import argparse
 import datasets
 datasets.disable_progress_bars()
 import wandb
-from contextlib import nullcontext
 import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
@@ -44,7 +43,7 @@ def sample_one_token(logits, temperature=1.0, top_k=None, sample_rng=None):
         return torch.gather(topk_indices, -1, ix)  # B,1
 
 @torch.inference_mode()
-def generate(model, autocast_ctx, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng=None):
+def generate(model, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng=None):
     """Generate max_tokens starting from idx[B,T]"""
     assert isinstance(idx, torch.Tensor)
     assert idx.dtype == torch.long
@@ -58,8 +57,7 @@ def generate(model, autocast_ctx, idx, max_new_tokens, temperature=0.0, top_k=No
     with torch.no_grad():
         for _ in range(max_new_tokens):
             idx_tail = idx[:, -block_size:]      # B,T  sliding window
-            with autocast_ctx:
-                logits, _ = model(idx_tail)      # B,T,C <- B,T
+            logits, _ = model(idx_tail)      # B,T,C <- B,T
             logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
             xcol = sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
             idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
@@ -142,9 +140,6 @@ def main():
     else:
         wandb_logger = WandBDummy()
     
-    # Autocast Context
-    autocast_ctx = torch.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == 'cuda' else nullcontext()
-
     # Tokenizer
     tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
     tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
@@ -206,7 +201,7 @@ def main():
             moe_top_k=2,
         )
         with torch.device('meta'):
-            model_meta = GPTModel(model_config, enable_fa3=args.fa3, fp8_training=args.fp8)
+            model_meta = GPTModel(model_config, compute_dtype=torch.bfloat16, enable_fa3=args.fa3, fp8_training=args.fp8)
         return model_meta
     model = create_model_meta(args.depth)
     model.to_empty(device=device)
@@ -434,8 +429,7 @@ def main():
                     assert (y >= 0).all()  # masking with -1 not supported
                     x = x.to(device)
                     y = y.to(device)
-                    with autocast_ctx:
-                        _, loss_arr = model(x, y, reduction='none', return_logits=False)
+                    _, loss_arr = model(x, y, reduction='none', return_logits=False)
                     bytes_arr = token_bytes[y.view(-1)]
                     loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
                     total_nats += loss_arr.sum().item()
@@ -461,10 +455,9 @@ def main():
         if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
             ts = time.time()
             model.eval()
-            with autocast_ctx:
-                bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
-                # Original model because shapes keep changing
-                results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
+            bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
+            # Original model because shapes keep changing
+            results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
             core_metric = results['core_metric']
             accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
             if device.startswith('cuda'):
@@ -503,7 +496,6 @@ def main():
                 idx = idx.unsqueeze(0)  # B,T
                 idx = generate(
                     orig_model,
-                    autocast_ctx,
                     idx,
                     max_new_tokens=16,
                     temperature=0.0,
@@ -550,8 +542,7 @@ def main():
             x, y = train_loader.get_batch_bos()
             x = x.to(device)
             y = y.to(device)
-            with autocast_ctx:
-                _, loss = model(x, y, return_logits=False)
+            _, loss = model(x, y, return_logits=False)
             train_loss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
