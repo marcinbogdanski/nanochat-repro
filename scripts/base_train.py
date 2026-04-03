@@ -93,8 +93,8 @@ def main():
     parser.add_argument('--weight-decay', type=float, default=0.28, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
-    parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iterations for LR warmup')
-    parser.add_argument('--warmdown-ratio', type=float, default=0.5, help='Ratio of iterations for LR warmdown')
+    parser.add_argument('--warmup-steps', type=int, default=40, help='Number of steps for LR warmup')
+    parser.add_argument('--warmdown-ratio', type=float, default=0.65, help='Ratio of iterations for LR warmdown')
     parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
@@ -308,7 +308,7 @@ def main():
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
-        warmup_steps = round(args.warmup_ratio * max_steps)
+        warmup_steps = args.warmup_steps
         warmdown_steps = round(args.warmdown_ratio * max_steps)
         if step < warmup_steps:
             return (step+1) / warmup_steps
