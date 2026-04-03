@@ -90,7 +90,7 @@ def main():
     parser.add_argument('--total-batch-size', type=int, default=-1, help='Total batch size across all devices. (default: -1, auto-calculate)')
     parser.add_argument('--embedding-lr', type=float, default=0.3, help='Base learning rate for embedding parameters.')
     parser.add_argument('--unembedding-lr', type=float, default=0.008, help='Base learning rate for unembedding parameters.')
-    parser.add_argument('--weight-decay', type=float, default=0.2, help='Weight decay for Muon optimizer.')
+    parser.add_argument('--weight-decay', type=float, default=0.28, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
     parser.add_argument('--warmup-ratio', type=float, default=0.0, help='Ratio of iterations for LR warmup')
@@ -303,7 +303,8 @@ def main():
 
     # WD for Optimizers
     def get_wd(step: int):
-        return scaled_weight_decay * (1.0 - step / max_steps)  # linearly decay to 0
+        # cosine decay to zero over the course of training
+        return scaled_weight_decay * 0.5 * (1.0 + math.cos(math.pi * step / max_steps))
 
     # LR / Muon Scheduler functions
     def get_lr(step: int):
