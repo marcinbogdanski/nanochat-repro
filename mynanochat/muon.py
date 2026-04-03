@@ -33,7 +33,7 @@ def fused_muon_step(
     # https://arxiv.org/pdf/2505.16932
     X = grad.bfloat16()
     # Ensure spectral norm is at most 1 (with 2% safety factor)
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-6)
     if grad.size(-2) > grad.size(-1):
         for i in range(steps):
             a, b, c = polar_express_coeffs[i]
