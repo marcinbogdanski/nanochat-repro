@@ -284,8 +284,8 @@ def main():
     params_lm_head = list(model.lm_head.parameters())
     params_resid = [model.resid_lambdas]
     params_x0 = [model.x0_lambdas]
-    backout_params = [model.backout_lambda]
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(backout_params)
+    smear_backout_params = [model.smear_gate.weight, model.smear_lambda, model.backout_lambda]
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params)
 
     unembedding_lr = args.unembedding_lr * batch_lr_scale
     embedding_lr = args.embedding_lr * batch_lr_scale
@@ -374,7 +374,7 @@ def main():
             'is_small': True,
         },
         {
-            'params': backout_params,
+            'params': smear_backout_params,
             'lr': 0.2,
             'betas': (0.8, 0.95),
             'weight_decay': 0.0,

@@ -178,6 +178,10 @@ class GPTModel(nn.Module):
         # Params for merging x0 across network and blending residual stream
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+        # Smear gate to mix previous token's embeddings into current token (bigram-like)
+        self.smear_gate = LinearFP8(24, 1, bias=False)  # used as linear only
+        self.smear_lambda = nn.Parameter(torch.zeros(1))
+        # Backout, Nanochat says: "subtract cached mid-layer residual before final norm to remove low-level features"
         self.backout_lambda = nn.Parameter(0.2 * torch.ones(1))
 
         # Value embeddings for each layer
@@ -201,7 +205,7 @@ class GPTModel(nn.Module):
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.backout_lambda.numel()
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
         moe_inactive = sum(
@@ -285,6 +289,8 @@ class GPTModel(nn.Module):
             # earlier layers get more x0 blending
             init_val = 0.20 - (0.15 * i / max(n_layer-1, 1))
             self.x0_lambdas.data[i] = init_val
+        torch.nn.init.uniform_(self.smear_gate.weight, 0.0, 0.02)  # similar to VE gate init)
+        torch.nn.init.constant_(self.smear_lambda, 0.0)
         torch.nn.init.constant_(self.backout_lambda, 0.2)
 
         # VE embeddings
@@ -330,6 +336,15 @@ class GPTModel(nn.Module):
             if block.moe_enable:
                 block.moe.zero_token_counters()
 
+    def _apply_smear(self, x):
+        """Mix previous token's embedding into current token (bigram-like)"""
+        x_gate_input = x[:, 1:, :24]                                   # B,T-1,24
+        x_score = torch.sigmoid(self.smear_gate(x_gate_input))         # B,T-1,1
+        x_score = self.smear_lambda.to(x.dtype) * x_score              # B,T-1,1
+        outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
+        assert outputs.dtype == x.dtype        
+        return outputs
+
     def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
@@ -339,13 +354,14 @@ class GPTModel(nn.Module):
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
-        
-        # Backout
-        backout_layer = self.config.n_layer // 2  # backout in middle of network
-        x_backout = None
+
+        # Smear
+        x = self._apply_smear(x)
 
         # Transformer
+        x0 = x
+        backout_layer = self.config.n_layer // 2  # backout in middle of network
+        x_backout = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
