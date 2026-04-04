@@ -84,7 +84,7 @@ def main():
     # Training horizon
     parser.add_argument('--dataset', type=str, default='climbmix', choices=['fineweb', 'climbmix'], help='Training dataset to use.')
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
-    parser.add_argument('--target-param-data-ratio', type=float, default=10.5, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
+    parser.add_argument('--target-param-data-ratio', type=float, default=12, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
     # Optimization
     parser.add_argument('--device-batch-size', type=int, default=32, help='Micro batch size per device.')
     parser.add_argument('--total-batch-size', type=int, default=-1, help='Total batch size across all devices. (default: -1, auto-calculate)')
