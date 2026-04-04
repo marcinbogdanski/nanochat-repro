@@ -72,8 +72,9 @@ def main():
     # Logging
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # FP8 training
+    parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--fa3', action='store_true', help="Enable Flash Attention 3.")
-    parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in bfloat16.")
+    parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in compute dtype.")
     # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
@@ -108,6 +109,11 @@ def main():
     parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
     args = parser.parse_args()
     user_config = vars(args).copy()
+
+    compute_dtype = {
+        'fp32': torch.float32,
+        'bf16': torch.bfloat16,
+    }[args.compute_dtype]
 
     # DDP Init
     ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
@@ -155,7 +161,8 @@ def main():
     
     # Precision
     if device_type == "cuda":
-        torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
+        #torch.backends.cuda.matmul.fp32_precision = "tf32" 
+        torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
     ################################ EQUIVALENCE ###############################
     # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
@@ -199,7 +206,12 @@ def main():
             moe_top_k=2,
         )
         with torch.device('meta'):
-            model_meta = GPTModel(model_config, compute_dtype=torch.bfloat16, enable_fa3=args.fa3, fp8_training=args.fp8)
+            model_meta = GPTModel(
+                model_config,
+                compute_dtype=compute_dtype,
+                enable_fa3=args.fa3,
+                fp8_training=args.fp8
+            )
         return model_meta
     model = create_model_meta(args.depth)
     model.to_empty(device=device)
@@ -400,6 +412,7 @@ def main():
         ns_steps=5,
         beta2=0.9,
         weight_decay=scaled_weight_decay,
+        compute_dtype=compute_dtype
     )
     
     optimizers = [adamw_optimizer, muon_optimizer]

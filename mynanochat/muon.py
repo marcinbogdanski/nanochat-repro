@@ -19,7 +19,8 @@ def fused_muon_step(
     lr,
     wd,
     beta2,
-    steps=5
+    steps,  # 5
+    compute_dtype,
 ):
 
     # Update v: v = B1 * v + (1-B) * g
@@ -31,7 +32,7 @@ def fused_muon_step(
     ###################################
     # Polar express orthogonalization
     # https://arxiv.org/pdf/2505.16932
-    X = grad.bfloat16()
+    X = grad.to(compute_dtype)
     # Ensure spectral norm is at most 1 (with 2% safety factor)
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-6)
     if grad.size(-2) > grad.size(-1):
@@ -88,8 +89,9 @@ class Muon(torch.optim.Optimizer):
         lr_adj = lr * sqrt(max(1, m/n))  # adjust for aspect ratio
         p = p - lr * U                   # update weights
     """
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
+        self.compute_dtype = compute_dtype
         super().__init__(params, defaults)
     
     @torch.no_grad()
@@ -128,7 +130,8 @@ class Muon(torch.optim.Optimizer):
                 momentum=momentum,
                 wd=wd,
                 beta2=beta2,
-                steps=group['ns_steps']
+                steps=group['ns_steps'],
+                compute_dtype=self.compute_dtype,
             )
 
             # copy back params
@@ -138,8 +141,9 @@ class Muon(torch.optim.Optimizer):
 
 class DistMuon(torch.optim.Optimizer):
     """ZeRO-2 version of Muon optimizer"""
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
+        self.compute_dtype = compute_dtype
         super().__init__(params, defaults)
     
     @torch.no_grad()
@@ -227,7 +231,8 @@ class DistMuon(torch.optim.Optimizer):
                     momentum=momentum,
                     wd=wd,
                     beta2=beta2,
-                    steps=group['ns_steps']
+                    steps=group['ns_steps'],
+                    compute_dtype=self.compute_dtype,
                 )
 
             # Reuse the stacked_all_grads buffer for params
