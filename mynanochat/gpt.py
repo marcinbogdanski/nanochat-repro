@@ -200,48 +200,6 @@ class GPTModel(nn.Module):
         # Pre-calculate window size tuples (context_length, 0) for each layer
         self.window_sizes = self._calc_window_sizes(self.config)
 
-    def number_scaling_params(self):
-        wte = sum(p.numel() for p in self.transformer.wte.parameters())
-        value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
-        lm_head = sum(p.numel() for p in self.lm_head.parameters())
-        transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
-        assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
-        moe_inactive = sum(
-            block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
-        )
-        result = {
-            'wte': wte,
-            'value_embeds': value_embeds,
-            'lm_head': lm_head,
-            'transformer_matrices': transformer_matrices,
-            'active_transformer_matrices': transformer_matrices - moe_inactive,
-            'scalars': scalars,
-            'moe_inactive': moe_inactive,
-            'total': total,
-            'active_total': total - moe_inactive,
-        }
-        return result
-
-    def _calc_window_sizes(self, config):
-        long_window = config.block_size
-        short_window = -(-long_window // 4 // 128) * 128  # Nearest multiple of 128 that is at least 1/4 of long_window
-        chat_to_window_type = {
-            'L': (long_window, 0),
-            'S': (short_window, 0),
-        }
-        window_sizes = []
-        for layer_idx in range(config.n_layer):
-            window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
-            window_sizes.append(chat_to_window_type[window_type])
-        window_sizes[-1] = (long_window, 0)  # Last layer always full attention
-        return window_sizes
-    
-    def _has_ve(self, layer_idx, n_layer):
-        # Every other layer, last always included
-        return layer_idx % 2 == (n_layer-1) % 2
-
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
 
@@ -317,6 +275,49 @@ class GPTModel(nn.Module):
         self.transformer.wte.to(dtype=self.compute_dtype)
         for ve in self.value_embeds.values():
             ve.to(dtype=self.compute_dtype)
+
+
+    def number_scaling_params(self):
+        wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
+        lm_head = sum(p.numel() for p in self.lm_head.parameters())
+        transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
+        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
+        moe_inactive = sum(
+            block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
+        )
+        result = {
+            'wte': wte,
+            'value_embeds': value_embeds,
+            'lm_head': lm_head,
+            'transformer_matrices': transformer_matrices,
+            'active_transformer_matrices': transformer_matrices - moe_inactive,
+            'scalars': scalars,
+            'moe_inactive': moe_inactive,
+            'total': total,
+            'active_total': total - moe_inactive,
+        }
+        return result
+
+    def _calc_window_sizes(self, config):
+        long_window = config.block_size
+        short_window = -(-long_window // 4 // 128) * 128  # Nearest multiple of 128 that is at least 1/4 of long_window
+        chat_to_window_type = {
+            'L': (long_window, 0),
+            'S': (short_window, 0),
+        }
+        window_sizes = []
+        for layer_idx in range(config.n_layer):
+            window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
+            window_sizes.append(chat_to_window_type[window_type])
+        window_sizes[-1] = (long_window, 0)  # Last layer always full attention
+        return window_sizes
+    
+    def _has_ve(self, layer_idx, n_layer):
+        # Every other layer, last always included
+        return layer_idx % 2 == (n_layer-1) % 2
 
     def train(self, mode=True):
         if self.fp8_training:
