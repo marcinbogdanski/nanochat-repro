@@ -284,7 +284,8 @@ def main():
     params_lm_head = list(model.lm_head.parameters())
     params_resid = [model.resid_lambdas]
     params_x0 = [model.x0_lambdas]
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0)
+    smear_backout_params = [model.smear_gate.weight, model.smear_lambda, model.backout_lambda]
+    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params)
 
     unembedding_lr = args.unembedding_lr * batch_lr_scale
     embedding_lr = args.embedding_lr * batch_lr_scale
@@ -319,9 +320,21 @@ def main():
             return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
     def get_muon_momentum(step: int):
-        muon_frac = min(step / 400, 1.0)
-        muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.97
-        return muon_momentum
+        warmdown_steps = round(args.warmdown_ratio * max_steps)
+        warmdown_start = max_steps - warmdown_steps
+        if step < 400:
+            # linearly increase momentum from 0.85 to 0.97 over first 400 steps
+            muon_frac = step / 400
+            muon_momentum = (1.0 - muon_frac) * 0.85 + muon_frac * 0.97
+            return muon_momentum
+        elif step < max_steps - warmdown_steps:
+            # keep momentum at 0.97 during main phase of training
+            return 0.97
+        else:
+            # linearly decrease momentum from 0.97 to 0.90 over warmdown
+            progress = (step - warmdown_start) / warmdown_steps
+            muon_momentum = (1.0 - progress) * 0.97 + progress * 0.90
+            return muon_momentum
 
     dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
     adam_groups = [
@@ -360,6 +373,13 @@ def main():
             'weight_decay': 0.0,
             'is_small': True,
         },
+        {
+            'params': smear_backout_params,
+            'lr': 0.2,
+            'betas': (0.8, 0.95),
+            'weight_decay': 0.0,
+            'is_small': True,
+        }
     ]
     adamw_factory = DistAdamW if ddp else AdamW
     adamw_optimizer = adamw_factory(

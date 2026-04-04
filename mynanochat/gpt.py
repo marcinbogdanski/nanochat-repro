@@ -98,8 +98,8 @@ class CausalSelfAttentionRoPE(nn.Module):
         k_rot = F.rms_norm(k_rot, (k_rot.size(-1),))
 
         # Sharper attention
-        q_rot = q_rot * 1.15
-        k_rot = k_rot * 1.15
+        q_rot = q_rot * 1.2
+        k_rot = k_rot * 1.2
 
         if self.enable_fa3:
             # Flash Attention 3
@@ -178,6 +178,11 @@ class GPTModel(nn.Module):
         # Params for merging x0 across network and blending residual stream
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
+        # Smear gate to mix previous token's embeddings into current token (bigram-like)
+        self.smear_gate = LinearFP8(24, 1, bias=False)  # used as linear only
+        self.smear_lambda = nn.Parameter(torch.zeros(1))
+        # Backout, Nanochat says: "subtract cached mid-layer residual before final norm to remove low-level features"
+        self.backout_lambda = nn.Parameter(0.2 * torch.ones(1))
 
         # Value embeddings for each layer
         self.value_embeds = nn.ModuleDict({
@@ -195,48 +200,6 @@ class GPTModel(nn.Module):
         # Pre-calculate window size tuples (context_length, 0) for each layer
         self.window_sizes = self._calc_window_sizes(self.config)
 
-    def number_scaling_params(self):
-        wte = sum(p.numel() for p in self.transformer.wte.parameters())
-        value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
-        lm_head = sum(p.numel() for p in self.lm_head.parameters())
-        transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
-        assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
-        moe_inactive = sum(
-            block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
-        )
-        result = {
-            'wte': wte,
-            'value_embeds': value_embeds,
-            'lm_head': lm_head,
-            'transformer_matrices': transformer_matrices,
-            'active_transformer_matrices': transformer_matrices - moe_inactive,
-            'scalars': scalars,
-            'moe_inactive': moe_inactive,
-            'total': total,
-            'active_total': total - moe_inactive,
-        }
-        return result
-
-    def _calc_window_sizes(self, config):
-        long_window = config.block_size
-        short_window = -(-long_window // 3 // 128) * 128  # Nearest multiple of 128 that is at least 1/3 of long_window
-        chat_to_window_type = {
-            'L': (long_window, 0),
-            'S': (short_window, 0),
-        }
-        window_sizes = []
-        for layer_idx in range(config.n_layer):
-            window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
-            window_sizes.append(chat_to_window_type[window_type])
-        window_sizes[-1] = (long_window, 0)  # Last layer always full attention
-        return window_sizes
-    
-    def _has_ve(self, layer_idx, n_layer):
-        # Every other layer, last always included
-        return layer_idx % 2 == (n_layer-1) % 2
-
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
 
@@ -253,9 +216,6 @@ class GPTModel(nn.Module):
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
-        torch.nn.init.constant_(self.resid_lambdas, 1.0)
-        torch.nn.init.constant_(self.x0_lambdas, 0.1)
-
         # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
         s = 3**0.5 * self.config.n_embd**-0.5
         for block in self.transformer.h:
@@ -264,7 +224,7 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             if not self.config.moe_enable:
-                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.5, s*0.5)  # smaller init for feedforward
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.4, s*0.4)  # smaller init for feedforward
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             else:
                 torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
@@ -274,6 +234,22 @@ class GPTModel(nn.Module):
                 torch.nn.init.zeros_(block.moe.shared_expert.w_down.weight)
                 torch.nn.init.zeros_(block.moe.router.expert_bias)
                 torch.nn.init.zeros_(block.moe.router.tokens_per_expert_counter)
+
+        # Per layer scalars
+        n_layer = self.config.n_layer
+        for i in range(n_layer):
+            # Linearly interpolate from 1.15 to 1.05 across layers,
+            # earlier layers benefit more from the sharper attention
+            init_val = 1.15 - (0.10 * i / max(n_layer-1, 1))
+            self.resid_lambdas.data[i] = init_val
+        for i in range(n_layer):
+            # Linearly interpolate from 0.2 to 0.05 across layers
+            # earlier layers get more x0 blending
+            init_val = 0.20 - (0.15 * i / max(n_layer-1, 1))
+            self.x0_lambdas.data[i] = init_val
+        torch.nn.init.uniform_(self.smear_gate.weight, 0.0, 0.02)  # similar to VE gate init)
+        torch.nn.init.constant_(self.smear_lambda, 0.0)
+        torch.nn.init.constant_(self.backout_lambda, 0.2)
 
         # VE embeddings
         for ve in self.value_embeds.values():
@@ -300,6 +276,49 @@ class GPTModel(nn.Module):
         for ve in self.value_embeds.values():
             ve.to(dtype=self.compute_dtype)
 
+
+    def number_scaling_params(self):
+        wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
+        lm_head = sum(p.numel() for p in self.lm_head.parameters())
+        transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
+        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
+        moe_inactive = sum(
+            block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
+        )
+        result = {
+            'wte': wte,
+            'value_embeds': value_embeds,
+            'lm_head': lm_head,
+            'transformer_matrices': transformer_matrices,
+            'active_transformer_matrices': transformer_matrices - moe_inactive,
+            'scalars': scalars,
+            'moe_inactive': moe_inactive,
+            'total': total,
+            'active_total': total - moe_inactive,
+        }
+        return result
+
+    def _calc_window_sizes(self, config):
+        long_window = config.block_size
+        short_window = -(-long_window // 4 // 128) * 128  # Nearest multiple of 128 that is at least 1/4 of long_window
+        chat_to_window_type = {
+            'L': (long_window, 0),
+            'S': (short_window, 0),
+        }
+        window_sizes = []
+        for layer_idx in range(config.n_layer):
+            window_type = config.window_pattern[layer_idx % len(config.window_pattern)]
+            window_sizes.append(chat_to_window_type[window_type])
+        window_sizes[-1] = (long_window, 0)  # Last layer always full attention
+        return window_sizes
+    
+    def _has_ve(self, layer_idx, n_layer):
+        # Every other layer, last always included
+        return layer_idx % 2 == (n_layer-1) % 2
+
     def train(self, mode=True):
         if self.fp8_training:
             fp8_mode = 'fp8' if mode else 'native'
@@ -318,6 +337,15 @@ class GPTModel(nn.Module):
             if block.moe_enable:
                 block.moe.zero_token_counters()
 
+    def _apply_smear(self, x):
+        """Mix previous token's embedding into current token (bigram-like)"""
+        x_gate_input = x[:, 1:, :24]                                   # B,T-1,24
+        x_score = torch.sigmoid(self.smear_gate(x_gate_input))         # B,T-1,1
+        x_score = self.smear_lambda.to(x.dtype) * x_score              # B,T-1,1
+        outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
+        assert outputs.dtype == x.dtype        
+        return outputs
+
     def forward(self, idx, targets=None, reduction='mean', return_logits=True):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
@@ -327,13 +355,24 @@ class GPTModel(nn.Module):
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
+
+        # Smear
+        x = self._apply_smear(x)
 
         # Transformer
+        x0 = x
+        backout_layer = self.config.n_layer // 2  # backout in middle of network
+        x_backout = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
             x = block(x, ve, self.cos, self.sin, self.window_sizes[i])
+            if i == backout_layer:
+                x_backout = x
+
+        # Final backout blending
+        if x_backout is not None:
+            x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = F.rms_norm(x, (x.size(-1),))
 
         # Logits
