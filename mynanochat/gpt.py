@@ -271,10 +271,11 @@ class GPTModel(nn.Module):
             dtype=self.compute_dtype
         )
 
-        # Cast to compute dtype
-        self.transformer.wte.to(dtype=self.compute_dtype)
-        for ve in self.value_embeds.values():
-            ve.to(dtype=self.compute_dtype)
+        # Keep embedding parameters in fp32 for fp16 training so GradScaler can unscale them.
+        if self.compute_dtype != torch.float16:
+            self.transformer.wte.to(dtype=self.compute_dtype)
+            for ve in self.value_embeds.values():
+                ve.to(dtype=self.compute_dtype)
 
 
     def number_scaling_params(self):
@@ -354,6 +355,7 @@ class GPTModel(nn.Module):
 
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
+        x = x.to(self.compute_dtype)
         x = F.rms_norm(x, (x.size(-1),))
 
         # Smear
@@ -365,7 +367,7 @@ class GPTModel(nn.Module):
         x_backout = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
+            ve = self.value_embeds[str(i)](idx).to(x.dtype) if self._has_ve(i, self.config.n_layer) else None
             x = block(x, ve, self.cos, self.sin, self.window_sizes[i])
             if i == backout_layer:
                 x_backout = x

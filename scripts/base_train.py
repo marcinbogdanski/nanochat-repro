@@ -72,7 +72,7 @@ def main():
     # Logging
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # FP8 training
-    parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
+    parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp16', 'fp32').")
     parser.add_argument('--fa3', action='store_true', help="Enable Flash Attention 3.")
     parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in compute dtype.")
     # Model architecture
@@ -112,6 +112,7 @@ def main():
 
     compute_dtype = {
         'fp32': torch.float32,
+        'fp16': torch.float16,
         'bf16': torch.bfloat16,
     }[args.compute_dtype]
 
@@ -412,13 +413,16 @@ def main():
         ns_steps=5,
         beta2=0.9,
         weight_decay=scaled_weight_decay,
-        compute_dtype=compute_dtype
+        compute_dtype=compute_dtype if compute_dtype != torch.float16 else torch.float32,  # fp16 not stable for Muon
     )
     
     optimizers = [adamw_optimizer, muon_optimizer]
     for opt in optimizers:
             for group in opt.param_groups:
                 group["initial_lr"] = group["lr"]
+
+    # Grad scaler for fp16
+    scaler = torch.amp.GradScaler() if compute_dtype == torch.float16 else None
 
     # Dataset
     train_loader = DataLoader(
@@ -586,7 +590,10 @@ def main():
             train_loss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
-            loss.backward()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
         if ddp:
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
@@ -606,8 +613,27 @@ def main():
         model.zero_moe_counters()
 
         # Optimizer Step
-        for opt in optimizers:
-            opt.step()
+        if scaler is not None:
+            found_inf_tensors = []
+            for opt in optimizers:
+                scaler.unscale_(opt)
+                found_inf_tensors.extend(scaler._found_inf_per_device(opt).values())
+
+            if found_inf_tensors:
+                global_found_inf = found_inf_tensors[0].clone()
+                for found_inf in found_inf_tensors[1:]:
+                    global_found_inf = torch.maximum(global_found_inf, found_inf)
+                if ddp:
+                    torch.distributed.all_reduce(global_found_inf, op=torch.distributed.ReduceOp.MAX)
+                for found_inf in found_inf_tensors:
+                    found_inf.copy_(global_found_inf)
+
+            for opt in optimizers:
+                scaler.step(opt)
+            scaler.update()
+        else:
+            for opt in optimizers:
+                opt.step()
 
         # Sync & Time
         if device.startswith('cuda'):
