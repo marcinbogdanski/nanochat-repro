@@ -17,6 +17,7 @@ from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
 from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
+from mynanochat.checkpoint import save_checkpoint
 from mynanochat.fp8 import LinearFP8
 
 class WandBDummy:
@@ -422,27 +423,15 @@ def main():
         # Generate
         if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
-            samples = generate_test_samples(orig_model, tokenizer, device)
-            print0("\n".join(samples))
+            generated_samples = generate_test_samples(orig_model, tokenizer, device)
+            print0("\n".join(generated_samples))
 
         # Save Model
         if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
-            models_path = os.path.dirname(__file__)+"/../models/"
-            os.makedirs(models_path, exist_ok=True)
-            model_data = model.state_dict()
-            torch.save(model_data, models_path+f"model_{step:06d}.pt")
-            # Calculate MD5 sum of saved file by running os command
-            md5sum = os.popen(f"md5sum {models_path}model_{step:06d}.pt").read().split()[0]
-            print0(f"Saved model_{step:06d}.pt with MD5 sum: {md5sum}")
-            
-            metadata = {
-                'step': step,
-                'model_config': model.config.to_dict(),
-                'user_config': user_config,
-            }
-            with open(models_path+f"meta_{step:06d}.json", "w") as f:
-                json.dump(metadata, f)
+            checkpoints_path = os.path.join(os.path.dirname(__file__), "../runs/default")
+            checkpoint_md5sum = save_checkpoint(checkpoints_path, orig_model, step, user_config)
+            print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
 
         # Exit Condition
         if step == max_steps:
