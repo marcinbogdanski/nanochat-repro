@@ -1,5 +1,4 @@
 import os
-import json
 import torch
 import pyarrow.parquet as pq
 
@@ -55,6 +54,24 @@ class DataLoader:
         self.idx_in_group = 0
         self.token_buffer = []
         self.document_buffer = []
+    
+    def state_dict(self):
+        return {
+            "shard_idx": self.shard_idx,
+            "group_idx": self.group_idx,
+            "idx_in_group": self.idx_in_group,
+            "token_buffer": self.token_buffer,
+            "document_buffer": self.document_buffer,
+        }
+
+    def load_state_dict(self, state):
+        self.shard_idx = state["shard_idx"]
+        self.group_idx = state["group_idx"]
+        self.idx_in_group = state["idx_in_group"]
+        self.token_buffer = state["token_buffer"]
+        self.document_buffer = state["document_buffer"]
+        self.loaded_shard_idx = None
+        self.loaded_shard_row_groups = None
 
     def _get_example_text(self):
         # Lead the requested shard

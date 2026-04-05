@@ -398,13 +398,8 @@ def main():
     )
     print0(f"Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
 
-
-
-    total_ntok = 0
-    total_time = 0.0
-    smooth_dt = 0.0
-    smooth_train_loss = 0
-    for step in range(max_steps+1):
+    step, total_time, smooth_dt, smooth_tloss = 0, 0.0, 0.0, 0.0
+    while True:
 
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
@@ -427,10 +422,11 @@ def main():
             print0("\n".join(generated_samples))
 
         # Save Model
-        if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
+        if args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
-            checkpoints_path = os.path.join(os.path.dirname(__file__), "../runs/default")
-            checkpoint_md5sum = save_checkpoint(checkpoints_path, orig_model, step, user_config)
+            path = os.path.join(os.path.dirname(__file__), "../runs/default")
+            loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
+            checkpoint_md5sum = save_checkpoint(path, orig_model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
 
         # Exit Condition
@@ -485,18 +481,16 @@ def main():
         total_time += dt
 
         # Logs
-        ntok = (micro_batch * args.max_seq_len * grad_accum * ddp_world_size)
-        total_ntok += ntok
-        tps = int(ntok / dt)
-        pct = (step) / max_steps * 100
-        smooth_train_loss = 0.9 * smooth_train_loss + (1 - 0.9) * train_loss.item()
-        debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
+        tps = int(total_batch_size / dt)
+        pct = step / max_steps * 100
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * train_loss.item()
+        debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
         eta_seconds = debiased_smooth_dt * remaining_steps
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
         print0(f"Step {step}/{max_steps} ({pct:.2f}%) | "
-                f"loss {debiased_smooth_train_loss:.16f} {loss_accum.item():.4f} | "
+                f"loss {debiased_smooth_tloss:.16f} {loss_accum.item():.4f} | "
                 f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
                 f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                 f"time {total_time_str} | eta {eta_str}")
@@ -504,11 +498,14 @@ def main():
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
-                'train/loss': debiased_smooth_train_loss,
+                'train/loss': debiased_smooth_tloss,
                 'train/lrm': lrm,
                 'train/dt': dt,
                 'train/tok_per_sec': tps,
             })
+        
+        # Advance Step
+        step += 1
 
     if torch.cuda.is_available():
         for r in range(ddp_world_size):
