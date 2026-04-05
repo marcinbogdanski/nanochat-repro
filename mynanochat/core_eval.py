@@ -235,32 +235,34 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
     return accuracy
 
 
-def evaluate_core_metric(bundle_folder, model, tokenizer, device, max_examples_per_task=None):
+def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, bundle_folder="~/.cache/nanochat/eval_bundle"):
+    bundle_folder = os.path.expanduser(bundle_folder)
+
     ddp_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     ddp_master = (ddp_rank == 0)
 
+    if device.startswith('cuda'):
+        torch.cuda.synchronize()  # wait for the GPU to finish work
+    total_time_start = time.time()
+
+    # Load config and random baselines
     config = yaml.safe_load(open(os.path.join(bundle_folder, 'core.yaml'), 'r'))
     tasks = config['icl_tasks']
-
-    # Random baselines
     random_baselines = dict()
     with open(os.path.join(bundle_folder, 'eval_meta_data.csv'), 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
             random_baselines[row['Eval Task']] = float(row['Random baseline'])
-
+    
     # Evaluate tasks
-    results = {
-        'tasks': [],
-        'core_metric': None,
-    }
+    result_accuracies = {}
+    result_centered_accuracies = {}
     for task in tasks:
         task_label = task['label']
         task_type = task['icl_task_type']
         task_dataset_uri = task['dataset_uri']
         task_num_fewshot = task['num_fewshot'][0]
         task_cont_delim = task.get('continuation_delimiter', ' ')
-
         ts = time.time()
 
         # Load dataset
@@ -283,19 +285,19 @@ def evaluate_core_metric(bundle_folder, model, tokenizer, device, max_examples_p
         
         rand_baseline = random_baselines[task_label]
         centered_accuracy = (accuracy-0.01 * rand_baseline) / (1.0 - 0.01 * rand_baseline)
-        results['tasks'].append({
-            'label': task_label,
-            'accuracy': accuracy,
-            'centered_accuracy': centered_accuracy,
-        })
+        result_accuracies[task_label] = accuracy
+        result_centered_accuracies[task_label] = centered_accuracy
 
         dt = time.time() - ts
         if ddp_master:
             print(f"Task {task_label:>32} ({task_type}, {task_num_fewshot}-shot) | "
                   f"dt {dt:.1f}s | acc {accuracy:.4f} | centered_acc {centered_accuracy:.4f}")
     
+    if device.startswith('cuda'):
+        torch.cuda.synchronize()  # wait for the GPU to finish work
+    total_time = time.time() - total_time_start
+    
     # Compute core metric
-    centered_accuracies = [t['centered_accuracy'] for t in results['tasks']]
+    centered_accuracies = list(result_centered_accuracies.values())
     core_metric = sum(centered_accuracies) / len(centered_accuracies)
-    results['core_metric'] = core_metric
-    return results
+    return core_metric, result_centered_accuracies, total_time

@@ -483,21 +483,11 @@ def main():
 
         # Core Metric
         if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
-            ts = time.time()
             model.eval()
-            bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
             # Original model because shapes keep changing
-            results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
-            core_metric = results['core_metric']
-            accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
-            synchronize()
-            dt = (time.time() - ts)
-            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {dt:.2f}s")
-            wandb_logger.log({
-                'step': step,
-                'core_metric': core_metric,
-                'centered_results': accuracies,
-            })
+            core_metric, accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
+            wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': accuracies})
             model.train()
 
         # Generate
