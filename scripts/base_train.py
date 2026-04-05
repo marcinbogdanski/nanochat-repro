@@ -17,7 +17,7 @@ from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
 from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
-from mynanochat.checkpoint import save_checkpoint
+from mynanochat.checkpoint import save_checkpoint, load_checkpoint
 from mynanochat.fp8 import LinearFP8
 
 class WandBDummy:
@@ -59,6 +59,7 @@ def main():
     parser.add_argument('--warmup-steps', type=int, default=40, help='Number of steps for LR warmup')
     parser.add_argument('--warmdown-ratio', type=float, default=0.65, help='Ratio of iterations for LR warmdown')
     parser.add_argument('--final-lr-frac', type=float, default=0.05, help='Final LR fraction of initial LR')
+    parser.add_argument('--resume', action='store_true', help='Whether to resume from the latest checkpoint if available.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
@@ -397,36 +398,50 @@ def main():
         world_size=ddp_world_size,
     )
     print0(f"Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+    
+    # Checkpoint Resume
+    if args.resume:
+        print0("Resuming from latest checkpoint...")
+        checkpoint_path = os.path.join(os.path.dirname(__file__), "../runs/default")
+        loaded_vars = load_checkpoint(checkpoint_path, model, optimizers, train_loader, device)
+        step = loaded_vars["step"]
+        total_time = loaded_vars["total_time"]
+        smooth_dt = loaded_vars["smooth_dt"]
+        smooth_tloss = loaded_vars["smooth_tloss"]
+        print0(f"Resumed checkpoint from step {step}")
+    else:
+        step, total_time, smooth_dt, smooth_tloss = 0, 0.0, 0.0, 0.0
 
-    step, total_time, smooth_dt, smooth_tloss = 0, 0.0, 0.0, 0.0
+    # Training Loop
+    start_step = step
     while True:
 
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
-        if step == 0 or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
+        if step == start_step or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
 
         # Core Metric
         # Use original model because shapes keep changing
-        if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
+        if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
             core_metric, core_accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
             wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
 
         # Generate
-        if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or step == max_steps):
+        if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
             generated_samples = generate_test_samples(orig_model, tokenizer, device)
             print0("\n".join(generated_samples))
 
         # Save Model
-        if args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
+        if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
             path = os.path.join(os.path.dirname(__file__), "../runs/default")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(path, orig_model, optimizers, train_loader, loop_vars, user_config)
+            checkpoint_md5sum = save_checkpoint(path, model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
 
         # Exit Condition
@@ -491,7 +506,7 @@ def main():
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
         print0(f"Step {step}/{max_steps} ({pct:.2f}%) | "
                 f"loss {debiased_smooth_tloss:.16f} {loss_accum.item():.4f} | "
-                f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                f"lrm {lrm:.3f} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
                 f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                 f"time {total_time_str} | eta {eta_str}")
         if step % args.log_every == 0:
