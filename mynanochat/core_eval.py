@@ -13,7 +13,7 @@ import torch
 import jinja2
 
 
-def render_multiple_choice_prompts(data_item, fewshot_examples, cont_delim):
+def _render_multiple_choice_prompts(data_item, fewshot_examples, cont_delim):
     template_str = """
 {%- for example in fewshot_examples -%}
 {{ example.query }}{{ continuation_delimiter }}{{ example.choices[example.gold] }}
@@ -34,7 +34,7 @@ def render_multiple_choice_prompts(data_item, fewshot_examples, cont_delim):
     return rendered_prompts
 
 
-def render_schema_prompts(data_item, fewshot_examples, cont_delim):
+def _render_schema_prompts(data_item, fewshot_examples, cont_delim):
     template_str = """
 {%- for example in fewshot_examples -%}
 {{ example.context_options[example.gold] }}{{ continuation_delimiter }}{{ example.continuation }}
@@ -55,7 +55,7 @@ def render_schema_prompts(data_item, fewshot_examples, cont_delim):
     return rendered_prompts
 
 
-def render_lm_prompts(data_item, fewshot_examples, cont_delim):
+def _render_lm_prompts(data_item, fewshot_examples, cont_delim):
     template_str = """
 {%- for example in fewshot_examples -%}
 {{ example.context | trim }}{{ continuation_delimiter }}{{ example.continuation }}
@@ -82,7 +82,7 @@ def render_lm_prompts(data_item, fewshot_examples, cont_delim):
     return [rendered_prompt_without_cont, rendered_prompt_with_cont]
 
 
-def prepare_multiple_choice_inputs(tokenizer, prompts):
+def _prepare_multiple_choice_inputs(tokenizer, prompts):
     bos_token = tokenizer.encode_single_token('<|bos|>')
 
     # Tokenize prompts
@@ -107,7 +107,7 @@ def prepare_multiple_choice_inputs(tokenizer, prompts):
     return tokens, ans_start_idxs, ans_end_idxs
 
 
-def prepare_schema_inputs(tokenizer, prompts):
+def _prepare_schema_inputs(tokenizer, prompts):
     bos_token = tokenizer.encode_single_token('<|bos|>')
 
     # Tokenize prompts
@@ -133,7 +133,7 @@ def prepare_schema_inputs(tokenizer, prompts):
     return tokens, ans_start_idxs, ans_end_idxs
 
 
-def prepare_lm_inputs(tokenizer, prompts):
+def _prepare_lm_inputs(tokenizer, prompts):
     bos_token = tokenizer.encode_single_token('<|bos|>')
 
     # Tokenize prompts
@@ -147,7 +147,7 @@ def prepare_lm_inputs(tokenizer, prompts):
     return [tokens_with], [answer_start_idx], [answer_end_idx]
 
 
-def evaluate_one_example(idx, data_list, model, tokenizer, device,
+def _evaluate_one_example(idx, data_list, model, tokenizer, device,
                          task_type, task_dataset_uri, task_num_fewshot, task_cont_delim):
     # Few-shot example
     if task_num_fewshot > 0:
@@ -160,14 +160,14 @@ def evaluate_one_example(idx, data_list, model, tokenizer, device,
     
     # Render prompts and prepare inputs
     if task_type == 'multiple_choice':
-        prompts = render_multiple_choice_prompts(data_list[idx], fewshot_examples, task_cont_delim)
-        tokens, ans_start_idxs, ans_end_idxs = prepare_multiple_choice_inputs(tokenizer, prompts)
+        prompts = _render_multiple_choice_prompts(data_list[idx], fewshot_examples, task_cont_delim)
+        tokens, ans_start_idxs, ans_end_idxs = _prepare_multiple_choice_inputs(tokenizer, prompts)
     elif task_type == 'schema':
-        prompts = render_schema_prompts(data_list[idx], fewshot_examples, task_cont_delim)
-        tokens, ans_start_idxs, ans_end_idxs = prepare_schema_inputs(tokenizer, prompts)
+        prompts = _render_schema_prompts(data_list[idx], fewshot_examples, task_cont_delim)
+        tokens, ans_start_idxs, ans_end_idxs = _prepare_schema_inputs(tokenizer, prompts)
     elif task_type == 'language_modeling':
-        prompts = render_lm_prompts(data_list[idx], fewshot_examples, task_cont_delim)
-        tokens, ans_start_idxs, ans_end_idxs = prepare_lm_inputs(tokenizer, prompts)
+        prompts = _render_lm_prompts(data_list[idx], fewshot_examples, task_cont_delim)
+        tokens, ans_start_idxs, ans_end_idxs = _prepare_lm_inputs(tokenizer, prompts)
     else:
         raise ValueError(f'Unknown task type: {task_type}')
     
@@ -224,8 +224,8 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
     for i in range(len(data_list)):
         if i % ddp_world_size != ddp_rank:
             continue
-        is_correct = evaluate_one_example(i, data_list, model, tokenizer, device,
-                                          task_type, task_dataset_uri, task_num_fewshot, task_cont_delim)
+        is_correct = _evaluate_one_example(i, data_list, model, tokenizer, device,
+                                           task_type, task_dataset_uri, task_num_fewshot, task_cont_delim)
         results_tensor[i] = 1.0 if is_correct else 0.0
 
     if torch.distributed.is_initialized():
@@ -234,10 +234,10 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
     accuracy = results_tensor.mean().item()
     return accuracy
 
-
+@torch.inference_mode()
 def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, bundle_folder="~/.cache/nanochat/eval_bundle"):
-    bundle_folder = os.path.expanduser(bundle_folder)
 
+    bundle_folder = os.path.expanduser(bundle_folder)
     ddp_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     ddp_master = (ddp_rank == 0)
 
@@ -253,51 +253,57 @@ def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, b
         reader = csv.DictReader(f)
         for row in reader:
             random_baselines[row['Eval Task']] = float(row['Random baseline'])
-    
-    # Evaluate tasks
-    result_accuracies = {}
-    result_centered_accuracies = {}
-    for task in tasks:
-        task_label = task['label']
-        task_type = task['icl_task_type']
-        task_dataset_uri = task['dataset_uri']
-        task_num_fewshot = task['num_fewshot'][0]
-        task_cont_delim = task.get('continuation_delimiter', ' ')
-        ts = time.time()
 
-        # Load dataset
-        data_filepath = os.path.join(bundle_folder, 'eval_data', task_dataset_uri)
-        with open(data_filepath, 'r', encoding='utf-8') as f:
-            data_list = [json.loads(l.strip()) for l in f.readlines()]
+    was_training = model.training
+    model.eval()
+    try:
 
-        # Shuffle
-        rng = random.Random(1337)
-        rng.shuffle(data_list)
-        if max_examples_per_task is not None:
-            data_list = data_list[:max_examples_per_task]
+        # Evaluate tasks
+        result_centered_accuracies = {}
+        for task in tasks:
+            task_label = task['label']
+            task_type = task['icl_task_type']
+            task_dataset_uri = task['dataset_uri']
+            task_num_fewshot = task['num_fewshot'][0]
+            task_cont_delim = task.get('continuation_delimiter', ' ')
+            ts = time.time()
+
+            # Load dataset
+            data_filepath = os.path.join(bundle_folder, 'eval_data', task_dataset_uri)
+            with open(data_filepath, 'r', encoding='utf-8') as f:
+                data_list = [json.loads(l.strip()) for l in f.readlines()]
+
+            # Shuffle
+            rng = random.Random(1337)
+            rng.shuffle(data_list)
+            if max_examples_per_task is not None:
+                data_list = data_list[:max_examples_per_task]
+            
+            # Run evaluation
+            accuracy = evaluate_task_accuracy(
+                data_list,
+                model, tokenizer, device,
+                task_type, task_dataset_uri, task_num_fewshot, task_cont_delim
+            )
+            
+            rand_baseline = random_baselines[task_label]
+            centered_accuracy = (accuracy-0.01 * rand_baseline) / (1.0 - 0.01 * rand_baseline)
+            result_centered_accuracies[task_label] = centered_accuracy
+
+            dt = time.time() - ts
+            if ddp_master:
+                print(f"Task {task_label:>32} ({task_type}, {task_num_fewshot}-shot) | "
+                    f"dt {dt:.1f}s | acc {accuracy:.4f} | centered_acc {centered_accuracy:.4f}")
         
-        # Run evaluation
-        accuracy = evaluate_task_accuracy(
-            data_list,
-            model, tokenizer, device,
-            task_type, task_dataset_uri, task_num_fewshot, task_cont_delim
-        )
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()  # wait for the GPU to finish work
+        total_time = time.time() - total_time_start
         
-        rand_baseline = random_baselines[task_label]
-        centered_accuracy = (accuracy-0.01 * rand_baseline) / (1.0 - 0.01 * rand_baseline)
-        result_accuracies[task_label] = accuracy
-        result_centered_accuracies[task_label] = centered_accuracy
+        # Compute core metric
+        centered_accuracies = list(result_centered_accuracies.values())
+        core_metric = sum(centered_accuracies) / len(centered_accuracies)
+        return core_metric, result_centered_accuracies, total_time
+    finally:
+        model.train(was_training)
 
-        dt = time.time() - ts
-        if ddp_master:
-            print(f"Task {task_label:>32} ({task_type}, {task_num_fewshot}-shot) | "
-                  f"dt {dt:.1f}s | acc {accuracy:.4f} | centered_acc {centered_accuracy:.4f}")
     
-    if device.startswith('cuda'):
-        torch.cuda.synchronize()  # wait for the GPU to finish work
-    total_time = time.time() - total_time_start
-    
-    # Compute core metric
-    centered_accuracies = list(result_centered_accuracies.values())
-    core_metric = sum(centered_accuracies) / len(centered_accuracies)
-    return core_metric, result_centered_accuracies, total_time

@@ -187,7 +187,7 @@ def main():
         folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
-    print0(f"Init: Using dataset={args.dataset} from {folderpath}")
+    print0(f"Using dataset={args.dataset} from {folderpath}")
 
     def create_model_meta(depth):
         # Hyperparameters
@@ -242,7 +242,7 @@ def main():
     param_counts: dict = model.number_scaling_params()
     scaling_params = param_counts['active_transformer_matrices'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
-    print0(f"Init: Scaling info:")
+    print0(f"Scaling info:")
     print0(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
     print0(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
@@ -255,13 +255,13 @@ def main():
     # (2) Batch size calculation
     if args.total_batch_size > 0:
         total_batch_size = args.total_batch_size
-        print0(f"Init: Using user-provided total_batch_size={total_batch_size} without scaling.")
+        print0(f"Using user-provided total_batch_size={total_batch_size} without scaling.")
     else:
         # Power Lines paper (Bopt=D^0.383), https://arxiv.org/abs/2505.13738
         target_token_ratio = target_tokens / ref_d12_target_tokens_D_REF
         proposed_batch_size = ref_d12_batch_size_B_REF * target_token_ratio**0.383
         total_batch_size = 2 ** round(math.log2(proposed_batch_size))
-        print0(f"Init: Calculated total_batch_size={total_batch_size} based on Power Lines scaling with "
+        print0(f"Calculated total_batch_size={total_batch_size} based on Power Lines scaling with "
                f"target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
 
     # (3) Learning rate scaling
@@ -274,16 +274,13 @@ def main():
     # (4) Weight decay scaling
     # T_epoch framework, https://arxiv.org/abs/2405.13698
     scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
-    print0(f"Init: Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
+    print0(f"Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
     # Training Hyperparameters
     micro_batch = args.device_batch_size
     assert total_batch_size % (args.max_seq_len*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (args.max_seq_len*micro_batch*ddp_world_size)
-    print0(f"Init: Training hyperparameters:")
-    print0(f"  {micro_batch=}")
-    print0(f"  {total_batch_size=}")
-    print0(f"  {grad_accum=}")
+    print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
     params_matrix = list(model.transformer.h.parameters())
@@ -303,10 +300,10 @@ def main():
     # Calc Max Steps
     if args.num_iterations > 0:
         max_steps = args.num_iterations
-        print0(f"Init: Using user-provided num_iterations={max_steps} without scaling.")
+        print0(f"Using user-provided num_iterations={max_steps} without scaling.")
     else:
         max_steps = target_tokens // total_batch_size  # floor the division
-        print0(f"Init: Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
+        print0(f"Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
 
     # WD for Optimizers
     def get_wd(step: int):
@@ -424,11 +421,11 @@ def main():
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
-    print0(f"Init: Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
+    print0(f"Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     assert args.eval_tokens % (micro_batch * args.max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * args.max_seq_len * ddp_world_size)
-    print0(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
+    print0(f"Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         folderpath=folderpath,
         split="val",
@@ -438,7 +435,7 @@ def main():
         rank=ddp_rank,
         world_size=ddp_world_size,
     )
-    print0(f"Init: Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+    print0(f"Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
 
 
 
@@ -451,20 +448,16 @@ def main():
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
         if step == 0 or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
-            model.eval()
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
-            model.train()
 
         # Core Metric
         # Use original model because shapes keep changing
         if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
-            model.eval()
             core_metric, core_accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
             wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
-            model.train()
 
         # Generate
         if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or step == max_steps):
