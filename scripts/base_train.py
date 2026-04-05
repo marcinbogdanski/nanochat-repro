@@ -15,6 +15,7 @@ from mynanochat.dataloader import DataLoader
 from mynanochat.adamw import AdamW, DistAdamW
 from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
+from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.fp8 import LinearFP8
 
 class WandBDummy:
@@ -451,43 +452,18 @@ def main():
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
         if step == 0 or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
             model.eval()
-            total_nats = torch.tensor(0.0, device=device, dtype=torch.float32)
-            total_bytes = torch.tensor(0, device=device, dtype=torch.int64)
-            eval_loader.reset()
-            with torch.no_grad():
-                for _ in range(eval_steps):
-                    x, y = eval_loader.get_batch_bos()
-                    assert (y >= 0).all()  # masking with -1 not supported
-                    x = x.to(device)
-                    y = y.to(device)
-                    _, loss_arr = model(x, y, reduction='none', return_logits=False)
-                    bytes_arr = token_bytes[y.view(-1)]
-                    loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
-                    total_nats += loss_arr.sum().item()
-                    total_bytes += bytes_arr.sum().item()
-            if ddp:
-                torch.distributed.all_reduce(total_nats, op=torch.distributed.ReduceOp.SUM)
-                torch.distributed.all_reduce(total_bytes, op=torch.distributed.ReduceOp.SUM)
-            total_nats = total_nats.item()
-            total_bytes = total_bytes.item()
-            bpb = float('inf')
-            if total_bytes > 0:
-                bpb = total_nats / (total_bytes * math.log(2))
+            bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
-            wandb_logger.log({
-                'step': step,
-                'total_training_time': total_time,
-                'val/bpb': bpb,
-            })
+            wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
             model.train()
 
         # Core Metric
+        # Use original model because shapes keep changing
         if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
             model.eval()
-            # Original model because shapes keep changing
-            core_metric, accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            core_metric, core_accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
-            wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': accuracies})
+            wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
             model.train()
 
         # Generate
