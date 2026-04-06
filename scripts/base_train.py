@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
-    parser.add_argument('--fa3', action='store_true', help="Enable Flash Attention 3.")
+    parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
     parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in compute dtype.")
     # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
@@ -93,7 +93,7 @@ def main():
     # Determinism
     # Also need to disable torch.compile for reproducibility
     if args.deterministic:
-        assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
+        assert args.no_fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -121,7 +121,7 @@ def main():
             model_meta = GPTModel(
                 model_config,
                 compute_dtype=compute_dtype,
-                enable_fa3=args.fa3,
+                enable_fa3=not args.no_fa3,
                 fp8_training=args.fp8
             )
         return model_meta
