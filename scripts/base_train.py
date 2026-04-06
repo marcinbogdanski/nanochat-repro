@@ -12,59 +12,12 @@ import wandb
 import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
-from mynanochat.adamw import AdamW, DistAdamW
-from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
+from mynanochat.loss_eval import evaluate_bpb
+from mynanochat.generate import generate_test_samples
+from mynanochat.checkpoint import save_checkpoint, load_checkpoint
 from mynanochat.fp8 import LinearFP8
-
-class WandBDummy:
-    def __init__(self):
-        pass
-    def log(self, *args, **kwargs):
-        pass
-    def finish(self):
-        pass
-
-@torch.inference_mode()
-def sample_one_token(logits, temperature=1.0, top_k=None, sample_rng=None):
-    assert logits.ndim == 2  # B,C
-    assert temperature >= 0.0
-    assert top_k is None or 0 < top_k <= logits.size(-1)
-    if temperature == 0.0:
-        return torch.argmax(logits, dim=-1, keepdim=True)  # greedy
-    if top_k is None:
-        probs = F.softmax(logits / temperature, dim=-1)  # B,C
-        ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
-        return ix
-    else:
-        topk_logits, topk_indices = torch.topk(logits, k=top_k, dim=-1)  # B,k
-        probs = F.softmax(topk_logits / temperature, dim=-1)  # B,k
-        ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
-        return torch.gather(topk_indices, -1, ix)  # B,1
-
-@torch.inference_mode()
-def generate(model, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng=None):
-    """Generate max_tokens starting from idx[B,T]"""
-    assert isinstance(idx, torch.Tensor)
-    assert idx.dtype == torch.long
-    assert len(idx.shape) == 2  # B,T
-    assert isinstance(max_new_tokens, int)
-    
-    is_training = model.training
-    model.eval()
-
-    block_size = model.config.block_size
-    with torch.no_grad():
-        for _ in range(max_new_tokens):
-            idx_tail = idx[:, -block_size:]      # B,T  sliding window
-            logits, _ = model(idx_tail)      # B,T,C <- B,T
-            logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
-            xcol = sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
-            idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
-    
-    model.train(is_training)
-    return idx
-
+from mynanochat.common import ddp_init, wandb_init
 
 def main():
 
@@ -73,7 +26,7 @@ def main():
     parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
-    parser.add_argument('--fa3', action='store_true', help="Enable Flash Attention 3.")
+    parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
     parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in compute dtype.")
     # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
@@ -97,6 +50,7 @@ def main():
     parser.add_argument('--warmup-steps', type=int, default=40, help='Number of steps for LR warmup')
     parser.add_argument('--warmdown-ratio', type=float, default=0.65, help='Ratio of iterations for LR warmdown')
     parser.add_argument('--final-lr-frac', type=float, default=0.05, help='Final LR fraction of initial LR')
+    parser.add_argument('--resume', action='store_true', help='Whether to resume from the latest checkpoint if available.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
@@ -109,40 +63,13 @@ def main():
     parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
     args = parser.parse_args()
     user_config = vars(args).copy()
-
-    compute_dtype = {
-        'fp32': torch.float32,
-        'bf16': torch.bfloat16,
-    }[args.compute_dtype]
-
-    # DDP Init
-    ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
-    if ddp:
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        ddp_master = ddp_rank == 0  # is this a master?
-        device = f'cuda:{ddp_local_rank}'
-        device_type = 'cuda'
-        assert torch.cuda.is_available()
-        torch.cuda.set_device(device)
-        torch.distributed.init_process_group(backend='nccl', device_id=ddp_local_rank)  # device_id= to suppress barrier warning
-    else:
-        ddp_rank = 0
-        ddp_local_rank = 0
-        ddp_world_size = 1
-        ddp_master = True
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        device_type = device
-    
-    if ddp_master:
-        print(f"Init: {ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
-
-    # WandB Init
-    if args.run is not None and ddp_master:
-        wandb_logger = wandb.init(project="nanochat", name=args.run, config=user_config)
-    else:
-        wandb_logger = WandBDummy()
+   
+    # Compute setup and helpers
+    device, ddp_master, ddp_world_size = ddp_init()
+    print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
+    synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
+    compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
+    wandb_logger = wandb_init(args.run, user_config, ddp_master)
     
     # Tokenizer
     tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
@@ -160,39 +87,24 @@ def main():
             torch.cuda.manual_seed_all(42)
     
     # Precision
-    if device_type == "cuda":
-        #torch.backends.cuda.matmul.fp32_precision = "tf32" 
+    if device.startswith("cuda"):
         torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
-    ################################ EQUIVALENCE ###############################
-    # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
+    # Determinism
+    # Also need to disable torch.compile for reproducibility
     if args.deterministic:
-        assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
+        assert args.no_fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
 
-        # torch.backends.cuda.enable_flash_sdp(False)
-        # torch.backends.cuda.enable_mem_efficient_sdp(False)
-        # torch.backends.cuda.enable_math_sdp(True)
-    ############################################################################
-
-    if args.dataset == "fineweb":
-        folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
-    elif args.dataset == "climbmix":
-        folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset}")
-    if ddp_master:
-        print(f"Init: Using dataset={args.dataset} from {folderpath}")
-
+    # Mode Setup
     def create_model_meta(depth):
         # Hyperparameters
         vocab_size = tokenizer.n_vocab
         base_dim = depth * args.aspect_ratio
         model_dim = ((base_dim + args.head_dim-1) // args.head_dim) * args.head_dim  # nudge up towards closest multiple of head_dim
         num_heads = model_dim // args.head_dim
-
         # Model
         model_config = GPTConfig(
             block_size=args.max_seq_len,
@@ -209,7 +121,7 @@ def main():
             model_meta = GPTModel(
                 model_config,
                 compute_dtype=compute_dtype,
-                enable_fa3=args.fa3,
+                enable_fa3=not args.no_fa3,
                 fp8_training=args.fp8
             )
         return model_meta
@@ -217,12 +129,10 @@ def main():
     model.to_empty(device=device)
     model.init_weights()
 
-    model_d12_ref = create_model_meta(depth=12)
-
+    # FP8 Print
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
     num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
-    if ddp_master:
-        print(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
+    print0(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
 
     orig_model = model
     if not args.deterministic:
@@ -240,31 +150,28 @@ def main():
     param_counts: dict = model.number_scaling_params()
     scaling_params = param_counts['active_transformer_matrices'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
-    if ddp_master:
-        print(f"Init: Scaling info:")
-        print(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
-        print(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
+    print0(f"Scaling info:")
+    print0(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
+    print0(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
+    model_d12_ref = create_model_meta(depth=12)
     d12_params_dict = model_d12_ref.number_scaling_params()
     ref_d12_scaling_params = d12_params_dict['active_transformer_matrices'] + d12_params_dict['lm_head']
-    if ddp_master:
-        print(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")
+    print0(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
     ref_d12_batch_size_B_REF = 2**19    # 2**19=524288, measured empirically in nanochat for d12
 
     # (2) Batch size calculation
     if args.total_batch_size > 0:
         total_batch_size = args.total_batch_size
-        if ddp_master:
-            print(f"Init: Using user-provided total_batch_size={total_batch_size} without scaling.")
+        print0(f"Using user-provided total_batch_size={total_batch_size} without scaling.")
     else:
         # Power Lines paper (Bopt=D^0.383), https://arxiv.org/abs/2505.13738
         target_token_ratio = target_tokens / ref_d12_target_tokens_D_REF
         proposed_batch_size = ref_d12_batch_size_B_REF * target_token_ratio**0.383
         total_batch_size = 2 ** round(math.log2(proposed_batch_size))
-        if ddp_master:
-            print(f"Init: Calculated total_batch_size={total_batch_size} based on Power Lines scaling with "
-                  f"target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
+        print0(f"Calculated total_batch_size={total_batch_size} based on Power Lines scaling with "
+               f"target_token_ratio={target_token_ratio:.2f}. Proposed batch size before rounding: {proposed_batch_size:.2f}")
 
     # (3) Learning rate scaling
     # SGD - linear is standard
@@ -276,43 +183,31 @@ def main():
     # (4) Weight decay scaling
     # T_epoch framework, https://arxiv.org/abs/2405.13698
     scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
-    if ddp_master:
-        print(f"Init: Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
+    print0(f"Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
     # Training Hyperparameters
     micro_batch = args.device_batch_size
     assert total_batch_size % (args.max_seq_len*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (args.max_seq_len*micro_batch*ddp_world_size)
-    if ddp_master:
-        print(f"Init: Training hyperparameters:")
-        print(f"  {micro_batch=}")
-        print(f"  {total_batch_size=}")
-        print(f"  {grad_accum=}")
+    print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
-    params_matrix = list(model.transformer.h.parameters())
-    params_embedding = list(model.transformer.wte.parameters())
-    params_val_embds = list(model.value_embeds.parameters())
-    params_lm_head = list(model.lm_head.parameters())
-    params_resid = [model.resid_lambdas]
-    params_x0 = [model.x0_lambdas]
-    smear_backout_params = [model.smear_gate.weight, model.smear_lambda, model.backout_lambda]
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params)
-
-    unembedding_lr = args.unembedding_lr * batch_lr_scale
-    embedding_lr = args.embedding_lr * batch_lr_scale
-    matrix_lr = args.matrix_lr * batch_lr_scale
-    scalar_lr = args.scalar_lr * batch_lr_scale
+    # [0] AdamW for embeddings and scalars, [1] Muon for large matrix params
+    optimizers = model.setup_optimizer(
+        embedding_lr=args.embedding_lr * batch_lr_scale,
+        matrix_lr=args.matrix_lr * batch_lr_scale,
+        unembedding_lr=args.unembedding_lr * batch_lr_scale,
+        scalar_lr=args.scalar_lr * batch_lr_scale,
+        weight_decay=scaled_weight_decay
+    )
 
     # Calc Max Steps
     if args.num_iterations > 0:
         max_steps = args.num_iterations
-        if ddp_master:
-            print(f"Init: Using user-provided num_iterations={max_steps} without scaling.")
+        print0(f"Using user-provided num_iterations={max_steps} without scaling.")
     else:
         max_steps = target_tokens // total_batch_size  # floor the division
-        if ddp_master:
-            print(f"Init: Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
+        print0(f"Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
 
     # WD for Optimizers
     def get_wd(step: int):
@@ -348,222 +243,73 @@ def main():
             muon_momentum = (1.0 - progress) * 0.97 + progress * 0.90
             return muon_momentum
 
-    dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
-    adam_groups = [
-        {
-            'params': params_lm_head,
-            'lr': unembedding_lr * dmodel_lr_scale,
-            'betas': (0.8, 0.96),
-            'weight_decay': 0.01,
-            'is_small': False,
-        },
-        {
-            'params': params_embedding,
-            'lr': embedding_lr * dmodel_lr_scale,
-            'betas': (0.8, 0.995),
-            'weight_decay': 0.001,
-            'is_small': False,
-        },
-        {
-            'params': params_val_embds,
-            'lr': embedding_lr * dmodel_lr_scale * 0.5,
-            'betas': (0.8, 0.995),
-            'weight_decay': 0.01,
-            'is_small': False,
-        },
-        {
-            'params': params_resid,
-            'lr': scalar_lr * 0.01,
-            'betas': (0.8, 0.95),
-            'weight_decay': 0.05,
-            'is_small': True,
-        },
-        {
-            'params': params_x0,
-            'lr': scalar_lr,
-            'betas': (0.96, 0.95),
-            'weight_decay': 0.0,
-            'is_small': True,
-        },
-        {
-            'params': smear_backout_params,
-            'lr': 0.2,
-            'betas': (0.8, 0.95),
-            'weight_decay': 0.0,
-            'is_small': True,
-        }
-    ]
-    adamw_factory = DistAdamW if ddp else AdamW
-    adamw_optimizer = adamw_factory(
-        adam_groups,
-        eps=1e-10,
-        weight_decay=0.0,
-    )
-    muon_groups = []
-    for shape in sorted({p.shape for p in params_matrix}):
-        group_params = [p for p in params_matrix if p.shape == shape]
-        muon_groups.append({'params': group_params})
-
-    muon_factory = DistMuon if ddp else Muon
-    muon_optimizer = muon_factory(
-        muon_groups,
-        lr=matrix_lr,
-        momentum=0.95,
-        ns_steps=5,
-        beta2=0.9,
-        weight_decay=scaled_weight_decay,
-        compute_dtype=compute_dtype
-    )
-    
-    optimizers = [adamw_optimizer, muon_optimizer]
-    for opt in optimizers:
-            for group in opt.param_groups:
-                group["initial_lr"] = group["lr"]
-
-    # Dataset
+    # Train Dataloader
     train_loader = DataLoader(
-        folderpath=folderpath,
+        dataset_or_folderpath=args.dataset,
         split="train",
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
-        rank=ddp_rank,
-        world_size=ddp_world_size,
     )
-    if ddp_master:
-        print(f"Init: Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
+    print0(f"Train dataloader initialized with dataset {args.dataset} shards {train_loader.first_shard} - {train_loader.last_shard}")
 
+    # Eval Dataloader
     assert args.eval_tokens % (micro_batch * args.max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * args.max_seq_len * ddp_world_size)
-    if ddp_master:
-        print(f"Init: Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
+    print0(f"Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
-        folderpath=folderpath,
+        dataset_or_folderpath=args.dataset,
         split="val",
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
-        rank=ddp_rank,
-        world_size=ddp_world_size,
     )
-    if ddp_master:
-        print(f"Init: Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+    print0(f"Eval dataloader initialized with dataset {args.dataset} shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+    
+    # Checkpoint Resume
+    if args.resume:
+        print0("Resuming from latest checkpoint...")
+        checkpoint_path = os.path.join(os.path.dirname(__file__), "../runs/default")
+        loaded_vars = load_checkpoint(checkpoint_path, model, optimizers, train_loader, device)
+        step = loaded_vars["step"]
+        total_time = loaded_vars["total_time"]
+        smooth_dt = loaded_vars["smooth_dt"]
+        smooth_tloss = loaded_vars["smooth_tloss"]
+        print0(f"Resumed checkpoint from step {step}")
+    else:
+        step, total_time, smooth_dt, smooth_tloss = 0, 0.0, 0.0, 0.0
 
-
-    total_ntok = 0
-    total_time = 0.0
-    smooth_dt = 0.0
-    smooth_train_loss = 0
-    for step in range(max_steps+1):
+    # Training Loop
+    start_step = step
+    while True:
 
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
-        if step == 0 or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
-            model.eval()
-            total_nats = torch.tensor(0.0, device=device, dtype=torch.float32)
-            total_bytes = torch.tensor(0, device=device, dtype=torch.int64)
-            eval_loader.reset()
-            with torch.no_grad():
-                for _ in range(eval_steps):
-                    x, y = eval_loader.get_batch_bos()
-                    assert (y >= 0).all()  # masking with -1 not supported
-                    x = x.to(device)
-                    y = y.to(device)
-                    _, loss_arr = model(x, y, reduction='none', return_logits=False)
-                    bytes_arr = token_bytes[y.view(-1)]
-                    loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
-                    total_nats += loss_arr.sum().item()
-                    total_bytes += bytes_arr.sum().item()
-            if ddp:
-                torch.distributed.all_reduce(total_nats, op=torch.distributed.ReduceOp.SUM)
-                torch.distributed.all_reduce(total_bytes, op=torch.distributed.ReduceOp.SUM)
-            total_nats = total_nats.item()
-            total_bytes = total_bytes.item()
-            bpb = float('inf')
-            if total_bytes > 0:
-                bpb = total_nats / (total_bytes * math.log(2))
-            if ddp_master:
-                print(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
-            wandb_logger.log({
-                'step': step,
-                'total_training_time': total_time,
-                'val/bpb': bpb,
-            })
-            model.train()
+        if step == start_step or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
+            bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
+            print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
+            wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
 
         # Core Metric
-        if args.core_metric_every > 0 and step > 0 and (step % args.core_metric_every == 0 or step == max_steps):
-            ts = time.time()
-            model.eval()
-            bundle_path = os.path.expanduser("~/.cache/nanochat/eval_bundle")
-            # Original model because shapes keep changing
-            results = evaluate_core_metric(bundle_path, orig_model, tokenizer, device, args.core_metric_max_per_task)
-            core_metric = results['core_metric']
-            accuracies = {task['label']: task['centered_accuracy'] for task in results['tasks']}
-            if device.startswith('cuda'):
-                torch.cuda.synchronize() # wait for the GPU to finish work
-            dt = (time.time() - ts)
-            if ddp_master:
-                print(f"CORE {step} | core metric {core_metric:.14f} | dt {dt:.2f}s")
-            wandb_logger.log({
-                'step': step,
-                'core_metric': core_metric,
-                'centered_results': accuracies,
-            })
-            model.train()
+        # Use original model because shapes keep changing
+        if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
+            core_metric, core_accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
+            wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
 
         # Generate
-        if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or step == max_steps):
-            model.eval()
-            prompts = [
-                "The capital of France is",
-                "The chemical symbol of gold is",
-                "If yesterday was Friday, then tomorrow will be",
-                "The opposite of hot is",
-                "The planets of the solar system are:",
-                "My favorite color is",
-                "If 5*x + 3 = 13, then x is",
-            ]
-
-            sample_rng = torch.Generator(device=device)
-            sample_rng.manual_seed(42)
-
-            bos = tokenizer.encode_single_token('<|bos|>')
-            for prompt in prompts:
-
-                tokens =  [bos] + tokenizer.encode(prompt)
-                idx = torch.tensor(tokens, dtype=torch.long, device=device)
-                idx = idx.unsqueeze(0)  # B,T
-                idx = generate(
-                    orig_model,
-                    idx,
-                    max_new_tokens=16,
-                    temperature=0.0,
-                    top_k=None,
-                    sample_rng=sample_rng
-                )  # B,T
-                gen_text = tokenizer.decode(idx[0].tolist())
-                print(gen_text)
-            model.train()
+        if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
+            print0("Generating test samples...")
+            generated_samples = generate_test_samples(orig_model, tokenizer, device)
+            print0("\n".join(generated_samples))
 
         # Save Model
-        if ddp_master and args.save_every > 0 and step > 0 and (step % args.save_every == 0 or step == max_steps):
-            print("Saving model...")
-            models_path = os.path.dirname(__file__)+"/../models/"
-            os.makedirs(models_path, exist_ok=True)
-            model_data = model.state_dict()
-            torch.save(model_data, models_path+f"model_{step:06d}.pt")
-            # Calculate MD5 sum of saved file by running os command
-            md5sum = os.popen(f"md5sum {models_path}model_{step:06d}.pt").read().split()[0]
-            print(f"Saved model_{step:06d}.pt with MD5 sum: {md5sum}")
-            
-            metadata = {
-                'step': step,
-                'model_config': model.config.to_dict(),
-                'user_config': user_config,
-            }
-            with open(models_path+f"meta_{step:06d}.json", "w") as f:
-                json.dump(metadata, f)
+        if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
+            print0("Saving model...")
+            path = os.path.join(os.path.dirname(__file__), "../runs/default")
+            loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
+            checkpoint_md5sum = save_checkpoint(path, model, optimizers, train_loader, loop_vars, user_config)
+            print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
 
         # Exit Condition
         if step == max_steps:
@@ -571,8 +317,7 @@ def main():
 
         # Training
         model.train()
-        if device.startswith('cuda'):
-            torch.cuda.synchronize()
+        synchronize()
         torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
@@ -587,7 +332,7 @@ def main():
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
-        if ddp:
+        if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # LR Scheduler
@@ -597,7 +342,7 @@ def main():
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_wd(step)
-        for group in muon_optimizer.param_groups:
+        for group in optimizers[1].param_groups:  # [0] is AdamW, [1] is Muon
             group['momentum'] = muon_momentum
             group['weight_decay'] = muon_weight_decay
 
@@ -610,8 +355,7 @@ def main():
             opt.step()
 
         # Sync & Time
-        if device.startswith('cuda'):
-            torch.cuda.synchronize()  # wait for the GPU to finish work
+        synchronize()
         max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
         dt = (time.time() - ts)
         smooth_dt = 0.9 * smooth_dt + 0.1 * dt
@@ -619,42 +363,34 @@ def main():
         total_time += dt
 
         # Logs
-        ntok = (micro_batch * args.max_seq_len * grad_accum * ddp_world_size)
-        total_ntok += ntok
-        tps = int(ntok / dt)
-        pct = (step) / max_steps * 100
-        smooth_train_loss = 0.9 * smooth_train_loss + (1 - 0.9) * train_loss.item()
-        debiased_smooth_train_loss = smooth_train_loss / (1 - 0.9**(step+1))
+        tps = int(total_batch_size / dt)
+        pct = step / max_steps * 100
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * train_loss.item()
+        debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
         eta_seconds = debiased_smooth_dt * remaining_steps
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
-        if ddp_master:
-            print(f"Step {step}/{max_steps} ({pct:.2f}%) | "
-                  f"loss {debiased_smooth_train_loss:.16f} {loss_accum.item():.4f} | "
-                  f"lrm {lrm} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
-                  f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
-                  f"time {total_time_str} | eta {eta_str}")
+        print0(f"Step {step}/{max_steps} ({pct:.2f}%) | "
+                f"loss {debiased_smooth_tloss:.16f} {loss_accum.item():.4f} | "
+                f"lrm {lrm:.3f} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
+                f"time {total_time_str} | eta {eta_str}")
         if step % args.log_every == 0:
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
-                'train/loss': debiased_smooth_train_loss,
+                'train/loss': debiased_smooth_tloss,
                 'train/lrm': lrm,
                 'train/dt': dt,
                 'train/tok_per_sec': tps,
             })
+        
+        # Advance Step
+        step += 1
 
-    if torch.cuda.is_available():
-        for r in range(ddp_world_size):
-            if r == ddp_rank:
-                print(f"Mem rank {ddp_rank}: {torch.cuda.memory_allocated() / (1024**2):.1f}MiB, "
-                    f"Res: {torch.cuda.memory_reserved() / (1024**2):.1f}MiB, "
-                    f"Max: {torch.cuda.max_memory_allocated() / (1024**2):.1f}MiB")
-            if ddp:
-                torch.distributed.barrier()
     wandb_logger.finish()
-    if ddp:
+    if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
 

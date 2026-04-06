@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from mynanochat.fp8 import LinearFP8
 from mynanochat.moe import MoE
 from mynanochat.flash_attention import sdpa_attn_func, fa3_attn_func
+from mynanochat.adamw import AdamW, DistAdamW
+from mynanochat.muon import Muon, DistMuon
 
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_n_experts, moe_top_k):
@@ -275,6 +277,61 @@ class GPTModel(nn.Module):
         self.transformer.wte.to(dtype=self.compute_dtype)
         for ve in self.value_embeds.values():
             ve.to(dtype=self.compute_dtype)
+
+
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay):
+        """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
+        ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
+
+        # Separate parameters into groups for different optimizers and learning rates
+        params_matrix = list(self.transformer.h.parameters())
+        params_embedding = list(self.transformer.wte.parameters())
+        params_val_embds = list(self.value_embeds.parameters())
+        params_lm_head = list(self.lm_head.parameters())
+        params_resid = [self.resid_lambdas]
+        params_x0 = [self.x0_lambdas]
+        smear_backout_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
+        assert len(list(self.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params)
+
+        # Apply learning rate scaling based on parameter counts, similar to Chinchilla scaling
+        dmodel_lr_scale = (self.config.n_embd / 768) ** -0.5
+
+        # AdamW for dense params
+        adam_groups = [
+            dict(params=params_lm_head, lr=unembedding_lr * dmodel_lr_scale, betas=(0.8, 0.96), weight_decay=0.01, is_small=False),
+            dict(params=params_embedding, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), weight_decay=0.001, is_small=False),
+            dict(params=params_val_embds, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), weight_decay=0.01, is_small=False),
+            dict(params=params_resid, lr=scalar_lr * 0.01, betas=(0.8, 0.95), weight_decay=0.05, is_small=True),
+            dict(params=params_x0, lr=scalar_lr, betas=(0.96, 0.95), weight_decay=0.0, is_small=True),
+            dict(params=smear_backout_params, lr=0.2, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
+        ]
+        adamw_factory = DistAdamW if ddp else AdamW
+        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0)
+
+        # Muon for large matrix params
+        muon_groups = []
+        for shape in sorted({p.shape for p in params_matrix}):
+            group_params = [p for p in params_matrix if p.shape == shape]
+            muon_groups.append({'params': group_params})
+        muon_factory = DistMuon if ddp else Muon
+        muon_optimizer = muon_factory(
+            muon_groups,
+            lr=matrix_lr,
+            momentum=0.95,
+            ns_steps=5,
+            beta2=0.9,
+            weight_decay=weight_decay,
+            compute_dtype=self.compute_dtype
+        )
+        
+        # Set initial_lr in param groups for proper LR scaling
+        optimizers = [adamw_optimizer, muon_optimizer]
+        for opt in optimizers:
+                for group in opt.param_groups:
+                    group["initial_lr"] = group["lr"]
+        
+        # [0] is AdamW, [1] is Muon
+        return optimizers
 
 
     def number_scaling_params(self):

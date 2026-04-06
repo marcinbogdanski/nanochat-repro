@@ -29,7 +29,7 @@ def fused_muon_step(
     # Nesterov look-ahead: vv = B*v + (1-B)*g
     grad = grad.lerp(v, momentum)
 
-    ###################################
+    # --------------------------------
     # Polar express orthogonalization
     # https://arxiv.org/pdf/2505.16932
     X = grad.to(compute_dtype)
@@ -49,7 +49,7 @@ def fused_muon_step(
             X = a * X + B @ X
     grad = X
 
-    ################################################
+    # ---------------------------------------------
     # Similar to NorMuon per row variance reduction
     # https://arxiv.org/pdf/2510.05491
     reduction_dim = -2 if momentum_buffer2.size(-2) == 1 else -1
@@ -70,7 +70,7 @@ def fused_muon_step(
     final_scale = step_size_column * (norm_current / norm_new.clamp_min(1e-10))
     update = grad.mul(final_scale.to(grad.dtype))
 
-    ##################################
+    # -------------------------------
     # Decoupled Cautious Weight Decay
     lr = lr.to(update.dtype)
     wd = wd.to(update.dtype)

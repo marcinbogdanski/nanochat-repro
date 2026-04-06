@@ -1,12 +1,17 @@
 import os
-import json
 import torch
 import pyarrow.parquet as pq
 
 class DataLoader:
-    def __init__(self, folderpath, split, batch_size, block_size, tokenizer, rank, world_size):
-        self.batch_size = batch_size
-        self.block_size = block_size
+    def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer):
+
+        # Dataset path logic
+        if dataset_or_folderpath == "fineweb":
+            folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
+        elif dataset_or_folderpath == "climbmix":
+            folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
+        else:
+            folderpath = dataset_or_folderpath
 
         # Dataset
         assert os.path.isdir(folderpath)
@@ -29,6 +34,10 @@ class DataLoader:
         else:
             raise ValueError("Param 'split' must be one of: 'train', 'val'")
 
+        # Hyperparameters
+        self.batch_size = batch_size
+        self.block_size = block_size
+
         # Tokenizer
         self.tokenizer = tokenizer
         self.bos_token = self.tokenizer.encode_single_token('<|bos|>')
@@ -37,8 +46,8 @@ class DataLoader:
 
         # Distributed
         self.group_size = 1024  # same as nanochat
-        self.rank = rank
-        self.world_size = world_size
+        self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        self.world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
         # Create Cursor
         self.shard_idx = self.first_shard
@@ -55,6 +64,24 @@ class DataLoader:
         self.idx_in_group = 0
         self.token_buffer = []
         self.document_buffer = []
+    
+    def state_dict(self):
+        return {
+            "shard_idx": self.shard_idx,
+            "group_idx": self.group_idx,
+            "idx_in_group": self.idx_in_group,
+            "token_buffer": self.token_buffer,
+            "document_buffer": self.document_buffer,
+        }
+
+    def load_state_dict(self, state):
+        self.shard_idx = state["shard_idx"]
+        self.group_idx = state["group_idx"]
+        self.idx_in_group = state["idx_in_group"]
+        self.token_buffer = state["token_buffer"]
+        self.document_buffer = state["document_buffer"]
+        self.loaded_shard_idx = None
+        self.loaded_shard_row_groups = None
 
     def _get_example_text(self):
         # Lead the requested shard
