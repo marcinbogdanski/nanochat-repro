@@ -3,9 +3,15 @@ import torch
 import pyarrow.parquet as pq
 
 class DataLoader:
-    def __init__(self, folderpath, split, batch_size, block_size, tokenizer, rank, world_size):
-        self.batch_size = batch_size
-        self.block_size = block_size
+    def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer):
+
+        # Dataset path logic
+        if dataset_or_folderpath == "fineweb":
+            folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
+        elif dataset_or_folderpath == "climbmix":
+            folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
+        else:
+            folderpath = dataset_or_folderpath
 
         # Dataset
         assert os.path.isdir(folderpath)
@@ -28,6 +34,10 @@ class DataLoader:
         else:
             raise ValueError("Param 'split' must be one of: 'train', 'val'")
 
+        # Hyperparameters
+        self.batch_size = batch_size
+        self.block_size = block_size
+
         # Tokenizer
         self.tokenizer = tokenizer
         self.bos_token = self.tokenizer.encode_single_token('<|bos|>')
@@ -36,8 +46,8 @@ class DataLoader:
 
         # Distributed
         self.group_size = 1024  # same as nanochat
-        self.rank = rank
-        self.world_size = world_size
+        self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        self.world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
         # Create Cursor
         self.shard_idx = self.first_shard

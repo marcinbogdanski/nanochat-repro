@@ -17,14 +17,7 @@ from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
 from mynanochat.checkpoint import save_checkpoint, load_checkpoint
 from mynanochat.fp8 import LinearFP8
-
-class WandBDummy:
-    def __init__(self):
-        pass
-    def log(self, *args, **kwargs):
-        pass
-    def finish(self):
-        pass
+from mynanochat.common import ddp_init, wandb_init
 
 def main():
 
@@ -70,43 +63,13 @@ def main():
     parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
     args = parser.parse_args()
     user_config = vars(args).copy()
-
-    compute_dtype = {
-        'fp32': torch.float32,
-        'bf16': torch.bfloat16,
-    }[args.compute_dtype]
-
-    # DDP Init
-    ddp = int(os.environ.get('RANK', -1)) != -1  # is this ddp run?
-    if ddp:
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        ddp_master = ddp_rank == 0  # is this a master?
-        device = f'cuda:{ddp_local_rank}'
-        device_type = 'cuda'
-        assert torch.cuda.is_available()
-        torch.cuda.set_device(device)
-        torch.distributed.init_process_group(backend='nccl', device_id=ddp_local_rank)  # device_id= to suppress barrier warning
-    else:
-        ddp_rank = 0
-        ddp_local_rank = 0
-        ddp_world_size = 1
-        ddp_master = True
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        device_type = device
-
-    # Helpers
+   
+    # Compute setup and helpers
+    device, ddp_master, ddp_world_size = ddp_init()
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
-    synchronize = lambda: torch.cuda.synchronize() if device_type == "cuda" else None
-
-    print0(f"Init: {ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
-
-    # WandB Init
-    if args.run is not None and ddp_master:
-        wandb_logger = wandb.init(project="nanochat", name=args.run, config=user_config)
-    else:
-        wandb_logger = WandBDummy()
+    synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
+    compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
+    wandb_logger = wandb_init(args.run, user_config, ddp_master)
     
     # Tokenizer
     tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
@@ -124,38 +87,24 @@ def main():
             torch.cuda.manual_seed_all(42)
     
     # Precision
-    if device_type == "cuda":
-        #torch.backends.cuda.matmul.fp32_precision = "tf32" 
+    if device.startswith("cuda"):
         torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
-    ################################ EQUIVALENCE ###############################
-    # Disable TORCH.COMPILE for reproducibility non-DDP/DDP
+    # Determinism
+    # Also need to disable torch.compile for reproducibility
     if args.deterministic:
         assert not args.fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
 
-        # torch.backends.cuda.enable_flash_sdp(False)
-        # torch.backends.cuda.enable_mem_efficient_sdp(False)
-        # torch.backends.cuda.enable_math_sdp(True)
-    ############################################################################
-
-    if args.dataset == "fineweb":
-        folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
-    elif args.dataset == "climbmix":
-        folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset}")
-    print0(f"Using dataset={args.dataset} from {folderpath}")
-
+    # Mode Setup
     def create_model_meta(depth):
         # Hyperparameters
         vocab_size = tokenizer.n_vocab
         base_dim = depth * args.aspect_ratio
         model_dim = ((base_dim + args.head_dim-1) // args.head_dim) * args.head_dim  # nudge up towards closest multiple of head_dim
         num_heads = model_dim // args.head_dim
-
         # Model
         model_config = GPTConfig(
             block_size=args.max_seq_len,
@@ -180,8 +129,7 @@ def main():
     model.to_empty(device=device)
     model.init_weights()
 
-    model_d12_ref = create_model_meta(depth=12)
-
+    # FP8 Print
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
     num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
     print0(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
@@ -206,6 +154,7 @@ def main():
     print0(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
     print0(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
+    model_d12_ref = create_model_meta(depth=12)
     d12_params_dict = model_d12_ref.number_scaling_params()
     ref_d12_scaling_params = d12_params_dict['active_transformer_matrices'] + d12_params_dict['lm_head']
     print0(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")
@@ -294,33 +243,28 @@ def main():
             muon_momentum = (1.0 - progress) * 0.97 + progress * 0.90
             return muon_momentum
 
-
     # Train Dataloader
     train_loader = DataLoader(
-        folderpath=folderpath,
+        dataset_or_folderpath=args.dataset,
         split="train",
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
-        rank=ddp_rank,
-        world_size=ddp_world_size,
     )
-    print0(f"Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
+    print0(f"Train dataloader initialized with dataset {args.dataset} shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     # Eval Dataloader
     assert args.eval_tokens % (micro_batch * args.max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * args.max_seq_len * ddp_world_size)
     print0(f"Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
-        folderpath=folderpath,
+        dataset_or_folderpath=args.dataset,
         split="val",
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
-        rank=ddp_rank,
-        world_size=ddp_world_size,
     )
-    print0(f"Eval dataloader initialized with shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+    print0(f"Eval dataloader initialized with dataset {args.dataset} shards {eval_loader.first_shard} - {eval_loader.last_shard}")
     
     # Checkpoint Resume
     if args.resume:
@@ -388,7 +332,7 @@ def main():
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
-        if ddp:
+        if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # LR Scheduler
@@ -445,16 +389,8 @@ def main():
         # Advance Step
         step += 1
 
-    if torch.cuda.is_available():
-        for r in range(ddp_world_size):
-            if r == ddp_rank:
-                print(f"Mem rank {ddp_rank}: {torch.cuda.memory_allocated() / (1024**2):.1f}MiB, "
-                    f"Res: {torch.cuda.memory_reserved() / (1024**2):.1f}MiB, "
-                    f"Max: {torch.cuda.max_memory_allocated() / (1024**2):.1f}MiB")
-            if ddp:
-                torch.distributed.barrier()
     wandb_logger.finish()
-    if ddp:
+    if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
 
