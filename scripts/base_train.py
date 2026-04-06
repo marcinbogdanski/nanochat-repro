@@ -12,8 +12,6 @@ import wandb
 import torch.nn.functional as F
 from mynanochat.gpt import GPTConfig, GPTModel
 from mynanochat.dataloader import DataLoader
-from mynanochat.adamw import AdamW, DistAdamW
-from mynanochat.muon import Muon, DistMuon
 from mynanochat.core_eval import evaluate_core_metric
 from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
@@ -245,19 +243,14 @@ def main():
     print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
-    params_matrix = list(model.transformer.h.parameters())
-    params_embedding = list(model.transformer.wte.parameters())
-    params_val_embds = list(model.value_embeds.parameters())
-    params_lm_head = list(model.lm_head.parameters())
-    params_resid = [model.resid_lambdas]
-    params_x0 = [model.x0_lambdas]
-    smear_backout_params = [model.smear_gate.weight, model.smear_lambda, model.backout_lambda]
-    assert len(list(model.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params)
-
-    unembedding_lr = args.unembedding_lr * batch_lr_scale
-    embedding_lr = args.embedding_lr * batch_lr_scale
-    matrix_lr = args.matrix_lr * batch_lr_scale
-    scalar_lr = args.scalar_lr * batch_lr_scale
+    # [0] AdamW for embeddings and scalars, [1] Muon for large matrix params
+    optimizers = model.setup_optimizer(
+        embedding_lr=args.embedding_lr * batch_lr_scale,
+        matrix_lr=args.matrix_lr * batch_lr_scale,
+        unembedding_lr=args.unembedding_lr * batch_lr_scale,
+        scalar_lr=args.scalar_lr * batch_lr_scale,
+        weight_decay=scaled_weight_decay
+    )
 
     # Calc Max Steps
     if args.num_iterations > 0:
@@ -301,79 +294,8 @@ def main():
             muon_momentum = (1.0 - progress) * 0.97 + progress * 0.90
             return muon_momentum
 
-    dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
-    adam_groups = [
-        {
-            'params': params_lm_head,
-            'lr': unembedding_lr * dmodel_lr_scale,
-            'betas': (0.8, 0.96),
-            'weight_decay': 0.01,
-            'is_small': False,
-        },
-        {
-            'params': params_embedding,
-            'lr': embedding_lr * dmodel_lr_scale,
-            'betas': (0.8, 0.995),
-            'weight_decay': 0.001,
-            'is_small': False,
-        },
-        {
-            'params': params_val_embds,
-            'lr': embedding_lr * dmodel_lr_scale * 0.5,
-            'betas': (0.8, 0.995),
-            'weight_decay': 0.01,
-            'is_small': False,
-        },
-        {
-            'params': params_resid,
-            'lr': scalar_lr * 0.01,
-            'betas': (0.8, 0.95),
-            'weight_decay': 0.05,
-            'is_small': True,
-        },
-        {
-            'params': params_x0,
-            'lr': scalar_lr,
-            'betas': (0.96, 0.95),
-            'weight_decay': 0.0,
-            'is_small': True,
-        },
-        {
-            'params': smear_backout_params,
-            'lr': 0.2,
-            'betas': (0.8, 0.95),
-            'weight_decay': 0.0,
-            'is_small': True,
-        }
-    ]
-    adamw_factory = DistAdamW if ddp else AdamW
-    adamw_optimizer = adamw_factory(
-        adam_groups,
-        eps=1e-10,
-        weight_decay=0.0,
-    )
-    muon_groups = []
-    for shape in sorted({p.shape for p in params_matrix}):
-        group_params = [p for p in params_matrix if p.shape == shape]
-        muon_groups.append({'params': group_params})
 
-    muon_factory = DistMuon if ddp else Muon
-    muon_optimizer = muon_factory(
-        muon_groups,
-        lr=matrix_lr,
-        momentum=0.95,
-        ns_steps=5,
-        beta2=0.9,
-        weight_decay=scaled_weight_decay,
-        compute_dtype=compute_dtype
-    )
-    
-    optimizers = [adamw_optimizer, muon_optimizer]
-    for opt in optimizers:
-            for group in opt.param_groups:
-                group["initial_lr"] = group["lr"]
-
-    # Dataset
+    # Train Dataloader
     train_loader = DataLoader(
         folderpath=folderpath,
         split="train",
@@ -385,6 +307,7 @@ def main():
     )
     print0(f"Train dataloader initialized with shards {train_loader.first_shard} - {train_loader.last_shard}")
 
+    # Eval Dataloader
     assert args.eval_tokens % (micro_batch * args.max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * args.max_seq_len * ddp_world_size)
     print0(f"Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
@@ -475,7 +398,7 @@ def main():
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_wd(step)
-        for group in muon_optimizer.param_groups:
+        for group in optimizers[1].param_groups:  # [0] is AdamW, [1] is Muon
             group['momentum'] = muon_momentum
             group['weight_decay'] = muon_weight_decay
 
