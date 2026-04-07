@@ -72,21 +72,19 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run, user_config, ddp_master)
-    run_path = os.path.join(os.path.dirname(__file__), "../runs/default")
+    run_path = os.path.join(os.path.dirname(__file__), f"../runs", args.run if args.run is not None else "default")
     file_logger = FileLogger(run_path, user_config)  # dummy on non-master processes
 
     # Warnings
     warnings = []
     if args.no_fa3:
-        warnings.append("FA3 disabled, which may reduce training speed and cause non-determinism. Only set this flag if you need reproducibility or are debugging.")
+        warnings.append("FA3 disabled, which may reduce training speed. Only set this flag if you need reproducibility.")
     if args.fp8 and args.compute_dtype == 'fp32':
-        warnings.append("Using FP8 training with FP32 compute. This is a valid configuration but may lead to worse performance compared to using BF16 or FP16 compute.")
+        warnings.append("Using FP8 training with FP32 compute. This is a valid but may lead to worse performance.")
     if args.log_metrics:
-        warnings.append("Detailed tensor metrics logging is enabled, which will slow down training. Only enable this if you need to debug or analyze training dynamics.")
+        warnings.append("Detailed tensor metrics logging is enabled, which may slow down training.")
     if args.deterministic:
-        warnings.append("Deterministic mode enabled. This will disable certain optimizations and may reduce training speed. Only enable this if you need reproducibility.")
-    if args.log_metrics or args.deterministic:
-        warnings.append("Torch compile is disabled due to log_metrics or deterministic flags, which may reduce training speed. Only disable compilation if you need reproducibility or detailed metrics.")
+        warnings.append("Deterministic mode enabled. This will disable torch.compile and some optimizations and *will* reduce training speed.")
     if warnings:
         print0("!" * 120)
         print0("\n".join(warnings))
@@ -157,7 +155,7 @@ def main():
     print0(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
 
     orig_model = model
-    if not args.deterministic and not args.log_metrics:
+    if not args.deterministic:
         model = torch.compile(model)
 
     # (1) Scaling laws / transfer recipe
@@ -292,8 +290,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        checkpoint_path = os.path.join(os.path.dirname(__file__), "../runs/default")
-        loaded_vars = load_checkpoint(checkpoint_path, model, optimizers, train_loader, device)
+        loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]
         smooth_dt = loaded_vars["smooth_dt"]
@@ -332,9 +329,8 @@ def main():
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
-            path = os.path.join(os.path.dirname(__file__), "../runs/default")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(path, model, optimizers, train_loader, loop_vars, user_config)
+            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', {'step': step, 'checkpoint_md5sum': checkpoint_md5sum})
 
