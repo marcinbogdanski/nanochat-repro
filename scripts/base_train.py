@@ -412,7 +412,7 @@ def main():
                 'train/tok_per_sec': tps,
             })
         if step % args.log_every == 0:
-            gpt_metrics_dict = orig_model.collect_metrics()
+            gpt_metrics_dict = orig_model.collect_metrics()  # requires grads to still be attached
             log_dict = {
                 'step': step,
                 'train/train_loss': train_loss.item(),

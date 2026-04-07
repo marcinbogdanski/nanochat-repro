@@ -408,6 +408,12 @@ class GPTModel(nn.Module):
             if block.enable_metrics and block.metric_x_post_sq_sum is not None:
                 metrics[f'gpt/block_{i}_x_post_sq_sum'] = block.metric_x_post_sq_sum
                 metrics[f'gpt/block_{i}_x_post_num_el'] = block.metric_x_post_num_el
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                grad_sq_sum = param.grad.detach().float().square().sum().item()
+                num_el = param.numel()
+                metrics[f'gpt/{name}_grad_sq_sum'] = grad_sq_sum
+                metrics[f'gpt/{name}_num_el'] = num_el
         return metrics
 
     def clear_metrics(self):
