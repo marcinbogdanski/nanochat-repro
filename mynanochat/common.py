@@ -48,17 +48,14 @@ def wandb_init(run_name, user_config, ddp_master):
 
 
 class FileLogger:
-    def __init__(self, log_filepath, user_config, ddp_master):
-        self.log_filepath = log_filepath
-        self.ddp_master = ddp_master
-        if self.ddp_master:
-            os.makedirs(os.path.dirname(log_filepath), exist_ok=True)
-            self.log('config', user_config, mode='w')  # overwrite existing log
+    def __init__(self, run_path, user_config):
+        self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        self.log_filepath = os.path.join(run_path, f"train_log_rank{self.rank}.jsonl")
+        os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
+        self.log('config', user_config, mode='w')  # overwrite existing log
 
     def log(self, event, data, mode='a'):
         datetime_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
-        if self.ddp_master:
-            with open(self.log_filepath, mode) as f:
-                json.dump({'event': event, 'timestamp': datetime_iso, **data}, f)
-                f.write('\n')
-
+        with open(self.log_filepath, mode) as f:
+            json.dump({'event': event, 'timestamp': datetime_iso, **data}, f)
+            f.write('\n')

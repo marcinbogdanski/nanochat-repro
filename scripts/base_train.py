@@ -60,8 +60,9 @@ def main():
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
+    parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
-    parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
+
     args = parser.parse_args()
     user_config = vars(args).copy()
    
@@ -71,9 +72,26 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run, user_config, ddp_master)
-    log_filepath=os.path.join(os.path.dirname(__file__), "../runs/default", "latest_train_log.jsonl")
-    file_logger = FileLogger(log_filepath, user_config, ddp_master)  # dummy on non-master processes
-    
+    run_path = os.path.join(os.path.dirname(__file__), "../runs/default")
+    file_logger = FileLogger(run_path, user_config)  # dummy on non-master processes
+
+    # Warnings
+    warnings = []
+    if args.no_fa3:
+        warnings.append("FA3 disabled, which may reduce training speed and cause non-determinism. Only set this flag if you need reproducibility or are debugging.")
+    if args.fp8 and args.compute_dtype == 'fp32':
+        warnings.append("Using FP8 training with FP32 compute. This is a valid configuration but may lead to worse performance compared to using BF16 or FP16 compute.")
+    if args.log_metrics:
+        warnings.append("Detailed tensor metrics logging is enabled, which will slow down training. Only enable this if you need to debug or analyze training dynamics.")
+    if args.deterministic:
+        warnings.append("Deterministic mode enabled. This will disable certain optimizations and may reduce training speed. Only enable this if you need reproducibility.")
+    if args.log_metrics or args.deterministic:
+        warnings.append("Torch compile is disabled due to log_metrics or deterministic flags, which may reduce training speed. Only disable compilation if you need reproducibility or detailed metrics.")
+    if warnings:
+        print0("!" * 120)
+        print0("\n".join(warnings))
+        print0("!" * 120)
+
     # Tokenizer
     tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
     tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
@@ -125,7 +143,8 @@ def main():
                 model_config,
                 compute_dtype=compute_dtype,
                 enable_fa3=not args.no_fa3,
-                fp8_training=args.fp8
+                fp8_training=args.fp8,
+                enable_metrics=args.log_metrics,
             )
         return model_meta
     model = create_model_meta(args.depth)
@@ -138,7 +157,7 @@ def main():
     print0(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
 
     orig_model = model
-    if not args.deterministic:
+    if not args.deterministic and not args.log_metrics:
         model = torch.compile(model)
 
     # (1) Scaling laws / transfer recipe
@@ -393,7 +412,8 @@ def main():
                 'train/tok_per_sec': tps,
             })
         if step % args.log_every == 0:
-            file_logger.log('train',{  # ddp aware, only logs on master process
+            gpt_metrics_dict = orig_model.collect_metrics()
+            log_dict = {
                 'step': step,
                 'train/train_loss': train_loss.item(),
                 'train/smooth_train_loss': smooth_tloss,
@@ -406,7 +426,10 @@ def main():
                 'other/max_mem': max_mem,
                 'other/shard_idx': train_loader.shard_idx,
                 'other/total_time': total_time,
-            })
+            }
+            log_dict.update(gpt_metrics_dict)
+            file_logger.log('train', log_dict)
+            orig_model.clear_metrics()  # avoid footguns
         
         # Advance Step
         step += 1

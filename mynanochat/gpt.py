@@ -130,7 +130,7 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, ve_enable, enable_fa3):
+    def __init__(self, config, ve_enable, enable_fa3, enable_metrics=False):
         super().__init__()
         self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
         self.moe_enable = config.moe_enable
@@ -138,6 +138,9 @@ class Block(nn.Module):
             self.mlp = MLP(config)
         else:
             self.moe = MoE(dim=config.n_embd, n_routed_experts=config.moe_n_experts, top_k=config.moe_top_k)
+        self.enable_metrics = enable_metrics
+        self.metric_x_post_sq_sum = None
+        self.metric_x_post_num_el = None
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
@@ -148,11 +151,14 @@ class Block(nn.Module):
             x = x + self.mlp(self._norm(x))
         else:
             x = x + self.moe(self._norm(x))
+        if self.enable_metrics:
+            self.metric_x_post_sq_sum = x.detach().float().square().sum().item()
+            self.metric_x_post_num_el = x.numel()
         return x
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, compute_dtype, enable_fa3, fp8_training):
+    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, enable_metrics=False):
         """Initialize to default device/dtype here, cast to compute_dtype in init_weights.
         
         Type handling:
@@ -173,7 +179,9 @@ class GPTModel(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), enable_fa3) for i in range(config.n_layer)]),
+            h = nn.ModuleList([
+                Block(config, self._has_ve(i, config.n_layer), enable_fa3, enable_metrics) for i in range(config.n_layer)
+            ]),
         ))
         self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
 
@@ -393,6 +401,20 @@ class GPTModel(nn.Module):
         for block in self.transformer.h:
             if block.moe_enable:
                 block.moe.zero_token_counters()
+
+    def collect_metrics(self):
+        metrics = {}
+        for i, block in enumerate(self.transformer.h):
+            if block.enable_metrics and block.metric_x_post_sq_sum is not None:
+                metrics[f'gpt/block_{i}_x_post_sq_sum'] = block.metric_x_post_sq_sum
+                metrics[f'gpt/block_{i}_x_post_num_el'] = block.metric_x_post_num_el
+        return metrics
+
+    def clear_metrics(self):
+        for block in self.transformer.h:
+            if block.enable_metrics:
+                block.metric_x_post_sq_sum = None
+                block.metric_x_post_num_el = None
 
     def _apply_smear(self, x):
         """Mix previous token's embedding into current token (bigram-like)"""
