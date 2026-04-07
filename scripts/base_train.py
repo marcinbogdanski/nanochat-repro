@@ -17,7 +17,7 @@ from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
 from mynanochat.checkpoint import save_checkpoint, load_checkpoint
 from mynanochat.fp8 import LinearFP8
-from mynanochat.common import ddp_init, wandb_init
+from mynanochat.common import ddp_init, wandb_init, FileLogger
 
 def main():
 
@@ -60,6 +60,7 @@ def main():
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
+    parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
     parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -70,6 +71,8 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run, user_config, ddp_master)
+    log_filepath=os.path.join(os.path.dirname(__file__), "../runs/default", "latest_train_log.jsonl")
+    file_logger = FileLogger(log_filepath, user_config, ddp_master)  # dummy on non-master processes
     
     # Tokenizer
     tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
@@ -289,19 +292,22 @@ def main():
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
+            file_logger.log('bpb_eval', {'step': step, 'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
 
         # Core Metric
         # Use original model because shapes keep changing
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
-            core_metric, core_accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
-            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
+            core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
+            file_logger.log('core_metric', {'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
 
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
             generated_samples = generate_test_samples(orig_model, tokenizer, device)
             print0("\n".join(generated_samples))
+            file_logger.log('generate', {'step': step, 'generated_samples': generated_samples})
 
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
@@ -310,6 +316,7 @@ def main():
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
             checkpoint_md5sum = save_checkpoint(path, model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
+            file_logger.log('save_model', {'step': step, 'checkpoint_md5sum': checkpoint_md5sum})
 
         # Exit Condition
         if step == max_steps:
@@ -376,7 +383,7 @@ def main():
                 f"lrm {lrm:.3f} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
                 f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                 f"time {total_time_str} | eta {eta_str}")
-        if step % args.log_every == 0:
+        if step % args.log_wandb_every == 0:
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
@@ -384,6 +391,21 @@ def main():
                 'train/lrm': lrm,
                 'train/dt': dt,
                 'train/tok_per_sec': tps,
+            })
+        if step % args.log_every == 0:
+            file_logger.log('train',{  # ddp aware, only logs on master process
+                'step': step,
+                'train/train_loss': train_loss.item(),
+                'train/smooth_train_loss': smooth_tloss,
+                'train/debiased_smooth_tloss': debiased_smooth_tloss,
+                'train/lrm': lrm,
+                'train/muon_momentum': muon_momentum,
+                'train/muon_weight_decay': muon_weight_decay,
+                'other/dt': dt,
+                'other/tps': tps,
+                'other/max_mem': max_mem,
+                'other/shard_idx': train_loader.shard_idx,
+                'other/total_time': total_time,
             })
         
         # Advance Step
