@@ -286,8 +286,11 @@ class GPTModel(nn.Module):
         for ve in self.value_embeds.values():
             ve.to(dtype=self.compute_dtype)
 
+        # Update name cache
+        self.param_to_name_cache = {param: name for name, param in self.named_parameters()}
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay):
+
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
@@ -314,7 +317,7 @@ class GPTModel(nn.Module):
             dict(params=smear_backout_params, lr=0.2, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
         ]
         adamw_factory = DistAdamW if ddp else AdamW
-        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0)
+        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
         muon_groups = []
@@ -329,7 +332,8 @@ class GPTModel(nn.Module):
             ns_steps=5,
             beta2=0.9,
             weight_decay=weight_decay,
-            compute_dtype=self.compute_dtype
+            compute_dtype=self.compute_dtype,
+            enable_metrics=enable_metrics,
         )
         
         # Set initial_lr in param groups for proper LR scaling
@@ -401,6 +405,9 @@ class GPTModel(nn.Module):
         for block in self.transformer.h:
             if block.moe_enable:
                 block.moe.zero_token_counters()
+
+    def get_param_to_name_dict(self):
+        return self.param_to_name_cache
 
     def collect_metrics(self):
         metrics = {}

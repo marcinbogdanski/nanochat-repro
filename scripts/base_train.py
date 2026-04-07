@@ -220,7 +220,8 @@ def main():
         matrix_lr=args.matrix_lr * batch_lr_scale,
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
         scalar_lr=args.scalar_lr * batch_lr_scale,
-        weight_decay=scaled_weight_decay
+        weight_decay=scaled_weight_decay,
+        enable_metrics=args.log_metrics,
     )
 
     # Calc Max Steps
@@ -412,7 +413,6 @@ def main():
                 'train/tok_per_sec': tps,
             })
         if step % args.log_every == 0:
-            gpt_metrics_dict = orig_model.collect_metrics()  # requires grads to still be attached
             log_dict = {
                 'step': step,
                 'train/train_loss': train_loss.item(),
@@ -427,7 +427,15 @@ def main():
                 'other/shard_idx': train_loader.shard_idx,
                 'other/total_time': total_time,
             }
+            gpt_metrics_dict = orig_model.collect_metrics()  # requires grads to still be attached
             log_dict.update(gpt_metrics_dict)
+            param_to_name = orig_model.get_param_to_name_dict()  # get mapping of param tensors to their names for logging
+            for opt in optimizers:
+                opt_metrics = opt.collect_metrics(param_to_name)
+                for k in opt_metrics:
+                    assert k not in log_dict, f"Metric name collision: {k} already exists in log_dict. Please rename the metric to avoid collisions."
+                log_dict.update(opt_metrics)
+
             file_logger.log('train', log_dict)
             orig_model.clear_metrics()  # avoid footguns
         
