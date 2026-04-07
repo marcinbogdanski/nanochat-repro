@@ -139,8 +139,6 @@ class Block(nn.Module):
         else:
             self.moe = MoE(dim=config.n_embd, n_routed_experts=config.moe_n_experts, top_k=config.moe_top_k)
         self.enable_metrics = enable_metrics
-        self.metric_x_post_sq_sum = None
-        self.metric_x_post_num_el = None
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
@@ -152,9 +150,10 @@ class Block(nn.Module):
         else:
             x = x + self.moe(self._norm(x))
         if self.enable_metrics:
-            self.metric_x_post_sq_sum = x.detach().float().square().sum().item()
-            self.metric_x_post_num_el = x.numel()
-        return x
+            sq_sum_t = x.detach().float().square().sum()  # keep as tensor so we don't break graph
+            num_el = x.numel()
+            return x, sq_sum_t, num_el
+        return x, None, None
 
 
 class GPTModel(nn.Module):
@@ -411,10 +410,6 @@ class GPTModel(nn.Module):
 
     def collect_metrics(self):
         metrics = {}
-        for i, block in enumerate(self.transformer.h):
-            if block.enable_metrics and block.metric_x_post_sq_sum is not None:
-                metrics[f'gpt/block_{i}_x_post_sq_sum'] = block.metric_x_post_sq_sum
-                metrics[f'gpt/block_{i}_x_post_num_el'] = block.metric_x_post_num_el
         for name, param in self.named_parameters():
             if param.grad is not None:
                 grad_sq_sum = param.grad.detach().float().square().sum().item()
@@ -455,12 +450,20 @@ class GPTModel(nn.Module):
         x0 = x
         backout_layer = self.config.n_layer // 2  # backout in middle of network
         x_backout = None
+        metrics_sq_sum = None
+        metrics_num_el = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
-            x = block(x, ve, self.cos, self.sin, self.window_sizes[i])
+            x, sq_sum_t, num_el = block(x, ve, self.cos, self.sin, self.window_sizes[i])
             if i == backout_layer:
                 x_backout = x
+            if block.enable_metrics:
+                if metrics_sq_sum is None:
+                    metrics_sq_sum, metrics_num_el = [], []
+                metrics_sq_sum.append(sq_sum_t)
+                metrics_num_el.append(num_el)
+        metrics = (metrics_sq_sum, metrics_num_el) if metrics_sq_sum is not None else None
 
         # Final backout blending
         if x_backout is not None:
@@ -475,13 +478,13 @@ class GPTModel(nn.Module):
 
         if targets is None:
             assert return_logits, "If targets is None, return_logits must be True."
-            return logits, None
+            return logits, None, metrics
         else:
             B, T, C = logits.shape
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
             loss = F.cross_entropy(logits_, targets_, reduction=reduction)
             if return_logits:
-                return logits, loss
+                return logits, loss, metrics
             else:
-                return None, loss
+                return None, loss, metrics

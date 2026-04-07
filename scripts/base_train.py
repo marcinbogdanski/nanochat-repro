@@ -346,15 +346,23 @@ def main():
         loss_accum = 0.0
         for opt in optimizers:
             opt.zero_grad()
+        fwd_metrics = {'sq_sum': [0.0] * orig_model.config.n_layer, 'num_el': [0.0] * orig_model.config.n_layer}
         for _ in range(grad_accum):
             x, y = train_loader.get_batch_bos()
             x = x.to(device)
             y = y.to(device)
-            _, loss = model(x, y, return_logits=False)
+            _, loss, metrics = model(x, y, return_logits=False)
+            if metrics is not None:
+                sq_sum = metrics[0]   # list len num layers
+                num_el = metrics[1]  # list len num layers
+                for l in range(orig_model.config.n_layer):
+                    fwd_metrics['sq_sum'][l] += sq_sum[l].item()
+                    fwd_metrics['num_el'][l] += num_el[l]
             train_loss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
+
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
@@ -423,6 +431,9 @@ def main():
                 'other/shard_idx': train_loader.shard_idx,
                 'other/total_time': total_time,
             }
+            for block_n in range(len(fwd_metrics['sq_sum'])):
+                log_dict[f'gpt/transformer.h.{block_n}.x_fwd_sq_sum'] = fwd_metrics['sq_sum'][block_n]
+                log_dict[f'gpt/transformer.h.{block_n}.x_fwd_num_el'] = fwd_metrics['num_el'][block_n]
             gpt_metrics_dict = orig_model.collect_metrics()  # requires grads to still be attached
             log_dict.update(gpt_metrics_dict)
             param_to_name = orig_model.get_param_to_name_dict()  # get mapping of param tensors to their names for logging

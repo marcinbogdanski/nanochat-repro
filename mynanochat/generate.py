@@ -32,7 +32,7 @@ def generate(model, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng
     with torch.no_grad():
         for _ in range(max_new_tokens):
             idx_tail = idx[:, -block_size:]      # B,T  sliding window
-            logits, _ = model(idx_tail)      # B,T,C <- B,T
+            logits, _, _ = model(idx_tail)      # B,T,C <- B,T
             logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
             xcol = sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
             idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
