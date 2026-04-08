@@ -120,7 +120,7 @@ class Muon(torch.optim.Optimizer):
         for param, stats in self.debug_stats.items():
             name = param_to_name[param]  # throws if missing
             for stat_name, value in stats.items():
-                collected[f"{name}_{stat_name}"] = value
+                collected[f"gpt/{name}_{stat_name}"] = value
         return collected
 
     @torch.no_grad()
@@ -175,7 +175,8 @@ class Muon(torch.optim.Optimizer):
                     self.debug_stats[param] = {
                         'update_sq_sum': float(update_sum_squares[jj]),  # np.float32 -> float
                         'params_sq_sum': float(params_sum_squares[jj]),
-                        'num_el': param.numel(),
+                        'params_num_el': param.numel(),
+                        'params_is_small': False,  # compatibility with AdamW
                     }
 
             # copy back params
@@ -197,7 +198,7 @@ class DistMuon(torch.optim.Optimizer):
         for param, stats in self.debug_stats.items():
             name = param_to_name[param]  # throws if missing
             for stat_name, value in stats.items():
-                collected[f"{name}_{stat_name}"] = value
+                collected[f"gpt/{name}_{stat_name}"] = value
         return collected
 
     @torch.no_grad()
@@ -300,7 +301,8 @@ class DistMuon(torch.optim.Optimizer):
                         self.debug_stats[param] = {
                             'update_sq_sum': float(update_sum_squares[jj]),
                             'params_sq_sum': float(params_sum_squares[jj]),
-                            'num_el': param.numel(),
+                            'params_num_el': param.numel(),
+                            'params_is_small': False,  # compatibility with AdamW
                         }
 
             # Reuse the stacked_all_grads buffer for params

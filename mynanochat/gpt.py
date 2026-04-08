@@ -415,7 +415,7 @@ class GPTModel(nn.Module):
                 grad_sq_sum = param.grad.detach().float().square().sum().item()
                 num_el = param.numel()
                 metrics[f'gpt/{name}_grad_sq_sum'] = grad_sq_sum
-                metrics[f'gpt/{name}_num_el'] = num_el
+                metrics[f'gpt/{name}_grad_num_el'] = num_el
         return metrics
 
     def clear_metrics(self):

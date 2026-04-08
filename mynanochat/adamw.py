@@ -80,7 +80,7 @@ class AdamW(torch.optim.Optimizer):
         for param, stats in self.debug_stats.items():
             name = param_to_name[param]  # throws if missing
             for stat_name, value in stats.items():
-                collected[f"{name}_{stat_name}"] = value
+                collected[f"gpt/{name}_{stat_name}"] = value
         return collected  
     
     @torch.no_grad()
@@ -129,7 +129,8 @@ class AdamW(torch.optim.Optimizer):
                     self.debug_stats[params] = {
                         'update_sq_sum': update_sum_squares,
                         'params_sq_sum': params_sum_squares,
-                        'num_el': grad.numel(),
+                        'params_num_el': grad.numel(),
+                        'params_is_small': group['is_small'],
                     }
 
 
@@ -148,7 +149,7 @@ class DistAdamW(torch.optim.Optimizer):
         for param, stats in self.debug_stats.items():
             name = param_to_name[param]  # throws if missing
             for stat_name, value in stats.items():
-                collected[f"{name}_{stat_name}"] = value
+                collected[f"gpt/{name}_{stat_name}"] = value
         return collected
 
     @torch.no_grad()
@@ -239,7 +240,8 @@ class DistAdamW(torch.optim.Optimizer):
                     self.debug_stats[params] = {
                         'update_sq_sum': update_sum_squares,
                         'params_sq_sum': params_sum_squares,
-                        'num_el': grad_slice.numel(),
+                        'params_num_el': grad_slice.numel(),
+                        'params_is_small': group['is_small'],
                     }
 
                 # Sync point 2
