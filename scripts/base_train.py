@@ -428,27 +428,10 @@ def main():
             }
             # Metrics - super ugly
             if args.log_metrics:
-                # Fwd metrics - fwd_metrics shape is: n_grad_accum, (sq_sum_t, num_el), n_layers
-                for block_n in range(model.config.n_layer):
-                    log_dict[f'gpt/transformer.h.{block_n}.x_fwd_sq_sum'] = 0.0
-                    log_dict[f'gpt/transformer.h.{block_n}.x_fwd_num_el'] = 0
-                    for ga_idx in range(grad_accum):
-                        if fwd_metrics[ga_idx] is not None:
-                            sq_sum_t_list, num_el_list = fwd_metrics[ga_idx]
-                            log_dict[f'gpt/transformer.h.{block_n}.x_fwd_sq_sum'] += sq_sum_t_list[block_n].item()
-                            log_dict[f'gpt/transformer.h.{block_n}.x_fwd_num_el'] += num_el_list[block_n]
-                # Grad metrics
-                gpt_metrics_dict = orig_model.collect_metrics()  # requires grads to still be attached
-                log_dict.update(gpt_metrics_dict)
-                # Param update metrics
-                param_to_name = orig_model.get_param_to_name_dict()  # get mapping of param tensors to their names for logging
-                for opt in optimizers:
-                    opt_metrics = opt.collect_metrics(param_to_name)
-                    for k in opt_metrics:
-                        assert k not in log_dict, f"Metric name collision: {k} already exists in log_dict. Please rename the metric to avoid collisions."
-                    log_dict.update(opt_metrics)
+                opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
+                metrics_list = orig_model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
+                log_dict['metrics'] = metrics_list
             file_logger.log('train', log_dict)
-            orig_model.clear_metrics()  # avoid footguns
         
         # Advance Step
         step += 1

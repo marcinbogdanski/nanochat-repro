@@ -285,8 +285,67 @@ class GPTModel(nn.Module):
         for ve in self.value_embeds.values():
             ve.to(dtype=self.compute_dtype)
 
-        # Update name cache
-        self.param_to_name_cache = {param: name for name, param in self.named_parameters()}
+
+    def collect_metrics(self, fwd_metrics, opt_metrics):
+        """Collect metrics, flat list of (block, tensor_name, surface='grad', stat='sq_sum'/'num_el', value)
+        
+        We opt to iterate over known params explicitly, trying to iterate self.parameters() is messy. Just go through each param and collect metrics.
+        """
+        metrics = []  # flat list of (block, tensor_name, surface='grad', stat='sq_sum'/'num_el', value)
+
+        # Forward activation metrics
+        # fwd_metrics - fwd_metrics shape is: n_grad_accum, (sq_sum_t, num_el), n_layers
+        for block_n in range(self.config.n_layer):
+            entry_sq_sum = {'block': block_n, 'tensor_name': 'resid_post', 'surface': 'fwd', 'stat': 'sq_sum', 'value': 0.0}
+            entry_num_el = {'block': block_n, 'tensor_name': 'resid_post', 'surface': 'fwd', 'stat': 'num_el', 'value': 0}
+            for ga_idx in range(len(fwd_metrics)):  # over grad accum steps
+                if fwd_metrics[ga_idx] is not None:
+                    sq_sum_t_list, num_el_list = fwd_metrics[ga_idx]
+                    entry_sq_sum['value'] += sq_sum_t_list[block_n].item()
+                    entry_num_el['value'] += num_el_list[block_n]
+            metrics.append(entry_sq_sum)
+            metrics.append(entry_num_el)
+
+        # Gradient, params and update metrics        
+        def extend_metrics(tensor, block, tensor_name):
+            sq_sum = 0.0 if tensor.grad is None else tensor.grad.detach().float().square().sum().item()
+            num_el = 0 if tensor.grad is None else tensor.grad.numel()
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'sq_sum', 'value': sq_sum})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'num_el', 'value': num_el})
+            # opt_metrics has 3x keys: 'update_sq_sum', 'params_sq_sum', 'params_num_el'
+            # currently all params are in some opt group, so no need to check if tensor is in opt_metrics
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['params_sq_sum']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'num_el', 'value': opt_metrics[tensor]['params_num_el']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'update', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['update_sq_sum']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'update', 'stat': 'num_el', 'value': opt_metrics[tensor]['params_num_el']}) # use params_num_el
+
+        extend_metrics(self.transformer.wte.weight, block=None, tensor_name='wte.weight')
+        extend_metrics(self.lm_head.weight, block=None, tensor_name='lm_head.weight')
+        for i, block in enumerate(self.transformer.h):
+            extend_metrics(block.attn.c_q.weight, block=i, tensor_name='attn.c_q.weight')
+            extend_metrics(block.attn.c_k.weight, block=i, tensor_name='attn.c_k.weight')
+            extend_metrics(block.attn.c_v.weight, block=i, tensor_name='attn.c_v.weight')
+            extend_metrics(block.attn.c_proj.weight, block=i, tensor_name='attn.c_proj.weight')
+            if not self.config.moe_enable:
+                extend_metrics(block.mlp.c_fc.weight, block=i, tensor_name='mlp.c_fc.weight')
+                extend_metrics(block.mlp.c_proj.weight, block=i, tensor_name='mlp.c_proj.weight')
+            else:
+                extend_metrics(block.moe.router.gate.weight, block=i, tensor_name='moe.router.gate.weight')
+                extend_metrics(block.moe.experts.w_up, block=i, tensor_name='moe.experts.w_up')
+                extend_metrics(block.moe.experts.w_down, block=i, tensor_name='moe.experts.w_down')
+                extend_metrics(block.moe.shared_expert.w_up.weight, block=i, tensor_name='moe.shared_expert.w_up.weight')
+                extend_metrics(block.moe.shared_expert.w_down.weight, block=i, tensor_name='moe.shared_expert.w_down.weight')
+        extend_metrics(self.resid_lambdas, block=None, tensor_name='resid_lambdas')
+        extend_metrics(self.x0_lambdas, block=None, tensor_name='x0_lambdas')
+        extend_metrics(self.smear_gate.weight, block=None, tensor_name='smear_gate.weight')
+        extend_metrics(self.smear_lambda, block=None, tensor_name='smear_lambda')
+        extend_metrics(self.backout_lambda, block=None, tensor_name='backout_lambda')
+        for i, ve in self.value_embeds.items():
+            extend_metrics(ve.weight, block=int(i), tensor_name='value_embed.weight')
+        for i, block in enumerate(self.transformer.h):
+            if block.attn.ve_gate is not None:
+                extend_metrics(block.attn.ve_gate.weight, block=i, tensor_name='attn.ve_gate.weight')
+        return metrics
 
 
     def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay, enable_metrics=False):
@@ -404,25 +463,6 @@ class GPTModel(nn.Module):
         for block in self.transformer.h:
             if block.moe_enable:
                 block.moe.zero_token_counters()
-
-    def get_param_to_name_dict(self):
-        return self.param_to_name_cache
-
-    def collect_metrics(self):
-        metrics = {}
-        for name, param in self.named_parameters():
-            if param.grad is not None:
-                grad_sq_sum = param.grad.detach().float().square().sum().item()
-                num_el = param.numel()
-                metrics[f'gpt/{name}_grad_sq_sum'] = grad_sq_sum
-                metrics[f'gpt/{name}_grad_num_el'] = num_el
-        return metrics
-
-    def clear_metrics(self):
-        for block in self.transformer.h:
-            if block.enable_metrics:
-                block.metric_x_post_sq_sum = None
-                block.metric_x_post_num_el = None
 
     def _apply_smear(self, x):
         """Mix previous token's embedding into current token (bigram-like)"""

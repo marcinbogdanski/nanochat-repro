@@ -75,13 +75,8 @@ class AdamW(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
     
-    def collect_metrics(self, param_to_name):
-        collected = {}
-        for param, stats in self.debug_stats.items():
-            name = param_to_name[param]  # throws if missing
-            for stat_name, value in stats.items():
-                collected[f"gpt/{name}_{stat_name}"] = value
-        return collected  
+    def get_metrics(self):
+        return self.debug_stats
     
     @torch.no_grad()
     def step(self):
@@ -130,7 +125,6 @@ class AdamW(torch.optim.Optimizer):
                         'update_sq_sum': update_sum_squares,
                         'params_sq_sum': params_sum_squares,
                         'params_num_el': grad.numel(),
-                        'params_is_small': group['is_small'],
                     }
 
 
@@ -144,13 +138,8 @@ class DistAdamW(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
-    def collect_metrics(self, param_to_name):
-        collected = {}
-        for param, stats in self.debug_stats.items():
-            name = param_to_name[param]  # throws if missing
-            for stat_name, value in stats.items():
-                collected[f"gpt/{name}_{stat_name}"] = value
-        return collected
+    def get_metrics(self):
+        return self.debug_stats
 
     @torch.no_grad()
     def step(self):
@@ -237,11 +226,16 @@ class DistAdamW(torch.optim.Optimizer):
                 if self.enable_metrics:
                     update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
                     params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
+                    params_num_el = grad_slice.numel()
+                    if rank != 0 and group['is_small']:
+                        # For small params, rank 0 has the full param and grad, zero other ranks to avoid duplication
+                        update_sum_squares = 0.0
+                        params_sum_squares = 0.0
+                        params_num_el = 0
                     self.debug_stats[params] = {
                         'update_sq_sum': update_sum_squares,
                         'params_sq_sum': params_sum_squares,
-                        'params_num_el': grad_slice.numel(),
-                        'params_is_small': group['is_small'],
+                        'params_num_el': params_num_el,
                     }
 
                 # Sync point 2

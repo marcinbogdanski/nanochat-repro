@@ -115,13 +115,8 @@ class Muon(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
-    def collect_metrics(self, param_to_name):
-        collected = {}
-        for param, stats in self.debug_stats.items():
-            name = param_to_name[param]  # throws if missing
-            for stat_name, value in stats.items():
-                collected[f"gpt/{name}_{stat_name}"] = value
-        return collected
+    def get_metrics(self):
+        return self.debug_stats
 
     @torch.no_grad()
     def step(self):
@@ -176,7 +171,6 @@ class Muon(torch.optim.Optimizer):
                         'update_sq_sum': float(update_sum_squares[jj]),  # np.float32 -> float
                         'params_sq_sum': float(params_sum_squares[jj]),
                         'params_num_el': param.numel(),
-                        'params_is_small': False,  # compatibility with AdamW
                     }
 
             # copy back params
@@ -193,13 +187,8 @@ class DistMuon(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
-    def collect_metrics(self, param_to_name):
-        collected = {}
-        for param, stats in self.debug_stats.items():
-            name = param_to_name[param]  # throws if missing
-            for stat_name, value in stats.items():
-                collected[f"gpt/{name}_{stat_name}"] = value
-        return collected
+    def get_metrics(self):
+        return self.debug_stats
 
     @torch.no_grad()
     def step(self):
@@ -302,8 +291,18 @@ class DistMuon(torch.optim.Optimizer):
                             'update_sq_sum': float(update_sum_squares[jj]),
                             'params_sq_sum': float(params_sum_squares[jj]),
                             'params_num_el': param.numel(),
-                            'params_is_small': False,  # compatibility with AdamW
                         }
+
+            # All metrics are sum-reduced across ranks, so fill with zeros to be explicit
+            if self.enable_metrics:
+                for p in group['params']:
+                    if p not in self.debug_stats:
+                        self.debug_stats[p] = {
+                            'update_sq_sum': 0.0,
+                            'params_sq_sum': 0.0,
+                            'params_num_el': 0,
+                        }
+
 
             # Reuse the stacked_all_grads buffer for params
             stacked_all_grads = temp_buffers[i]['stacked_all_grads']
