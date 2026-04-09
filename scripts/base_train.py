@@ -54,7 +54,7 @@ def main():
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
-    parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation.')
+    parser.add_argument('--eval-tokens', type=int, default=80*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
     parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation.')
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
@@ -309,7 +309,7 @@ def main():
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
-            file_logger.log('bpb_eval', step, {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
+            file_logger.log0('bpb_eval', step, {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
 
         # Core Metric
         # Use original model because shapes keep changing
@@ -317,14 +317,14 @@ def main():
             core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
-            file_logger.log('core_metric', step, {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
+            file_logger.log0('core_metric', step, {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
 
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
             generated_samples = generate_test_samples(orig_model, tokenizer, device)
             print0("\n".join(generated_samples))
-            file_logger.log('generate', step, {'generated_samples': generated_samples})
+            file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
@@ -346,14 +346,14 @@ def main():
         loss_accum = 0.0
         for opt in optimizers:
             opt.zero_grad()
-        fwd_metrics = []  # nested lists: n_grad_accum, (sq_sum_t, num_el), n_layers
+        fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
             x, y = train_loader.get_batch_bos()
             x = x.to(device)
             y = y.to(device)
             _, loss, metrics = model(x, y, return_logits=False)
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
-            train_loss = loss.detach()
+            rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
@@ -391,7 +391,7 @@ def main():
         # Logs
         tps = int(total_batch_size / dt)
         pct = step / max_steps * 100
-        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * train_loss.item()
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * rank_tloss.item()
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
@@ -414,9 +414,10 @@ def main():
         if step % args.log_every == 0:
             log_dict = {
                 'step': step,
-                'train/train_loss': train_loss.item(),
-                'train/smooth_train_loss': smooth_tloss,
-                'train/debiased_smooth_tloss': debiased_smooth_tloss,
+                'train/train_loss': loss_accum.item(),
+                'train/rank_tloss': rank_tloss.item(),
+                'train/smooth_rank_tloss': smooth_tloss,
+                'train/debiased_smooth_rank_tloss': debiased_smooth_tloss,
                 'train/lrm': lrm,
                 'train/muon_momentum': muon_momentum,
                 'train/muon_weight_decay': muon_weight_decay,

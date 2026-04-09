@@ -54,6 +54,10 @@ class FileLogger:
         os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
         self.log('config', step=None, data=user_config, mode='w')  # overwrite existing log
 
+    def log0(self, event, step, data, mode='a'):
+        if self.rank == 0:
+            self.log(event, step, data, mode)
+
     def log(self, event, step, data, mode='a'):
         datetime_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
