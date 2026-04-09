@@ -309,7 +309,7 @@ def main():
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
-            file_logger.log('bpb_eval', {'step': step, 'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
+            file_logger.log('bpb_eval', step, {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
 
         # Core Metric
         # Use original model because shapes keep changing
@@ -317,14 +317,14 @@ def main():
             core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
-            file_logger.log('core_metric', {'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
+            file_logger.log('core_metric', step, {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
 
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
             generated_samples = generate_test_samples(orig_model, tokenizer, device)
             print0("\n".join(generated_samples))
-            file_logger.log('generate', {'step': step, 'generated_samples': generated_samples})
+            file_logger.log('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
@@ -332,7 +332,7 @@ def main():
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
             checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
-            file_logger.log('save_model', {'step': step, 'checkpoint_md5sum': checkpoint_md5sum})
+            file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
         # Exit Condition
         if step == max_steps:
@@ -431,7 +431,7 @@ def main():
                 opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
                 metrics_list = orig_model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
                 log_dict['metrics'] = metrics_list
-            file_logger.log('train', log_dict)
+            file_logger.log('train', step, log_dict)
         
         # Advance Step
         step += 1

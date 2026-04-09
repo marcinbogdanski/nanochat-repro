@@ -52,10 +52,11 @@ class FileLogger:
         self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         self.log_filepath = os.path.join(run_path, f"train_log_rank{self.rank}.jsonl")
         os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
-        self.log('config', user_config, mode='w')  # overwrite existing log
+        self.log('config', step=None, data=user_config, mode='w')  # overwrite existing log
 
-    def log(self, event, data, mode='a'):
+    def log(self, event, step, data, mode='a'):
         datetime_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         with open(self.log_filepath, mode) as f:
-            json.dump({'event': event, 'timestamp': datetime_iso, **data}, f)
+            json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': rank, **data}, f)
             f.write('\n')
