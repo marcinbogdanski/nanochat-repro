@@ -3,7 +3,9 @@ import rustbpe
 import tiktoken
 import pickle
 import torch
+from mynanochat.common import get_base_path
 import pyarrow.parquet as pq
+BASE_DIR = get_base_path()
 
 # from nanochat tokenizer.py
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
@@ -26,13 +28,10 @@ SPECIAL_TOKENS = [
     "<|output_end|>",
 ]
 
-BASE_DATA_PATH = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
-BASE_TOKENIZER_PATH = os.path.expanduser("~/.cache/nanochat/tokenizer")
-
 def doc_generator():
     for shard_idx in range(9999):
         filename = f"shard_{shard_idx:05d}.parquet"
-        filepath = os.path.join(BASE_DATA_PATH, filename)
+        filepath = os.path.join(BASE_DIR, "base_data_climbmix", filename)
         pf = pq.ParquetFile(filepath)
         for rg_index in range(pf.num_row_groups):
             rg = pf.read_row_group(rg_index)
@@ -85,9 +84,10 @@ def main():
         mergeable_ranks=mergeable_ranks, # dict[bytes, int] (token bytes -> merge priority rank)
         special_tokens=special_tokens, # dict[str, int] (special token name -> token id)
     )
-    os.makedirs(BASE_TOKENIZER_PATH, exist_ok=True)
-    tokenizer_path = os.path.join(BASE_TOKENIZER_PATH, "tokenizer.pkl")
-    with open(tokenizer_path, "wb") as f:
+    tokenizer_path = os.path.join(BASE_DIR, "tokenizer")
+    os.makedirs(tokenizer_path, exist_ok=True)
+    tokenizer_filepath = os.path.join(tokenizer_path, "tokenizer.pkl")
+    with open(tokenizer_filepath, "wb") as f:
         pickle.dump(enc, f)
 
     # Sanity check
@@ -112,7 +112,7 @@ def main():
         else:
             token_bytes.append(len(tok_str.encode("utf-8")))
     token_bytes_pt = torch.tensor(token_bytes, dtype=torch.int32, device='cpu')
-    token_bytes_path = os.path.join(BASE_TOKENIZER_PATH, "token_bytes.pt")
+    token_bytes_path = os.path.join(tokenizer_path, "token_bytes.pt")
     with open(token_bytes_path, "wb") as f:
         torch.save(token_bytes_pt, f)
 

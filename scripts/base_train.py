@@ -17,7 +17,8 @@ from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
 from mynanochat.checkpoint import save_checkpoint, load_checkpoint
 from mynanochat.fp8 import LinearFP8
-from mynanochat.common import ddp_init, wandb_init, FileLogger
+from mynanochat.common import get_base_path, ddp_init, wandb_init, FileLogger
+BASE_DIR = get_base_path()
 
 def main():
 
@@ -72,7 +73,7 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run, user_config, ddp_master)
-    run_path = os.path.join(os.path.dirname(__file__), f"../runs", args.run if args.run is not None else "default")
+    run_path = os.path.join(BASE_DIR, "runs", args.run if args.run is not None else "default")
     file_logger = FileLogger(run_path, user_config)  # dummy on non-master processes
 
     # Warnings
@@ -91,7 +92,7 @@ def main():
         print0("!" * 120)
 
     # Tokenizer
-    tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
+    tok_base_path = os.path.join(BASE_DIR, "tokenizer")
     tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
     tokenizer = pickle.load(open(tokenizer_path, "rb"))
     token_bytes_path = os.path.join(tok_base_path, "token_bytes.pt")

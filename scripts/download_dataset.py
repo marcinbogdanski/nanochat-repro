@@ -2,6 +2,9 @@ import os
 import shutil
 import argparse
 from urllib.request import urlopen
+from mynanochat.common import get_base_path
+BASE_DIR = get_base_path()
+
 
 def download_file(filename, base_url, base_path):
     remote_url = base_url + filename
@@ -26,17 +29,17 @@ def download_file(filename, base_url, base_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Script to download data shards.")
-    parser.add_argument("-d", "--dataset", type=str, default="fineweb", choices=["fineweb", "climbmix"], help="Dataset to process (fineweb or climbmix)")
+    parser.add_argument("-d", "--dataset", type=str, default="climbmix", choices=["fineweb", "climbmix"], help="Dataset to process (fineweb or climbmix)")
     parser.add_argument('-n', '--num-files', type=int, default=None, help='Num of train shards to get. Validation shard is always added on top.')
     args = parser.parse_args()
 
     if args.dataset == "fineweb":
         base_url = "https://huggingface.co/datasets/karpathy/fineweb-edu-100b-shuffle/resolve/main/"
-        base_path = os.path.expanduser("~/.cache/nanochat/base_data")
+        base_path = os.path.join(BASE_DIR, "base_data")
         last_file = 1822  # inclusive
     elif args.dataset == "climbmix":
         base_url = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main/"
-        base_path = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
+        base_path = os.path.join(BASE_DIR, "base_data_climbmix")
         last_file = 6542  # inclusive
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")

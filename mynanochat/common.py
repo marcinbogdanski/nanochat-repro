@@ -4,6 +4,12 @@ import datetime
 import torch
 import wandb
 
+def get_base_path():
+    """Returns the base path for storing logs and checkpoints."""
+    base_path = os.environ.get('MYNANOCHAT_BASE_PATH', os.path.expanduser("~/.cache/mynanochat"))
+    os.makedirs(base_path, exist_ok=True)
+    return base_path
+
 def ddp_init():
     """Initializes DDP if applicable, returns device, ddp_master, ddp_world_size."""
     # DDP Init
