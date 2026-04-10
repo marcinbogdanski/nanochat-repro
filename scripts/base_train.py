@@ -307,7 +307,7 @@ def main():
         print0("Resuming from latest checkpoint...")
         loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device)
         step = loaded_vars["step"]
-        total_time = loaded_vars["total_time"]
+        total_time = loaded_vars["total_time"]        
         smooth_dt = loaded_vars["smooth_dt"]
         smooth_tloss = loaded_vars["smooth_tloss"]
         print0(f"Resumed checkpoint from step {step}")
@@ -317,13 +317,14 @@ def main():
     # Training Loop
     start_step = step
     while True:
+        total_flops = step * total_batch_size * flops_per_token
 
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
         if step == start_step or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
-            wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
+            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
             file_logger.log0('bpb_eval', step, {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
 
         # Core Metric
@@ -331,7 +332,7 @@ def main():
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
             core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
-            wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
+            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'core_metric': core_metric, 'centered_results': core_accuracies})
             file_logger.log0('core_metric', step, {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
 
         # Generate
@@ -420,6 +421,7 @@ def main():
         if step % args.log_wandb_every == 0:
             wandb_logger.log({
                 'step': step,
+                'total_training_flops': total_flops,
                 'total_training_time': total_time,
                 'train/loss': debiased_smooth_tloss,
                 'train/lrm': lrm,
@@ -440,6 +442,7 @@ def main():
                 'other/tps': tps,
                 'other/max_mem': max_mem,
                 'other/shard_idx': train_loader.shard_idx,
+                'other/total_flops': total_flops,
                 'other/total_time': total_time,
             }
             # Metrics - super ugly
