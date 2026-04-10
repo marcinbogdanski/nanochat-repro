@@ -55,12 +55,12 @@ def main():
     parser.add_argument('--resume', action='store_true', help='Whether to resume from the latest checkpoint if available.')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
-    parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
+    parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps (-1 to disable, apart from 0 and last step).')
     parser.add_argument('--eval-tokens', type=int, default=80*524288, help='Number of tokens to use for evaluation.')
-    parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
+    parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps (-1 to disable).')
     parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation (-1 to use all).')
-    parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
-    parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
+    parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps (-1 to disable).')
+    parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps (-1 to disable).')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
@@ -328,11 +328,10 @@ def main():
         loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]        
-        smooth_dt = loaded_vars["smooth_dt"]
         smooth_tloss = loaded_vars["smooth_tloss"]
         print0(f"Resumed checkpoint from step {step}")
     else:
-        step, total_time, smooth_dt, smooth_tloss = 0, 0.0, 0.0, 0.0
+        step, total_time, smooth_tloss = 0, 0.0, 0.0
 
     # Training Loop
     start_step = step
@@ -344,7 +343,7 @@ def main():
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
         if step == start_step or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
-            print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
+            print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
             bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes}
             file_logger.log0('bpb_eval', step, data=bpb_eval_data)
@@ -368,7 +367,7 @@ def main():
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
-            loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
+            loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
             checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
@@ -423,8 +422,6 @@ def main():
         synchronize()
         max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
         dt = (time.time() - ts)
-        smooth_dt = 0.9 * smooth_dt + 0.1 * dt
-        debiased_smooth_dt = smooth_dt / (1 - 0.9**(step+1))
         total_time += dt
 
         # Logs
@@ -434,11 +431,12 @@ def main():
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
-        eta_seconds = debiased_smooth_dt * remaining_steps
-        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+        eta_seconds = int(round(dt * remaining_steps))
+        eta_hours, eta_sec_rem = divmod(eta_seconds, 3600)
+        eta_str = f"{int(eta_hours):02d}:" + time.strftime("%M:%S", time.gmtime(eta_sec_rem))
         print0(f"Step {step}/{max_steps} ({pct:.2f}%) | "
                 f"loss {debiased_smooth_tloss:.16f} {loss_accum.item():.4f} | "
-                f"lrm {lrm:.3f} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
+                f"lrm {lrm:.3f} | dt {dt*1e3:.2f}ms | tps {tps:,} | "
                 f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                 f"time {total_time_str} | eta {eta_str}")
         if step % args.log_wandb_every == 0:
