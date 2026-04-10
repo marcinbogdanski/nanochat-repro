@@ -75,7 +75,8 @@ def main():
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run, user_config, ddp_master)
     run_path = os.path.join(BASE_DIR, "runs", args.run if args.run is not None else "default")
-    file_logger = FileLogger(run_path, user_config)  # dummy on non-master processes
+    file_logger = FileLogger(run_path)  # dummy on non-master processes
+    file_logger.log('user_config', step=None, data=user_config, override=True)  # override=True to initialize empty on all ranks
 
     # Warnings
     warnings = []
@@ -152,14 +153,16 @@ def main():
     model.to_empty(device=device)
     model.init_weights()
     print0("Model configuration:")
-    for k, v in model.config.__dict__.items():
+    for k, v in model.config.to_dict().items():
         print0(f"  {k:>16}: {v}")
+    file_logger.log('model_config', step=None, data=model.config.to_dict())
 
     # FP8 Print
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
     num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
     print0(f"Layers eligible for FP8: {num_eligible} / {num_linear}")
 
+    # Compile
     orig_model = model
     if not args.deterministic:
         model = torch.compile(model)
@@ -177,6 +180,7 @@ def main():
     print0("Model parameter counts:")
     for k, v in param_counts.items():
         print0(f"  {k:>20}: {v:>12,}")
+    file_logger.log('params_counts', step=None, data=param_counts)
     scaling_params = param_counts['transformer_active'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
     print0(f"Scaling info:")
@@ -233,17 +237,33 @@ def main():
 
     # Calc Max Steps
     flops_per_token = model.estimate_flops_per_token()
+    flops_per_iter = flops_per_token * total_batch_size
     print0(f"Estimated FLOPs per token: {flops_per_token:e}")
     if args.num_iterations > 0:
         max_steps = args.num_iterations
         print0(f"Using user-provided num_iterations={max_steps} without scaling.")
     elif args.target_flops > 0:
-        flops_per_iter = flops_per_token * total_batch_size
         max_steps = round(args.target_flops / flops_per_iter)
         print0(f"Calculated max_steps={max_steps} based on target_flops={args.target_flops} and flops_per_batch={flops_per_iter}")
     else:
         max_steps = target_tokens // total_batch_size  # floor the division
         print0(f"Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
+    
+    # Log calculated hyperparameters
+    training_hyperparameters = {
+        'scaling_params': scaling_params,
+        'target_tokens': target_tokens,
+        'total_batch_size': total_batch_size,
+        'batch_ratio': batch_ratio,
+        'batch_lr_scale': batch_lr_scale,
+        'scaled_weight_decay': scaled_weight_decay,
+        'micro_batch': micro_batch,
+        'grad_accum': grad_accum,
+        'flops_per_token': flops_per_token,
+        'flops_per_iter': flops_per_iter,
+        'max_steps': max_steps,
+    }
+    file_logger.log('training_hyperparameters', step=None, data=training_hyperparameters)
 
     # WD for Optimizers
     def get_wd(step: int):
@@ -316,6 +336,7 @@ def main():
 
     # Training Loop
     start_step = step
+    bpb_eval_data, core_metric_data, train_log_dict = None, None, None
     while True:
         total_flops = step * total_batch_size * flops_per_token
 
@@ -325,7 +346,8 @@ def main():
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
-            file_logger.log0('bpb_eval', step, {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
+            bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes}
+            file_logger.log0('bpb_eval', step, data=bpb_eval_data)
 
         # Core Metric
         # Use original model because shapes keep changing
@@ -333,7 +355,8 @@ def main():
             core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'core_metric': core_metric, 'centered_results': core_accuracies})
-            file_logger.log0('core_metric', step, {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
+            core_metric_data = {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time}
+            file_logger.log0('core_metric', step, data=core_metric_data)
 
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
@@ -428,8 +451,8 @@ def main():
                 'train/dt': dt,
                 'train/tok_per_sec': tps,
             })
-        if step % args.log_every == 0:
-            log_dict = {
+        if step % args.log_every == 0 or step == max_steps-1:
+            train_log_dict = {
                 'step': step,
                 'train/train_loss': loss_accum.item(),
                 'train/rank_tloss': rank_tloss.item(),
@@ -449,11 +472,21 @@ def main():
             if args.log_metrics:
                 opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
                 metrics_list = orig_model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
-                log_dict['metrics'] = metrics_list
-            file_logger.log('train', step, log_dict)
+                train_log_dict['metrics'] = metrics_list
+            file_logger.log('train', step, train_log_dict)
         
         # Advance Step
         step += 1
+
+    file_logger.log('run_summary', step=None, data={
+        'user_config': user_config,
+        'model_config': orig_model.config.to_dict(),
+        'param_counts': param_counts,
+        'training_hyperparameters': training_hyperparameters,
+        'final_bpb_eval': bpb_eval_data,
+        'final_core_metric': core_metric_data,
+        'final_train_log': train_log_dict,
+    })
 
     wandb_logger.finish()
     if torch.distributed.is_initialized():
