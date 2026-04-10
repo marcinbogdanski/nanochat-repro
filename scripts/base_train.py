@@ -39,6 +39,7 @@ def main():
     # Training horizon
     parser.add_argument('--dataset', type=str, default='climbmix', choices=['fineweb', 'climbmix'], help='Training dataset to use.')
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
+    parser.add_argument('--target-flops', type=float, default=-1, help='Target FLOPs for training (-1 to disable).')
     parser.add_argument('--target-param-data-ratio', type=float, default=12, help='Calc num-iterations to maintain optimal data:param ratio (Chinchilla etc.). Measured empirically in Nanochat.')
     # Optimization
     parser.add_argument('--device-batch-size', type=int, default=32, help='Micro batch size per device.')
@@ -98,6 +99,7 @@ def main():
     token_bytes_path = os.path.join(tok_base_path, "token_bytes.pt")
     with open(token_bytes_path, "rb") as f:
         token_bytes = torch.load(f, map_location=device)
+    print0("Vocabulary size:", tokenizer.n_vocab)
    
     # Reproducibility
     if args.deterministic:
@@ -149,11 +151,14 @@ def main():
     model = create_model_meta(args.depth)
     model.to_empty(device=device)
     model.init_weights()
+    print0("Model configuration:")
+    for k, v in model.config.__dict__.items():
+        print0(f"  {k:>16}: {v}")
 
     # FP8 Print
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
     num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
-    print0(f"  Eligible for FP8: {num_eligible}/{num_linear} linear layers")
+    print0(f"Layers eligible for FP8: {num_eligible} / {num_linear}")
 
     orig_model = model
     if not args.deterministic:
@@ -169,7 +174,10 @@ def main():
     # - then use paper-based / empirical scaling rules to map reference hyperparameters
     #   from d12 to the actual target model
     param_counts: dict = model.number_scaling_params()
-    scaling_params = param_counts['active_transformer_matrices'] + param_counts['lm_head']
+    print0("Model parameter counts:")
+    for k, v in param_counts.items():
+        print0(f"  {k:>20}: {v:>12,}")
+    scaling_params = param_counts['transformer_active'] + param_counts['lm_head']
     target_tokens = int(args.target_param_data_ratio * scaling_params)
     print0(f"Scaling info:")
     print0(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
@@ -177,7 +185,7 @@ def main():
 
     model_d12_ref = create_model_meta(depth=12)
     d12_params_dict = model_d12_ref.number_scaling_params()
-    ref_d12_scaling_params = d12_params_dict['active_transformer_matrices'] + d12_params_dict['lm_head']
+    ref_d12_scaling_params = d12_params_dict['transformer_active'] + d12_params_dict['lm_head']
     print0(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")
     ref_d12_target_tokens_D_REF = args.target_param_data_ratio * ref_d12_scaling_params
     ref_d12_batch_size_B_REF = 2**19    # 2**19=524288, measured empirically in nanochat for d12
@@ -224,9 +232,15 @@ def main():
     )
 
     # Calc Max Steps
+    flops_per_token = model.estimate_flops_per_token()
+    print0(f"Estimated FLOPs per token: {flops_per_token:e}")
     if args.num_iterations > 0:
         max_steps = args.num_iterations
         print0(f"Using user-provided num_iterations={max_steps} without scaling.")
+    elif args.target_flops > 0:
+        flops_per_iter = flops_per_token * total_batch_size
+        max_steps = round(args.target_flops / flops_per_iter)
+        print0(f"Calculated max_steps={max_steps} based on target_flops={args.target_flops} and flops_per_batch={flops_per_iter}")
     else:
         max_steps = target_tokens // total_batch_size  # floor the division
         print0(f"Calculated max_steps={max_steps} based on scaling_params * target_param_data_ratio / total_batch_size")
