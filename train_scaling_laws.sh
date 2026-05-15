@@ -22,12 +22,11 @@ set -euo pipefail
 # d20 -> 4
 
 FLOPS_BUDGETS=(
-    1e17
-    2.15e17
-    4.64e17
     1e18
+    3e18
+    6e18
 )
-DEPTHS=(10 12 14 16 18)
+DEPTHS=(10 12 14 16 18 20)
 
 for TARGET_FLOPS in "${FLOPS_BUDGETS[@]}"; do
     for MODEL_DEPTH in "${DEPTHS[@]}"; do
