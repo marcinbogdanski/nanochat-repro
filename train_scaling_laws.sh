@@ -27,7 +27,7 @@ FLOPS_BUDGETS=(
     3e18
     1e18
 )
-DEPTHS=(10 12 13 14 15 16 17 18 20)
+DEPTHS=(10 12 14 16 18 20)
 
 for TARGET_FLOPS in "${FLOPS_BUDGETS[@]}"; do
     for MODEL_DEPTH in "${DEPTHS[@]}"; do
