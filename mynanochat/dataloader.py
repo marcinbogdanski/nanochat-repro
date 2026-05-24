@@ -1,15 +1,17 @@
 import os
 import torch
 import pyarrow.parquet as pq
+from mynanochat.common import get_base_path
+BASE_DIR = get_base_path()
 
 class DataLoader:
     def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer):
 
         # Dataset path logic
         if dataset_or_folderpath == "fineweb":
-            folderpath = os.path.expanduser("~/.cache/nanochat/base_data")
+            folderpath = os.path.join(BASE_DIR, "base_data")
         elif dataset_or_folderpath == "climbmix":
-            folderpath = os.path.expanduser("~/.cache/nanochat/base_data_climbmix")
+            folderpath = os.path.join(BASE_DIR, "base_data_climbmix")
         else:
             folderpath = dataset_or_folderpath
 

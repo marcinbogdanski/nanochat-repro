@@ -15,7 +15,7 @@ def evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device):
             assert (y >= 0).all()  # masking with -1 not supported
             x = x.to(device)
             y = y.to(device)
-            _, loss_arr = model(x, y, reduction='none', return_logits=False)
+            _, loss_arr, _ = model(x, y, reduction='none', return_logits=False)
             bytes_arr = token_bytes[y.view(-1)]
             loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
             total_nats += loss_arr.sum().item()

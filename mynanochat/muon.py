@@ -21,6 +21,7 @@ def fused_muon_step(
     beta2,
     steps,  # 5
     compute_dtype,
+    metrics=False,  # effectively a compile-time flag to enable metric calculation
 ):
 
     # Update v: v = B1 * v + (1-B) * g
@@ -75,7 +76,25 @@ def fused_muon_step(
     lr = lr.to(update.dtype)
     wd = wd.to(update.dtype)
     mask = (update * params) >= 0
-    params.sub_(lr * update + lr * wd * params * mask)
+    update_full = lr * update + lr * wd * params * mask
+
+    # Metrics
+    # We want ||delta_W||/||W|| aggregated by transformer block. For that we need
+    # sum(delta_W**2) and sum(W**2) for the whole block, before we can reduce and divide.
+    # This is why we return per-tensor sums here. Then later on, in GPT class,
+    # we can aggregate them by block and calculate the final ratio.
+    update_sum_squares, params_sum_squares = None, None
+    if metrics:
+        reduce_dims = tuple(range(1, update_full.ndim))
+        # technically update_full should have flipped sign, but square() makes it ok to omit it
+        update_sum_squares = update_full.float().square().sum(dim=reduce_dims)
+        params_sum_squares = params.float().square().sum(dim=reduce_dims)
+
+    params.sub_(update_full)
+
+    return update_sum_squares, params_sum_squares
+
+
 
 
 class Muon(torch.optim.Optimizer):
@@ -89,14 +108,20 @@ class Muon(torch.optim.Optimizer):
         lr_adj = lr * sqrt(max(1, m/n))  # adjust for aspect ratio
         p = p - lr * U                   # update weights
     """
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, enable_metrics=False):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
-        self.compute_dtype = compute_dtype
         super().__init__(params, defaults)
-    
+        self.compute_dtype = compute_dtype
+        self.enable_metrics = enable_metrics
+        self.debug_stats = {}    # metrics, if enabled
+
+    def get_metrics(self):
+        return self.debug_stats
+
     @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
+        self.debug_stats = {}  # clear every step
 
         for group in self.param_groups:
             # First dim is stack size, i.e. num params in group
@@ -121,7 +146,7 @@ class Muon(torch.optim.Optimizer):
             momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
             wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
             beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
-            fused_muon_step(
+            update_sum_squares, params_sum_squares = fused_muon_step(
                 params=stacked_params,
                 grad=stacked_grads,
                 momentum_buffer=self.state[p]['momentum_buffer'],
@@ -132,7 +157,21 @@ class Muon(torch.optim.Optimizer):
                 beta2=beta2,
                 steps=group['ns_steps'],
                 compute_dtype=self.compute_dtype,
+                metrics=self.enable_metrics,
             )
+
+            if self.enable_metrics:
+                none_list = [None] * len(group['params'])
+                update_sum_squares = update_sum_squares.cpu().numpy() if update_sum_squares is not None else none_list
+                params_sum_squares = params_sum_squares.cpu().numpy() if params_sum_squares is not None else none_list
+                assert len(update_sum_squares) == len(group['params'])
+                assert len(params_sum_squares) == len(group['params'])
+                for jj, param in enumerate(group['params']):
+                    self.debug_stats[param] = {
+                        'update_sq_sum': float(update_sum_squares[jj]),  # np.float32 -> float
+                        'params_sq_sum': float(params_sum_squares[jj]),
+                        'params_num_el': param.numel(),
+                    }
 
             # copy back params
             torch._foreach_copy_(group["params"], list(stacked_params.unbind(0)))
@@ -141,16 +180,22 @@ class Muon(torch.optim.Optimizer):
 
 class DistMuon(torch.optim.Optimizer):
     """ZeRO-2 version of Muon optimizer"""
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, enable_metrics=False):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
-        self.compute_dtype = compute_dtype
         super().__init__(params, defaults)
-    
+        self.compute_dtype = compute_dtype
+        self.enable_metrics = enable_metrics
+        self.debug_stats = {}    # metrics, if enabled
+
+    def get_metrics(self):
+        return self.debug_stats
+
     @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
+        self.debug_stats = {}  # clear every step
 
         temp_buffers = {}
 
@@ -222,7 +267,7 @@ class DistMuon(torch.optim.Optimizer):
                 momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
                 beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
-                fused_muon_step(
+                update_sum_squares, params_sum_squares = fused_muon_step(
                     params=stacked_params[:num_params_this_rank],
                     grad=stacked_grads[:num_params_this_rank],
                     momentum_buffer=self.state[p]['momentum_buffer'][:num_params_this_rank],
@@ -233,7 +278,31 @@ class DistMuon(torch.optim.Optimizer):
                     beta2=beta2,
                     steps=group['ns_steps'],
                     compute_dtype=self.compute_dtype,
+                    metrics=self.enable_metrics,
                 )
+
+                if self.enable_metrics:
+                    none_list = [None] * num_params_this_rank
+                    update_sum_squares = update_sum_squares.cpu().numpy() if update_sum_squares is not None else none_list
+                    params_sum_squares = params_sum_squares.cpu().numpy() if params_sum_squares is not None else none_list
+                    owned_params = group['params'][idx_start:idx_start + num_params_this_rank]
+                    for jj, param in enumerate(owned_params):
+                        self.debug_stats[param] = {
+                            'update_sq_sum': float(update_sum_squares[jj]),
+                            'params_sq_sum': float(params_sum_squares[jj]),
+                            'params_num_el': param.numel(),
+                        }
+
+            # All metrics are sum-reduced across ranks, so fill with zeros to be explicit
+            if self.enable_metrics:
+                for p in group['params']:
+                    if p not in self.debug_stats:
+                        self.debug_stats[p] = {
+                            'update_sq_sum': 0.0,
+                            'params_sq_sum': 0.0,
+                            'params_num_el': 0,
+                        }
+
 
             # Reuse the stacked_all_grads buffer for params
             stacked_all_grads = temp_buffers[i]['stacked_all_grads']

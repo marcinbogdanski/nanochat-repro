@@ -1,6 +1,14 @@
 import os
+import json
+import datetime
 import torch
 import wandb
+
+def get_base_path():
+    """Returns the base path for storing logs and checkpoints."""
+    base_path = os.environ.get('MYNANOCHAT_BASE_PATH', os.path.expanduser("~/.cache/mynanochat"))
+    os.makedirs(base_path, exist_ok=True)
+    return base_path
 
 def ddp_init():
     """Initializes DDP if applicable, returns device, ddp_master, ddp_world_size."""
@@ -43,3 +51,22 @@ def wandb_init(run_name, user_config, ddp_master):
     else:
         wandb_logger = WandBDummy()
     return wandb_logger
+
+
+class FileLogger:
+    def __init__(self, run_path, user_config):
+        self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        self.log_filepath = os.path.join(run_path, f"train_log_rank{self.rank}.jsonl")
+        os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
+        self.log('config', step=None, data=user_config, mode='w')  # overwrite existing log
+
+    def log0(self, event, step, data, mode='a'):
+        if self.rank == 0:
+            self.log(event, step, data, mode)
+
+    def log(self, event, step, data, mode='a'):
+        datetime_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        with open(self.log_filepath, mode) as f:
+            json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': rank, **data}, f)
+            f.write('\n')

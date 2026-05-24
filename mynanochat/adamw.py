@@ -12,9 +12,20 @@ def fused_adamw_step(
     beta2,
     eps,
     wd,
+    metrics=False,  # effectively a compile-time flag to enable metric calculation
 ):
+    # Metrics
+    # We want ||delta_W||/||W|| aggregated by transformer block. For that we need
+    # sum(delta_W**2) and sum(W**2) for the whole block, before we can reduce and divide.
+    # This is why we return per-tensor sums here. Then later on, in GPT class,
+    # we can aggregate them by block and calculate the final ratio.
+    update_sum_squares, params_sum_squares = None, None
+    if metrics:
+        params_sum_squares = params.float().square().sum()
+
     # Weight Decay
     # p = p - lr * weight_decay * p
+    wd_update = params * lr * wd
     params.mul_(1 - lr * wd)
 
     # Update v
@@ -33,8 +44,16 @@ def fused_adamw_step(
     bias1 = 1-beta1**step
     bias2 = 1-beta2**step
     denom = (exp_avg_sq / bias2).sqrt().add_(eps)
-    update = exp_avg.div(denom).mul_(lr / bias1)
-    params.add_(update, alpha=-1.0)
+    optim_update = exp_avg.div(denom).mul_(lr / bias1)
+
+    # Modify in-place
+    params.add_(optim_update, alpha=-1.0)
+
+    if metrics:
+        final_update = -(optim_update + wd_update)
+        update_sum_squares = final_update.float().square().sum()
+
+    return update_sum_squares, params_sum_squares
 
 
 class AdamW(torch.optim.Optimizer):
@@ -50,12 +69,18 @@ class AdamW(torch.optim.Optimizer):
         p = p - lr * v_corrected / (sqrt(s_corrected) + eps)
         p = p - lr * wd * p                # AdamW: decoupled weight decay
     """
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, enable_metrics=False):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
+        self.enable_metrics = enable_metrics
+        self.debug_stats = {}    # metrics, if enabled
+    
+    def get_metrics(self):
+        return self.debug_stats
     
     @torch.no_grad()
     def step(self):
+        self.debug_stats = {}  # clear every step
         for group in self.param_groups:
             for params in group['params']:
                 if params.grad is None:
@@ -80,7 +105,7 @@ class AdamW(torch.optim.Optimizer):
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
-                fused_adamw_step(
+                update_sum_squares, params_sum_squares = fused_adamw_step(
                     params=params,
                     grad=grad,
                     exp_avg=exp_avg,
@@ -91,21 +116,36 @@ class AdamW(torch.optim.Optimizer):
                     beta2=beta2,
                     eps=eps,
                     wd=wd,
+                    metrics=self.enable_metrics,
                 )
+                if self.enable_metrics:
+                    update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
+                    params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
+                    self.debug_stats[params] = {
+                        'update_sq_sum': update_sum_squares,
+                        'params_sq_sum': params_sum_squares,
+                        'params_num_el': grad.numel(),
+                    }
 
 
 
 
 class DistAdamW(torch.optim.Optimizer):
     """ZeRO-2 version of AdamW optimizer"""
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, enable_metrics=False):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
-    
+        self.enable_metrics = enable_metrics
+        self.debug_stats = {}    # metrics, if enabled
+
+    def get_metrics(self):
+        return self.debug_stats
+
     @torch.no_grad()
     def step(self):
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
+        self.debug_stats = {}  # clear every step
 
         temp_buffers = {}
 
@@ -170,7 +210,7 @@ class DistAdamW(torch.optim.Optimizer):
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
-                fused_adamw_step(
+                update_sum_squares, params_sum_squares = fused_adamw_step(
                     params=params_slice,
                     grad=grad_slice,
                     exp_avg=exp_avg,
@@ -181,7 +221,22 @@ class DistAdamW(torch.optim.Optimizer):
                     beta2=beta2,
                     eps=eps,
                     wd=wd,
+                    metrics=self.enable_metrics,
                 )
+                if self.enable_metrics:
+                    update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
+                    params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
+                    params_num_el = grad_slice.numel()
+                    if rank != 0 and group['is_small']:
+                        # For small params, rank 0 has the full param and grad, zero other ranks to avoid duplication
+                        update_sum_squares = 0.0
+                        params_sum_squares = 0.0
+                        params_num_el = 0
+                    self.debug_stats[params] = {
+                        'update_sq_sum': update_sum_squares,
+                        'params_sq_sum': params_sum_squares,
+                        'params_num_el': params_num_el,
+                    }
 
                 # Sync point 2
                 if not group['is_small']:

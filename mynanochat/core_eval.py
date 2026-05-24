@@ -11,6 +11,8 @@ import json
 import random
 import torch
 import jinja2
+from mynanochat.common import get_base_path
+BASE_DIR = get_base_path()
 
 
 def _render_multiple_choice_prompts(data_item, fewshot_examples, cont_delim):
@@ -188,7 +190,7 @@ def _evaluate_one_example(idx, data_list, model, tokenizer, device,
     # Forward the model    
     with torch.no_grad():
         B, T = input_ids.shape
-        logits, losses = model(input_ids, target_ids, reduction='none')
+        logits, losses, _ = model(input_ids, target_ids, reduction='none')
         losses = losses.view(B, T)
         losses[:, -1] = float('nan')  # ignore loss on last token (no target)
         preds = logits.argmax(dim=-1)  # (B, T)
@@ -235,8 +237,10 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
     return accuracy
 
 @torch.inference_mode()
-def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, bundle_folder="~/.cache/nanochat/eval_bundle"):
+def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, bundle_folder=None):
 
+    if bundle_folder is None:
+        bundle_folder = os.path.join(BASE_DIR, "eval_bundle")
     bundle_folder = os.path.expanduser(bundle_folder)
     ddp_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     ddp_master = (ddp_rank == 0)

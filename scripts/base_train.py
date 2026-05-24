@@ -17,7 +17,8 @@ from mynanochat.loss_eval import evaluate_bpb
 from mynanochat.generate import generate_test_samples
 from mynanochat.checkpoint import save_checkpoint, load_checkpoint
 from mynanochat.fp8 import LinearFP8
-from mynanochat.common import ddp_init, wandb_init
+from mynanochat.common import get_base_path, ddp_init, wandb_init, FileLogger
+BASE_DIR = get_base_path()
 
 def main():
 
@@ -54,13 +55,15 @@ def main():
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps.')
-    parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation.')
+    parser.add_argument('--eval-tokens', type=int, default=80*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps.')
     parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation.')
     parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps.')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps.')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
-    parser.add_argument('--print-details', action='store_true', help='Print detailed model info on startup.')
+    parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
+    parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
+
     args = parser.parse_args()
     user_config = vars(args).copy()
    
@@ -70,9 +73,26 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run, user_config, ddp_master)
-    
+    run_path = os.path.join(BASE_DIR, "runs", args.run if args.run is not None else "default")
+    file_logger = FileLogger(run_path, user_config)  # dummy on non-master processes
+
+    # Warnings
+    warnings = []
+    if args.no_fa3:
+        warnings.append("FA3 disabled, which may reduce training speed. Only set this flag if you need reproducibility.")
+    if args.fp8 and args.compute_dtype == 'fp32':
+        warnings.append("Using FP8 training with FP32 compute. This is a valid but may lead to worse performance.")
+    if args.log_metrics:
+        warnings.append("Detailed tensor metrics logging is enabled, which may slow down training.")
+    if args.deterministic:
+        warnings.append("Deterministic mode enabled. This will disable torch.compile and some optimizations and *will* reduce training speed.")
+    if warnings:
+        print0("!" * 120)
+        print0("\n".join(warnings))
+        print0("!" * 120)
+
     # Tokenizer
-    tok_base_path = os.path.expanduser("~/.cache/nanochat/tokenizer")
+    tok_base_path = os.path.join(BASE_DIR, "tokenizer")
     tokenizer_path = os.path.join(tok_base_path, "tokenizer.pkl")
     tokenizer = pickle.load(open(tokenizer_path, "rb"))
     token_bytes_path = os.path.join(tok_base_path, "token_bytes.pt")
@@ -122,7 +142,8 @@ def main():
                 model_config,
                 compute_dtype=compute_dtype,
                 enable_fa3=not args.no_fa3,
-                fp8_training=args.fp8
+                fp8_training=args.fp8,
+                enable_metrics=args.log_metrics,
             )
         return model_meta
     model = create_model_meta(args.depth)
@@ -198,7 +219,8 @@ def main():
         matrix_lr=args.matrix_lr * batch_lr_scale,
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
         scalar_lr=args.scalar_lr * batch_lr_scale,
-        weight_decay=scaled_weight_decay
+        weight_decay=scaled_weight_decay,
+        enable_metrics=args.log_metrics,
     )
 
     # Calc Max Steps
@@ -269,8 +291,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        checkpoint_path = os.path.join(os.path.dirname(__file__), "../runs/default")
-        loaded_vars = load_checkpoint(checkpoint_path, model, optimizers, train_loader, device)
+        loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]
         smooth_dt = loaded_vars["smooth_dt"]
@@ -289,27 +310,30 @@ def main():
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes:.1f}")
             wandb_logger.log({'step': step, 'total_training_time': total_time, 'val/bpb': bpb})
+            file_logger.log0('bpb_eval', step, {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes})
 
         # Core Metric
         # Use original model because shapes keep changing
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
-            core_metric, core_accuracies, core_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
-            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_time:.2f}s")
+            core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             wandb_logger.log({'step': step, 'core_metric': core_metric, 'centered_results': core_accuracies})
+            file_logger.log0('core_metric', step, {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time})
 
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
             generated_samples = generate_test_samples(orig_model, tokenizer, device)
             print0("\n".join(generated_samples))
+            file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
-            path = os.path.join(os.path.dirname(__file__), "../runs/default")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_dt': smooth_dt, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(path, model, optimizers, train_loader, loop_vars, user_config)
+            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
+            file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
         # Exit Condition
         if step == max_steps:
@@ -323,15 +347,18 @@ def main():
         loss_accum = 0.0
         for opt in optimizers:
             opt.zero_grad()
+        fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
             x, y = train_loader.get_batch_bos()
             x = x.to(device)
             y = y.to(device)
-            _, loss = model(x, y, return_logits=False)
-            train_loss = loss.detach()
+            _, loss, metrics = model(x, y, return_logits=False)
+            fwd_metrics.append(metrics)  # may be None if metrics not enabled
+            rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
+
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
@@ -365,7 +392,7 @@ def main():
         # Logs
         tps = int(total_batch_size / dt)
         pct = step / max_steps * 100
-        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * train_loss.item()
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * rank_tloss.item()
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
@@ -376,7 +403,7 @@ def main():
                 f"lrm {lrm:.3f} | dt {dt*1e3:.2f}ms {debiased_smooth_dt*1e3:.2f}ms | tps {tps:,} | "
                 f"mem {max_mem:.3f} GB | shard {train_loader.shard_idx} | "
                 f"time {total_time_str} | eta {eta_str}")
-        if step % args.log_every == 0:
+        if step % args.log_wandb_every == 0:
             wandb_logger.log({
                 'step': step,
                 'total_training_time': total_time,
@@ -385,6 +412,28 @@ def main():
                 'train/dt': dt,
                 'train/tok_per_sec': tps,
             })
+        if step % args.log_every == 0:
+            log_dict = {
+                'step': step,
+                'train/train_loss': loss_accum.item(),
+                'train/rank_tloss': rank_tloss.item(),
+                'train/smooth_rank_tloss': smooth_tloss,
+                'train/debiased_smooth_rank_tloss': debiased_smooth_tloss,
+                'train/lrm': lrm,
+                'train/muon_momentum': muon_momentum,
+                'train/muon_weight_decay': muon_weight_decay,
+                'other/dt': dt,
+                'other/tps': tps,
+                'other/max_mem': max_mem,
+                'other/shard_idx': train_loader.shard_idx,
+                'other/total_time': total_time,
+            }
+            # Metrics - super ugly
+            if args.log_metrics:
+                opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
+                metrics_list = orig_model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
+                log_dict['metrics'] = metrics_list
+            file_logger.log('train', step, log_dict)
         
         # Advance Step
         step += 1

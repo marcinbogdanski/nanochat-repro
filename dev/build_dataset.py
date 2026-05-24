@@ -12,7 +12,10 @@ import tiktoken
 import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
+from mynanochat.common import get_base_path
 assert pa.__version__ == '21.0.0'  # bitwise parity with Nanochat
+BASE_DIR = get_base_path()
+REF_DIR = os.path.expanduser("~/.cache/nanochat")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -41,8 +44,8 @@ def main():
         output_dir_name = "climbmix-400b-shuffle"
         ref_dir_name = "base_data_climbmix"
 
-    output_path = os.path.expanduser(f"~/.cache/mynanochat/{output_dir_name}")
-    reference_path = os.path.expanduser(f"~/.cache/nanochat/{ref_dir_name}")
+    output_path = os.path.join(BASE_DIR, output_dir_name)
+    reference_path = os.path.join(REF_DIR, ref_dir_name)
     os.makedirs(output_path, exist_ok=True)
 
     # Load the dataset

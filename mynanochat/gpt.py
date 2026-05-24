@@ -130,10 +130,11 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, ve_enable, enable_fa3):
+    def __init__(self, config, ve_enable, enable_fa3, enable_metrics=False):
         super().__init__()
         self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
         self.moe_enable = config.moe_enable
+        self.enable_metrics = enable_metrics
         if not config.moe_enable:
             self.mlp = MLP(config)
         else:
@@ -148,11 +149,15 @@ class Block(nn.Module):
             x = x + self.mlp(self._norm(x))
         else:
             x = x + self.moe(self._norm(x))
-        return x
+        if self.enable_metrics:
+            sq_sum_t = x.detach().float().square().sum()  # keep as tensor so we don't break graph
+            num_el = x.numel()
+            return x, sq_sum_t, num_el
+        return x, None, None
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, compute_dtype, enable_fa3, fp8_training):
+    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, enable_metrics=False):
         """Initialize to default device/dtype here, cast to compute_dtype in init_weights.
         
         Type handling:
@@ -170,10 +175,13 @@ class GPTModel(nn.Module):
         self.config = config
         self.compute_dtype = compute_dtype
         self.fp8_training = fp8_training
+        self.enable_metrics = enable_metrics
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config, self._has_ve(i, config.n_layer), enable_fa3) for i in range(config.n_layer)]),
+            h = nn.ModuleList([
+                Block(config, self._has_ve(i, config.n_layer), enable_fa3, enable_metrics) for i in range(config.n_layer)
+            ]),
         ))
         self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
 
@@ -279,7 +287,106 @@ class GPTModel(nn.Module):
             ve.to(dtype=self.compute_dtype)
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay):
+    def collect_metrics(self, fwd_metrics, opt_metrics):
+        """Collect metrics, flat list of (block, tensor_name, surface='grad', stat='sq_sum'/'num_el', value)
+        
+        We opt to iterate over known params explicitly, trying to iterate self.parameters() is messy. Just go through each param and collect metrics.
+        """
+        metrics = []  # flat list of (block, tensor_name, surface='grad', stat='sq_sum'/'num_el', value)
+
+        # Forward activation metrics, _lt='list of tensors', _l='list', _t='tensor'
+        # fwd_metrics = {
+        #     'resid_post_sq_sum_lt': metrics_resid_post_sq_sum,  # list of tensors, one per block
+        #     'resid_post_num_el_l': metrics_resid_post_num_el,   # list of ints, one per block
+        #     'logits_sq_sum_t': metrics_logits_sq_sum,           # tensor
+        #     'logits_num_el': metrics_logits_num_el,
+        #     'probs_max_sum_t': metrics_probs_max_sum,           # tensor
+        #     'probs_max_count': metrics_probs_max_count,
+        #     'entropy_sum_t': metrics_entropy_sum,               # tensor
+        #     'entropy_count': metrics_entropy_count,
+        # }
+        for block_n in range(self.config.n_layer):
+            entry_resid_post_sq_sum = {'block': block_n, 'tensor_name': 'resid_post', 'surface': 'fwd', 'stat': 'sq_sum', 'value': 0.0}
+            entry_resid_post_num_el = {'block': block_n, 'tensor_name': 'resid_post', 'surface': 'fwd', 'stat': 'num_el', 'value': 0}
+            for ga_idx in range(len(fwd_metrics)):  # over grad accum steps
+                if fwd_metrics[ga_idx] is not None:
+                    sq_sum_t_list, num_el_list = fwd_metrics[ga_idx]['resid_post_sq_sum_lt'], fwd_metrics[ga_idx]['resid_post_num_el_l']
+                    entry_resid_post_sq_sum['value'] += sq_sum_t_list[block_n].item()
+                    entry_resid_post_num_el['value'] += num_el_list[block_n]
+            metrics.append(entry_resid_post_sq_sum)
+            metrics.append(entry_resid_post_num_el)
+        entry_logits_sq_sum =     {'block': None, 'tensor_name': 'logits',     'surface': 'fwd', 'stat': 'sq_sum', 'value': 0.0}
+        entry_logits_num_el =     {'block': None, 'tensor_name': 'logits',     'surface': 'fwd', 'stat': 'num_el', 'value': 0}
+        entry_probs_max_sum =     {'block': None, 'tensor_name': 'probs_max',  'surface': 'fwd', 'stat': 'sum',    'value': 0.0}
+        entry_probs_max_count =   {'block': None, 'tensor_name': 'probs_max',  'surface': 'fwd', 'stat': 'count',  'value': 0}
+        entry_entropy_sum =       {'block': None, 'tensor_name': 'entropy',    'surface': 'fwd', 'stat': 'sum',    'value': 0.0}
+        entry_entropy_count =     {'block': None, 'tensor_name': 'entropy',    'surface': 'fwd', 'stat': 'count',  'value': 0}
+        for ga_idx in range(len(fwd_metrics)):
+            entry_logits_sq_sum['value'] += fwd_metrics[ga_idx]['logits_sq_sum_t'].item()
+            entry_logits_num_el['value'] += fwd_metrics[ga_idx]['logits_num_el']
+            entry_probs_max_sum['value'] += fwd_metrics[ga_idx]['probs_max_sum_t'].item()
+            entry_probs_max_count['value'] += fwd_metrics[ga_idx]['probs_max_count']
+            entry_entropy_sum['value'] += fwd_metrics[ga_idx]['entropy_sum_t'].item()
+            entry_entropy_count['value'] += fwd_metrics[ga_idx]['entropy_count']
+        metrics.append(entry_logits_sq_sum)
+        metrics.append(entry_logits_num_el)
+        metrics.append(entry_probs_max_sum)
+        metrics.append(entry_probs_max_count)
+        metrics.append(entry_entropy_sum)
+        metrics.append(entry_entropy_count)
+
+        # Gradient, params and update metrics        
+        def extend_metrics(tensor, block, tensor_name):
+            sq_sum = 0.0 if tensor.grad is None else tensor.grad.detach().float().square().sum().item()
+            num_el = 0 if tensor.grad is None else tensor.grad.numel()
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'sq_sum', 'value': sq_sum})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'num_el', 'value': num_el})
+            # opt_metrics has 3x keys: 'update_sq_sum', 'params_sq_sum', 'params_num_el'
+            # currently all params are in some opt group, so no need to check if tensor is in opt_metrics
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['params_sq_sum']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'num_el', 'value': opt_metrics[tensor]['params_num_el']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'update', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['update_sq_sum']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'update', 'stat': 'num_el', 'value': opt_metrics[tensor]['params_num_el']}) # use params_num_el
+
+        def extend_metrics_scalars(tensor, tensor_name):
+            if tensor.ndim == 0:
+                value = tensor.detach().float().cpu().item()
+                metrics.append({'block': None, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'value', 'value': value})
+            else:
+                values = tensor.detach().float().cpu().tolist()
+                for i, val in enumerate(values):
+                    metrics.append({'block': i, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'value', 'value': val})  # reuse block for indexing
+
+        extend_metrics(self.transformer.wte.weight, block=None, tensor_name='wte.weight')
+        extend_metrics(self.lm_head.weight, block=None, tensor_name='lm_head.weight')
+        for i, block in enumerate(self.transformer.h):
+            extend_metrics(block.attn.c_q.weight, block=i, tensor_name='attn.c_q.weight')
+            extend_metrics(block.attn.c_k.weight, block=i, tensor_name='attn.c_k.weight')
+            extend_metrics(block.attn.c_v.weight, block=i, tensor_name='attn.c_v.weight')
+            extend_metrics(block.attn.c_proj.weight, block=i, tensor_name='attn.c_proj.weight')
+            if not self.config.moe_enable:
+                extend_metrics(block.mlp.c_fc.weight, block=i, tensor_name='mlp.c_fc.weight')
+                extend_metrics(block.mlp.c_proj.weight, block=i, tensor_name='mlp.c_proj.weight')
+            else:
+                extend_metrics(block.moe.router.gate.weight, block=i, tensor_name='moe.router.gate.weight')
+                extend_metrics(block.moe.experts.w_up, block=i, tensor_name='moe.experts.w_up')
+                extend_metrics(block.moe.experts.w_down, block=i, tensor_name='moe.experts.w_down')
+                extend_metrics(block.moe.shared_expert.w_up.weight, block=i, tensor_name='moe.shared_expert.w_up.weight')
+                extend_metrics(block.moe.shared_expert.w_down.weight, block=i, tensor_name='moe.shared_expert.w_down.weight')
+        extend_metrics_scalars(self.resid_lambdas, tensor_name='resid_lambdas')  # for scalars we just log the value, no grad/update metrics
+        extend_metrics_scalars(self.x0_lambdas, tensor_name='x0_lambdas')
+        extend_metrics(self.smear_gate.weight, block=None, tensor_name='smear_gate.weight')
+        extend_metrics_scalars(self.smear_lambda, tensor_name='smear_lambda')
+        extend_metrics_scalars(self.backout_lambda, tensor_name='backout_lambda')
+        for i, ve in self.value_embeds.items():
+            extend_metrics(ve.weight, block=int(i), tensor_name='value_embed.weight')
+        for i, block in enumerate(self.transformer.h):
+            if block.attn.ve_gate is not None:
+                extend_metrics(block.attn.ve_gate.weight, block=i, tensor_name='attn.ve_gate.weight')
+        return metrics
+
+
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
@@ -306,7 +413,7 @@ class GPTModel(nn.Module):
             dict(params=smear_backout_params, lr=0.2, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
         ]
         adamw_factory = DistAdamW if ddp else AdamW
-        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0)
+        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
         muon_groups = []
@@ -321,7 +428,8 @@ class GPTModel(nn.Module):
             ns_steps=5,
             beta2=0.9,
             weight_decay=weight_decay,
-            compute_dtype=self.compute_dtype
+            compute_dtype=self.compute_dtype,
+            enable_metrics=enable_metrics,
         )
         
         # Set initial_lr in param groups for proper LR scaling
@@ -420,12 +528,17 @@ class GPTModel(nn.Module):
         x0 = x
         backout_layer = self.config.n_layer // 2  # backout in middle of network
         x_backout = None
+        if self.enable_metrics:
+            metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
-            x = block(x, ve, self.cos, self.sin, self.window_sizes[i])
+            x, sq_sum_t, num_el = block(x, ve, self.cos, self.sin, self.window_sizes[i])
             if i == backout_layer:
                 x_backout = x
+            if self.enable_metrics:
+                metrics_resid_post_sq_sum.append(sq_sum_t)
+                metrics_resid_post_num_el.append(num_el)
 
         # Final backout blending
         if x_backout is not None:
@@ -438,15 +551,37 @@ class GPTModel(nn.Module):
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
 
+        metrics = None
+        if self.enable_metrics:
+            metrics_logits_sq_sum = logits.detach().float().square().sum()  # .item() here would break the graph
+            metrics_logits_num_el = logits.numel()
+            probs = F.softmax(logits.detach(), dim=-1)
+            probs_max = probs.amax(dim=-1)
+            metrics_probs_max_sum = probs_max.sum()
+            metrics_probs_count = probs_max.numel()
+            entropy = -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1)
+            metrics_entropy_sum = entropy.sum()
+            metrics_entropy_count = entropy.numel()
+            metrics = {
+                'resid_post_sq_sum_lt': metrics_resid_post_sq_sum,  # _lt = list of tensors, one per block
+                'resid_post_num_el_l': metrics_resid_post_num_el,   # _l = list of ints, one per block
+                'logits_sq_sum_t': metrics_logits_sq_sum,           # _t = tensor
+                'logits_num_el': metrics_logits_num_el,
+                'probs_max_sum_t': metrics_probs_max_sum,           # _t = tensor
+                'probs_max_count': metrics_probs_count,
+                'entropy_sum_t': metrics_entropy_sum,               # _t = tensor
+                'entropy_count': metrics_entropy_count,
+            }
+
         if targets is None:
             assert return_logits, "If targets is None, return_logits must be True."
-            return logits, None
+            return logits, None, metrics
         else:
             B, T, C = logits.shape
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
             loss = F.cross_entropy(logits_, targets_, reduction=reduction)
             if return_logits:
-                return logits, loss
+                return logits, loss, metrics
             else:
-                return None, loss
+                return None, loss, metrics
