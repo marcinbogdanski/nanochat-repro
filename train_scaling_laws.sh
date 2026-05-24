@@ -15,24 +15,25 @@ set -euo pipefail
 
 # micro batch size on 1x3090
 # d10 -> 16
-# d12 -> 16
+# ...
 # d14 -> 16
-# d16 -> 8
+# d15 -> 8
+# ...
 # d18 -> 8
 # d20 -> 4
 
 FLOPS_BUDGETS=(
-    1e18
-    3e18
     6e18
+    3e18
+    1e18
 )
-DEPTHS=(10 12 14 16 18 20)
+DEPTHS=(10 12 13 14 15 16 17 18 20)
 
 for TARGET_FLOPS in "${FLOPS_BUDGETS[@]}"; do
     for MODEL_DEPTH in "${DEPTHS[@]}"; do
         if [ $MODEL_DEPTH -ge 20 ]; then
             DEVICE_BATCH_SIZE=4
-        elif [ $MODEL_DEPTH -ge 16 ]; then
+        elif [ $MODEL_DEPTH -ge 15 ]; then
             DEVICE_BATCH_SIZE=8
         else
             DEVICE_BATCH_SIZE=16
