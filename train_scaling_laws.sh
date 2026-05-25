@@ -13,7 +13,7 @@ set -euo pipefail
 # )
 # DEPTHS=(10 12 14 16 18 20)
 
-# micro batch size on 1x3090
+# Micro Batch Size on 1x3090
 # d10 -> 16
 # ...
 # d14 -> 16
@@ -22,26 +22,27 @@ set -euo pipefail
 # d18 -> 8
 # d20 -> 4
 
-FLOPS_BUDGETS=(
-    6e18
-    3e18
-    1e18
-)
+# Micro Batch Size on H100
+# d10-d18: 32
+# d20-d26: 16
+# d28+:     8
+
+FLOPS_BUDGETS=(1e18 3e18 6e18)
 DEPTHS=(10 12 14 16 18 20)
 
 for TARGET_FLOPS in "${FLOPS_BUDGETS[@]}"; do
     for MODEL_DEPTH in "${DEPTHS[@]}"; do
-        if [ $MODEL_DEPTH -ge 20 ]; then
-            DEVICE_BATCH_SIZE=4
-        elif [ $MODEL_DEPTH -ge 15 ]; then
+        if [ $MODEL_DEPTH -ge 28 ]; then
             DEVICE_BATCH_SIZE=8
-        else
+        elif [ $MODEL_DEPTH -ge 20 ]; then
             DEVICE_BATCH_SIZE=16
+        else
+            DEVICE_BATCH_SIZE=32
         fi
 
         echo "=================================================================="
         echo "FLOPs: $TARGET_FLOPS, Depth: $MODEL_DEPTH, Device Batch Size: $DEVICE_BATCH_SIZE"
         echo "=================================================================="
-        ./train.sh "$TARGET_FLOPS" "$MODEL_DEPTH" "$DEVICE_BATCH_SIZE"
+        ./train_scaling_one_run.sh "$TARGET_FLOPS" "$MODEL_DEPTH" "$DEVICE_BATCH_SIZE"
     done
 done
