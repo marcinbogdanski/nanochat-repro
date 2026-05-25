@@ -1,21 +1,20 @@
 import torch
 import torch.nn.functional as F
 
-_fa3 = None
+# This runs on import, before the ddp_init(), so we don't know the rank yet.
+# We will check zero-th GPU and not try to pick per-gpu kernel variants.
+# We can't lazy init in fa3_attn_func() because it is part of hot fused path.
+# In theory we could auto-detect after ddp_init() and before torch.compile(),
+# but it's not worth it for this project, for case that is very unlikely.
+from kernels import get_kernel
+if torch.cuda.is_available() and torch.cuda.get_device_capability(device=0)[0] == 9:
+    # Specifically for Hopper, about 2-3% faster
+    _fa3 = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+else:
+    # Flash Attention 3, source wheel with 3090 support
+    _fa3 = get_kernel('kernels-community/flash-attn3').flash_attn_interface
 
 def fa3_attn_func(q, k, v, causal, window_size):
-    global _fa3
-
-    # Lazy load kernel - can't load on import, since on multi-GPU ddp didn't run yet
-    if _fa3 is None:
-        from kernels import get_kernel
-        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
-            # Specifically for Hopper, about 2-3% faster
-            _fa3 = get_kernel('varunneal/flash-attention-3').flash_attn_interface
-        else:
-            # Flash Attention 3, source wheel with 3090 support
-            _fa3 = get_kernel('kernels-community/flash-attn3').flash_attn_interface
-
     # q, k, v are [B,T,nh,hs] dims
     return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
 
