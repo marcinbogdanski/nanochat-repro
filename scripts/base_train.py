@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--eval-tokens', type=int, default=80*524288, help='Number of tokens to use for evaluation.')
     parser.add_argument('--core-metric-every', type=int, default=2000, help='Evaluate core metric every N steps (-1 to disable).')
     parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation (-1 to use all).')
-    parser.add_argument('--sample-every', type=int, default=1000, help='Generate samples every N steps (-1 to disable).')
+    parser.add_argument('--sample-every', type=int, default=2000, help='Generate samples every N steps (-1 to disable).')
     parser.add_argument('--save-every', type=int, default=-1, help='Save model every N steps (-1 to disable).')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
