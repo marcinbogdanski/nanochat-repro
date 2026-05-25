@@ -47,7 +47,7 @@ def wandb_init(run_name, user_config, ddp_master):
 
     # WandB Init
     if run_name is not None and ddp_master:
-        wandb_logger = wandb.init(project="nanochat", name=run_name, config=user_config)
+        wandb_logger = wandb.init(project="nanochat", name=run_name, config=user_config, dir=get_base_path())
     else:
         wandb_logger = WandBDummy()
     return wandb_logger

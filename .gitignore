@@ -6,7 +6,4 @@ __pycache__/
 .venv/
 
 # Other
-data/
-wandb/
-runs/
 
