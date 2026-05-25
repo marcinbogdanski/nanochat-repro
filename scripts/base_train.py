@@ -28,7 +28,7 @@ def main():
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
-    parser.add_argument('--fp8', action='store_true', help="Enable FP8 training, eval stays in compute dtype.")
+    parser.add_argument('--fp8', type=str, default='auto', choices=['auto', 'true', 'false'], help="Enable FP8 training, eval is always in compute dtype.")
     # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
@@ -70,6 +70,7 @@ def main():
    
     # Compute setup and helpers
     device, ddp_master, ddp_world_size = ddp_init()
+    enable_fp8 = (args.fp8 == "true" or (args.fp8 == "auto" and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9))
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
@@ -82,7 +83,9 @@ def main():
     warnings = []
     if args.no_fa3:
         warnings.append("FA3 disabled, which may reduce training speed. Only set this flag if you need reproducibility.")
-    if args.fp8 and args.compute_dtype == 'fp32':
+    if not enable_fp8:
+        warnings.append("FP8 training disabled, which may reduce training speed. To enable, set --fp8=true or --fp8=auto on supported hardware.")
+    if enable_fp8 and args.compute_dtype == 'fp32':
         warnings.append("Using FP8 training with FP32 compute. This is a valid but may lead to worse performance.")
     if args.log_metrics:
         warnings.append("Detailed tensor metrics logging is enabled, which may slow down training.")
@@ -145,7 +148,7 @@ def main():
                 model_config,
                 compute_dtype=compute_dtype,
                 enable_fa3=not args.no_fa3,
-                fp8_training=args.fp8,
+                fp8_training=enable_fp8,
                 enable_metrics=args.log_metrics,
             )
         return model_meta
@@ -165,7 +168,7 @@ def main():
     # Compile
     orig_model = model
     if not args.deterministic:
-        model = torch.compile(model)
+        model = torch.compile(model, dynamic=False)
 
     # (1) Scaling laws / transfer recipe
     # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
