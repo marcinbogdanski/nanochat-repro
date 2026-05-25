@@ -1,12 +1,21 @@
 import torch
 import torch.nn.functional as F
 
-# Flash Attention 3, source wheel with 3090 support
-from kernels import get_kernel
-_fa3 = get_kernel('kernels-community/flash-attn3').flash_attn_interface
-
+_fa3 = None
 
 def fa3_attn_func(q, k, v, causal, window_size):
+    global _fa3
+
+    # Lazy load kernel - can't load on import, since on multi-GPU ddp didn't run yet
+    if _fa3 is None:
+        from kernels import get_kernel
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
+            # Specifically for Hopper, about 2-3% faster
+            _fa3 = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+        else:
+            # Flash Attention 3, source wheel with 3090 support
+            _fa3 = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+
     # q, k, v are [B,T,nh,hs] dims
     return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
 
