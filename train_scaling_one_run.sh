@@ -13,7 +13,7 @@ if [ -d "$RUN_DIR" ]; then
 fi
 
 # Multi GPU
-OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=4 -m scripts.base_train \
+OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train \
   -- --depth="$MODEL_DEPTH" --target-flops="$TARGET_FLOPS" --device-batch-size="$DEVICE_BATCH_SIZE" \
   --core-metric-every=99999999 --sample-every=-1 --save-every=-1 \
   --log-metrics --log-every=1 --log-wandb-every=10 \

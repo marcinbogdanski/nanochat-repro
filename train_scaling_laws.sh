@@ -27,7 +27,7 @@ set -euo pipefail
 # d20-d26: 16
 # d28+:     8
 
-FLOPS_BUDGETS=(1e18 3e18 6e18)
+FLOPS_BUDGETS=(6e18 3e18 1e18)
 DEPTHS=(10 12 14 16 18 20)
 
 for TARGET_FLOPS in "${FLOPS_BUDGETS[@]}"; do
