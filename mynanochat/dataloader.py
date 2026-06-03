@@ -92,7 +92,7 @@ class DataLoader:
         self.loaded_shard_group_idx = None
         self.loaded_shard_rg_docs = None
 
-    def _get_example_text(self):
+    def _get_example_text_batch(self, num):
         # Init the requested shard, not load yet
         if self.shard_idx != self.loaded_shard_idx:
             filepath = os.path.join(self.folderpath, f"shard_{self.shard_idx:05d}.parquet")
@@ -106,31 +106,36 @@ class DataLoader:
             rg = self.loaded_shard_pf.read_row_group(self.group_idx)
             self.loaded_shard_rg_docs = rg.column('text').to_pylist()
             self.loaded_shard_group_idx = self.group_idx
-        return self.loaded_shard_rg_docs[self.idx_in_group]
+        assert self.idx_in_group + num <= len(self.loaded_shard_rg_docs)
+        result = self.loaded_shard_rg_docs[self.idx_in_group:self.idx_in_group+num]
+        assert len(result) == num
+        return result
 
-    def _get_current_shard_num_row_groups(self):
-        return self.loaded_shard_num_rg
-
-    def _step_cursor(self):
-        self.idx_in_group += 1
+    def _step_cursor(self, num):
+        assert self.group_size % num == 0  # otherwise we need to support iterating multiple row groups
+        self.idx_in_group += num
         if self.idx_in_group >= self.group_size:
             self.idx_in_group = 0
             self.group_idx += self.world_size
-            if self.group_idx >= self._get_current_shard_num_row_groups():
+            if self.group_idx >= self.loaded_shard_num_rg:
                 self.group_idx = self.rank
                 self.shard_idx += 1
                 if self.shard_idx > self.last_shard:
                     self.shard_idx = self.first_shard
 
-    def _get_next_document(self):
-        prompt = self._get_example_text()        
-        self._step_cursor()
-        return [self.bos_token] + self.tokenizer.encode_ordinary(prompt)        
-    
+    def _get_next_document_batch(self, num):
+        doc_list = self._get_example_text_batch(num=num)
+        self._step_cursor(num=num)
+        doc_tokens_list_of_lists = self.tokenizer.encode_ordinary_batch(doc_list, num_threads=4)
+        for doc_tokens in doc_tokens_list_of_lists:
+            doc_tokens.insert(0, self.bos_token)
+        return doc_tokens_list_of_lists
+
     def _fill_doc_buffer(self):
         while len(self.document_buffer) < 1000:
-            for _ in range(128):  # match Nanochat behavior
-                doc_tokens = self._get_next_document()
+            tok_batch_size = 128
+            doc_tokens_list_of_lists = self._get_next_document_batch(num=tok_batch_size)
+            for doc_tokens in doc_tokens_list_of_lists:
                 self.document_buffer.append(doc_tokens)
 
     def get_batch_bos(self):
