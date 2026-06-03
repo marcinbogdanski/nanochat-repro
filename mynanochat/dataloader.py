@@ -43,7 +43,6 @@ class DataLoader:
         # Tokenizer
         self.tokenizer = tokenizer
         self.bos_token = self.tokenizer.encode_single_token('<|bos|>')
-        self.token_buffer = []
         self.document_buffer = []
 
         # Distributed
@@ -67,7 +66,6 @@ class DataLoader:
         self.shard_idx = self.first_shard
         self.group_idx = self.rank
         self.idx_in_group = 0
-        self.token_buffer = []
         self.document_buffer = []
         self.loaded_shard_idx = None
         self.loaded_shard_num_rg = None
@@ -80,7 +78,6 @@ class DataLoader:
             "shard_idx": self.shard_idx,
             "group_idx": self.group_idx,
             "idx_in_group": self.idx_in_group,
-            "token_buffer": self.token_buffer,
             "document_buffer": self.document_buffer,
         }
 
@@ -88,7 +85,6 @@ class DataLoader:
         self.shard_idx = state["shard_idx"]
         self.group_idx = state["group_idx"]
         self.idx_in_group = state["idx_in_group"]
-        self.token_buffer = state["token_buffer"]
         self.document_buffer = state["document_buffer"]
         self.loaded_shard_idx = None
         self.loaded_shard_num_rg = None
@@ -130,20 +126,6 @@ class DataLoader:
         prompt = self._get_example_text()        
         self._step_cursor()
         return [self.bos_token] + self.tokenizer.encode_ordinary(prompt)        
-
-    def get_batch(self):
-        need_tokens = self.batch_size * self.block_size + 1
-        while len(self.token_buffer) < need_tokens:
-            self.token_buffer += self._get_next_document()
-        # Consume tokens
-        tokens = self.token_buffer[:need_tokens]
-        self.token_buffer = self.token_buffer[self.batch_size * self.block_size:]
-
-        x = torch.tensor([tokens[:-1]], dtype=torch.long)  # B=1,T
-        y = torch.tensor([tokens[1:]], dtype=torch.long)   # B=1,T
-        x = x.view(self.batch_size, self.block_size)
-        y = y.view(self.batch_size, self.block_size)
-        return x, y
     
     def _fill_doc_buffer(self):
         while len(self.document_buffer) < 1000:
