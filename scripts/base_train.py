@@ -341,6 +341,7 @@ def main():
     # Training Loop
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
+    x, y = train_loader.get_batch_bos()
     while True:
         total_flops = step * total_batch_size * flops_per_token
 
@@ -391,13 +392,13 @@ def main():
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
-            x, y = train_loader.get_batch_bos()
             _, loss, metrics = model(x, y, return_logits=False)
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
+            x, y = train_loader.get_batch_bos()
 
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
