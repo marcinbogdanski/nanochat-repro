@@ -57,7 +57,10 @@ class DataLoader:
         self.idx_in_group = 0
 
         self.loaded_shard_idx = None
-        self.loaded_shard_row_groups = None   # list of list or str
+        self.loaded_shard_num_rg = None
+        self.loaded_shard_pf = None        # cached pq.ParquetFile(filepath)
+        self.loaded_shard_group_idx = None
+        self.loaded_shard_rg_docs = None   # current row group documents, list or str
 
     def reset(self):
         """Called to reset eval dataloader."""
@@ -66,6 +69,11 @@ class DataLoader:
         self.idx_in_group = 0
         self.token_buffer = []
         self.document_buffer = []
+        self.loaded_shard_idx = None
+        self.loaded_shard_num_rg = None
+        self.loaded_shard_pf = None
+        self.loaded_shard_group_idx = None
+        self.loaded_shard_rg_docs = None
     
     def state_dict(self):
         return {
@@ -83,24 +91,29 @@ class DataLoader:
         self.token_buffer = state["token_buffer"]
         self.document_buffer = state["document_buffer"]
         self.loaded_shard_idx = None
-        self.loaded_shard_row_groups = None
+        self.loaded_shard_num_rg = None
+        self.loaded_shard_pf = None
+        self.loaded_shard_group_idx = None
+        self.loaded_shard_rg_docs = None
 
     def _get_example_text(self):
-        # Lead the requested shard
-        # Note we load full shard, even though in ddp we skip a lot, potentially can be improved
+        # Init the requested shard, not load yet
         if self.shard_idx != self.loaded_shard_idx:
             filepath = os.path.join(self.folderpath, f"shard_{self.shard_idx:05d}.parquet")
-            pf = pq.ParquetFile(filepath)
-            self.loaded_shard_row_groups = []
-            for rg_index in range(pf.num_row_groups):
-                rg = pf.read_row_group(rg_index)
-                documents = rg.column('text').to_pylist()
-                self.loaded_shard_row_groups.append(documents)  # list of lists or str
+            self.loaded_shard_pf = pq.ParquetFile(filepath)
             self.loaded_shard_idx = self.shard_idx
-        return self.loaded_shard_row_groups[self.group_idx][self.idx_in_group]
+            self.loaded_shard_num_rg = self.loaded_shard_pf.num_row_groups
+            self.loaded_shard_group_idx = None
+            self.loaded_shard_rg_docs = None
+        # Load the required row group
+        if self.group_idx != self.loaded_shard_group_idx:
+            rg = self.loaded_shard_pf.read_row_group(self.group_idx)
+            self.loaded_shard_rg_docs = rg.column('text').to_pylist()
+            self.loaded_shard_group_idx = self.group_idx
+        return self.loaded_shard_rg_docs[self.idx_in_group]
 
     def _get_current_shard_num_row_groups(self):
-        return len(self.loaded_shard_row_groups)
+        return self.loaded_shard_num_rg
 
     def _step_cursor(self):
         self.idx_in_group += 1
