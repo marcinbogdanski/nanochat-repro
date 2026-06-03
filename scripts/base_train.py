@@ -335,13 +335,14 @@ def main():
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
         print0(f"Resumed checkpoint from step {step}")
+        x, y = train_loader.get_last_batch_without_advancing()
     else:
         step, total_time, smooth_tloss = 0, 0.0, 0.0
+        x, y = train_loader.get_batch_bos()
 
     # Training Loop
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
-    x, y = train_loader.get_batch_bos()
     while True:
         total_flops = step * total_batch_size * flops_per_token
 

@@ -88,11 +88,19 @@ class DataLoader:
         self.loaded_shard_rg_docs = None
     
     def state_dict(self):
+        # Currently train loop operates as:
+        # while True:
+        #     save_checkpoint(dataloader)  <- dataloader advanced cursor, but x,y not consumed
+        #     model(x, y)
+        #     x, y = dataloader.get_batch_bos()
+        # We save last x,y so they can be consumed on resume, otherwise they would be skipped
         return {
             "shard_idx": self.shard_idx,
             "group_idx": self.group_idx,
             "idx_in_group": self.idx_in_group,
             "document_buffer": self.document_buffer,
+            "last_x": self.cpu_x,
+            "last_y": self.cpu_y,
         }
 
     def load_state_dict(self, state):
@@ -105,6 +113,10 @@ class DataLoader:
         self.loaded_shard_pf = None
         self.loaded_shard_group_idx = None
         self.loaded_shard_rg_docs = None
+        # Restore buffer on gpu
+        self.cpu_x.copy_(state["last_x"])
+        self.cpu_y.copy_(state["last_y"])
+        self.gpu_buffer.copy_(self.cpu_buffer, non_blocking=self.use_cuda)
 
     def _get_example_text_batch(self, num):
         # Init the requested shard, not load yet
@@ -151,6 +163,10 @@ class DataLoader:
             doc_tokens_list_of_lists = self._get_next_document_batch(num=tok_batch_size)
             for doc_tokens in doc_tokens_list_of_lists:
                 self.document_buffer.append(doc_tokens)
+
+    def get_last_batch_without_advancing(self):
+        """Useful after state load to consume last data batch"""
+        return self.result_x, self.result_y
 
     def get_batch_bos(self):
         need_row_tokens = self.block_size + 1
