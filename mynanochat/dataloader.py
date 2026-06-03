@@ -5,7 +5,8 @@ from mynanochat.common import get_base_path
 BASE_DIR = get_base_path()
 
 class DataLoader:
-    def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer):
+    def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer, device):
+        assert device == 'cpu' or device.startswith('cuda')
 
         # Dataset path logic
         if dataset_or_folderpath == "fineweb":
@@ -55,11 +56,24 @@ class DataLoader:
         self.group_idx = self.rank
         self.idx_in_group = 0
 
+        # Cached Shards
         self.loaded_shard_idx = None
         self.loaded_shard_num_rg = None
         self.loaded_shard_pf = None        # cached pq.ParquetFile(filepath)
         self.loaded_shard_group_idx = None
         self.loaded_shard_rg_docs = None   # current row group documents, list or str
+
+        # Tensor Buffers
+        self.use_cuda = device.startswith("cuda")
+        B, T = batch_size, block_size
+        # T+1 because targets look "one beyond" the sequence length
+        self.row_buffer = torch.empty((B, T+1), dtype=torch.long)  # Construct rows w/o massive python lists
+        self.cpu_buffer = torch.empty((2*B*T), dtype=torch.long, pin_memory=self.use_cuda)  # cpu-side contiguous buffer
+        self.cpu_x = self.cpu_buffer[:B*T].view(B, T)  # first half of cpu_buffer is inputs
+        self.cpu_y = self.cpu_buffer[B*T:].view(B, T)  # second half is targets
+        self.gpu_buffer = torch.empty((2*B*T), dtype=torch.long, device=device)
+        self.result_x = self.gpu_buffer[:B*T].view(B, T)
+        self.result_y = self.gpu_buffer[B*T:].view(B, T)
 
     def reset(self):
         """Called to reset eval dataloader."""
@@ -141,15 +155,14 @@ class DataLoader:
     def get_batch_bos(self):
         need_row_tokens = self.block_size + 1
 
-        batch_rows = []
         for bi in range(self.batch_size):
-            row_tokens = []
-            while len(row_tokens) < need_row_tokens:
+            row_pos = 0
+            while row_pos < need_row_tokens:
                 self._fill_doc_buffer()
                 # Find longest doc that fits
                 longest_doc_idx = None
                 longest_doc_len = 0
-                num_tokens_to_fill = need_row_tokens - len(row_tokens)
+                num_tokens_to_fill = need_row_tokens - row_pos
                 for di in range(len(self.document_buffer)):
                     candidate_doc = self.document_buffer[di]
                     if len(candidate_doc) <= num_tokens_to_fill and len(candidate_doc) > longest_doc_len:
@@ -158,17 +171,21 @@ class DataLoader:
                 # Extend row
                 if longest_doc_idx is not None:
                     longest_doc_that_fits = self.document_buffer.pop(longest_doc_idx)
-                    row_tokens.extend(longest_doc_that_fits)
+                    doc_length = len(longest_doc_that_fits)
+                    self.row_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_doc_that_fits, dtype=torch.long)
+                    row_pos += len(longest_doc_that_fits)
                 else:
                     shortest_idx = min(range(len(self.document_buffer)), key=lambda i: len(self.document_buffer[i]))
                     doc_to_trim = self.document_buffer.pop(shortest_idx)
-                    row_tokens.extend(doc_to_trim[:num_tokens_to_fill])
-            batch_rows.append(row_tokens)
+                    trimmed_doc = doc_to_trim[:num_tokens_to_fill]
+                    self.row_buffer[bi, row_pos:row_pos+num_tokens_to_fill] = torch.tensor(trimmed_doc, dtype=torch.long)
+                    row_pos += num_tokens_to_fill
 
-        batch_tensor = torch.tensor(batch_rows, dtype=torch.long)
-        x = batch_tensor[:, :-1]
-        y = batch_tensor[:, 1:]
-
-        return x, y
+        # Copy to GPU
+        self.cpu_x.copy_(self.row_buffer[:,:-1])  # copy to first half of cpu_buffer through a view
+        self.cpu_y.copy_(self.row_buffer[:,1:])
+        self.gpu_buffer.copy_(self.cpu_buffer, non_blocking=self.use_cuda)
+        
+        return self.result_x, self.result_y
 
 

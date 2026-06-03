@@ -309,6 +309,7 @@ def main():
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
+        device=device,
     )
     print0(f"Train dataloader initialized with dataset {args.dataset} shards {train_loader.first_shard} - {train_loader.last_shard}")
 
@@ -322,6 +323,7 @@ def main():
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
+        device=device,
     )
     print0(f"Eval dataloader initialized with dataset {args.dataset} shards {eval_loader.first_shard} - {eval_loader.last_shard}")
     
@@ -390,8 +392,6 @@ def main():
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
             x, y = train_loader.get_batch_bos()
-            x = x.to(device)
-            y = y.to(device)
             _, loss, metrics = model(x, y, return_logits=False)
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
