@@ -1,5 +1,6 @@
 import os
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
+import gc
 import json
 import time
 import math
@@ -341,6 +342,7 @@ def main():
         x, y = train_loader.get_batch_bos()
 
     # Training Loop
+    do_gc = True
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
     while True:
@@ -480,6 +482,15 @@ def main():
         
         # Advance Step
         step += 1
+
+        # Custom GC, see Nanochat
+        if do_gc:
+            do_gc = False  # do once
+            gc.collect()  # clear setup related leftovers
+            gc.freeze()  # exclude current objects from gc
+            gc.disable()  # completely disable auto gc
+        elif step % 5000 == 0:
+            gc.collect()  # manually collect from time to time
 
     file_logger.log('run_summary', step=None, data={
         'user_config': user_config,
