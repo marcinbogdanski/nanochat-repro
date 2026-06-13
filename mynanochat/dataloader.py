@@ -5,7 +5,8 @@ from mynanochat.common import get_base_path
 BASE_DIR = get_base_path()
 
 class DataLoader:
-    def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer):
+    def __init__(self, dataset_or_folderpath, split, batch_size, block_size, tokenizer, device):
+        assert device == 'cpu' or device.startswith('cuda')
 
         # Dataset path logic
         if dataset_or_folderpath == "fineweb":
@@ -43,7 +44,6 @@ class DataLoader:
         # Tokenizer
         self.tokenizer = tokenizer
         self.bos_token = self.tokenizer.encode_single_token('<|bos|>')
-        self.token_buffer = []
         self.document_buffer = []
 
         # Distributed
@@ -56,100 +56,129 @@ class DataLoader:
         self.group_idx = self.rank
         self.idx_in_group = 0
 
+        # Cached Shards
         self.loaded_shard_idx = None
-        self.loaded_shard_row_groups = None   # list of list or str
+        self.loaded_shard_num_rg = None
+        self.loaded_shard_pf = None        # cached pq.ParquetFile(filepath)
+        self.loaded_shard_group_idx = None
+        self.loaded_shard_rg_docs = None   # current row group documents, list or str
+
+        # Tensor Buffers
+        self.use_cuda = device.startswith("cuda")
+        B, T = batch_size, block_size
+        # T+1 because targets look "one beyond" the sequence length
+        self.row_buffer = torch.empty((B, T+1), dtype=torch.long)  # Construct rows w/o massive python lists
+        self.cpu_buffer = torch.empty((2*B*T), dtype=torch.long, pin_memory=self.use_cuda)  # cpu-side contiguous buffer
+        self.cpu_x = self.cpu_buffer[:B*T].view(B, T)  # first half of cpu_buffer is inputs
+        self.cpu_y = self.cpu_buffer[B*T:].view(B, T)  # second half is targets
+        self.gpu_buffer = torch.empty((2*B*T), dtype=torch.long, device=device)
+        self.result_x = self.gpu_buffer[:B*T].view(B, T)
+        self.result_y = self.gpu_buffer[B*T:].view(B, T)
 
     def reset(self):
         """Called to reset eval dataloader."""
         self.shard_idx = self.first_shard
         self.group_idx = self.rank
         self.idx_in_group = 0
-        self.token_buffer = []
         self.document_buffer = []
+        self.loaded_shard_idx = None
+        self.loaded_shard_num_rg = None
+        self.loaded_shard_pf = None
+        self.loaded_shard_group_idx = None
+        self.loaded_shard_rg_docs = None
     
     def state_dict(self):
+        # Currently train loop operates as:
+        # while True:
+        #     save_checkpoint(dataloader)  <- dataloader advanced cursor, but x,y not consumed
+        #     model(x, y)
+        #     x, y = dataloader.get_batch_bos()
+        # We save last x,y so they can be consumed on resume, otherwise they would be skipped
         return {
             "shard_idx": self.shard_idx,
             "group_idx": self.group_idx,
             "idx_in_group": self.idx_in_group,
-            "token_buffer": self.token_buffer,
             "document_buffer": self.document_buffer,
+            "last_x": self.cpu_x,
+            "last_y": self.cpu_y,
         }
 
     def load_state_dict(self, state):
         self.shard_idx = state["shard_idx"]
         self.group_idx = state["group_idx"]
         self.idx_in_group = state["idx_in_group"]
-        self.token_buffer = state["token_buffer"]
         self.document_buffer = state["document_buffer"]
         self.loaded_shard_idx = None
-        self.loaded_shard_row_groups = None
+        self.loaded_shard_num_rg = None
+        self.loaded_shard_pf = None
+        self.loaded_shard_group_idx = None
+        self.loaded_shard_rg_docs = None
+        # Restore buffer on gpu
+        self.cpu_x.copy_(state["last_x"])
+        self.cpu_y.copy_(state["last_y"])
+        self.gpu_buffer.copy_(self.cpu_buffer, non_blocking=self.use_cuda)
 
-    def _get_example_text(self):
-        # Lead the requested shard
-        # Note we load full shard, even though in ddp we skip a lot, potentially can be improved
+    def _get_example_text_batch(self, num):
+        # Init the requested shard, not load yet
         if self.shard_idx != self.loaded_shard_idx:
             filepath = os.path.join(self.folderpath, f"shard_{self.shard_idx:05d}.parquet")
-            pf = pq.ParquetFile(filepath)
-            self.loaded_shard_row_groups = []
-            for rg_index in range(pf.num_row_groups):
-                rg = pf.read_row_group(rg_index)
-                documents = rg.column('text').to_pylist()
-                self.loaded_shard_row_groups.append(documents)  # list of lists or str
+            self.loaded_shard_pf = pq.ParquetFile(filepath)
             self.loaded_shard_idx = self.shard_idx
-        return self.loaded_shard_row_groups[self.group_idx][self.idx_in_group]
+            self.loaded_shard_num_rg = self.loaded_shard_pf.num_row_groups
+            self.loaded_shard_group_idx = None
+            self.loaded_shard_rg_docs = None
+        # Load the required row group
+        if self.group_idx != self.loaded_shard_group_idx:
+            rg = self.loaded_shard_pf.read_row_group(self.group_idx)
+            self.loaded_shard_rg_docs = rg.column('text').to_pylist()
+            self.loaded_shard_group_idx = self.group_idx
+        assert self.idx_in_group + num <= len(self.loaded_shard_rg_docs)
+        result = self.loaded_shard_rg_docs[self.idx_in_group:self.idx_in_group+num]
+        assert len(result) == num
+        return result
 
-    def _get_current_shard_num_row_groups(self):
-        return len(self.loaded_shard_row_groups)
-
-    def _step_cursor(self):
-        self.idx_in_group += 1
+    def _step_cursor(self, num):
+        assert self.group_size % num == 0  # otherwise we need to support iterating multiple row groups
+        self.idx_in_group += num
         if self.idx_in_group >= self.group_size:
             self.idx_in_group = 0
             self.group_idx += self.world_size
-            if self.group_idx >= self._get_current_shard_num_row_groups():
+            if self.group_idx >= self.loaded_shard_num_rg:
                 self.group_idx = self.rank
                 self.shard_idx += 1
                 if self.shard_idx > self.last_shard:
                     self.shard_idx = self.first_shard
 
-    def _get_next_document(self):
-        prompt = self._get_example_text()        
-        self._step_cursor()
-        return [self.bos_token] + self.tokenizer.encode_ordinary(prompt)        
+    def _get_next_document_batch(self, num):
+        doc_list = self._get_example_text_batch(num=num)
+        self._step_cursor(num=num)
+        doc_tokens_list_of_lists = self.tokenizer.encode_ordinary_batch(doc_list, num_threads=4)
+        for doc_tokens in doc_tokens_list_of_lists:
+            doc_tokens.insert(0, self.bos_token)
+        return doc_tokens_list_of_lists
 
-    def get_batch(self):
-        need_tokens = self.batch_size * self.block_size + 1
-        while len(self.token_buffer) < need_tokens:
-            self.token_buffer += self._get_next_document()
-        # Consume tokens
-        tokens = self.token_buffer[:need_tokens]
-        self.token_buffer = self.token_buffer[self.batch_size * self.block_size:]
-
-        x = torch.tensor([tokens[:-1]], dtype=torch.long)  # B=1,T
-        y = torch.tensor([tokens[1:]], dtype=torch.long)   # B=1,T
-        x = x.view(self.batch_size, self.block_size)
-        y = y.view(self.batch_size, self.block_size)
-        return x, y
-    
     def _fill_doc_buffer(self):
         while len(self.document_buffer) < 1000:
-            for _ in range(128):  # match Nanochat behavior
-                doc_tokens = self._get_next_document()
+            tok_batch_size = 128
+            doc_tokens_list_of_lists = self._get_next_document_batch(num=tok_batch_size)
+            for doc_tokens in doc_tokens_list_of_lists:
                 self.document_buffer.append(doc_tokens)
+
+    def get_last_batch_without_advancing(self):
+        """Useful after state load to consume last data batch"""
+        return self.result_x, self.result_y
 
     def get_batch_bos(self):
         need_row_tokens = self.block_size + 1
 
-        batch_rows = []
         for bi in range(self.batch_size):
-            row_tokens = []
-            while len(row_tokens) < need_row_tokens:
+            row_pos = 0
+            while row_pos < need_row_tokens:
                 self._fill_doc_buffer()
                 # Find longest doc that fits
                 longest_doc_idx = None
                 longest_doc_len = 0
-                num_tokens_to_fill = need_row_tokens - len(row_tokens)
+                num_tokens_to_fill = need_row_tokens - row_pos
                 for di in range(len(self.document_buffer)):
                     candidate_doc = self.document_buffer[di]
                     if len(candidate_doc) <= num_tokens_to_fill and len(candidate_doc) > longest_doc_len:
@@ -158,17 +187,21 @@ class DataLoader:
                 # Extend row
                 if longest_doc_idx is not None:
                     longest_doc_that_fits = self.document_buffer.pop(longest_doc_idx)
-                    row_tokens.extend(longest_doc_that_fits)
+                    doc_length = len(longest_doc_that_fits)
+                    self.row_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_doc_that_fits, dtype=torch.long)
+                    row_pos += len(longest_doc_that_fits)
                 else:
                     shortest_idx = min(range(len(self.document_buffer)), key=lambda i: len(self.document_buffer[i]))
                     doc_to_trim = self.document_buffer.pop(shortest_idx)
-                    row_tokens.extend(doc_to_trim[:num_tokens_to_fill])
-            batch_rows.append(row_tokens)
+                    trimmed_doc = doc_to_trim[:num_tokens_to_fill]
+                    self.row_buffer[bi, row_pos:row_pos+num_tokens_to_fill] = torch.tensor(trimmed_doc, dtype=torch.long)
+                    row_pos += num_tokens_to_fill
 
-        batch_tensor = torch.tensor(batch_rows, dtype=torch.long)
-        x = batch_tensor[:, :-1]
-        y = batch_tensor[:, 1:]
-
-        return x, y
+        # Copy to GPU
+        self.cpu_x.copy_(self.row_buffer[:,:-1])  # copy to first half of cpu_buffer through a view
+        self.cpu_y.copy_(self.row_buffer[:,1:])
+        self.gpu_buffer.copy_(self.cpu_buffer, non_blocking=self.use_cuda)
+        
+        return self.result_x, self.result_y
 
 

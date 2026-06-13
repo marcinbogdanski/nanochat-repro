@@ -1,5 +1,6 @@
 import os
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
+import gc
 import json
 import time
 import math
@@ -309,6 +310,7 @@ def main():
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
+        device=device,
     )
     print0(f"Train dataloader initialized with dataset {args.dataset} shards {train_loader.first_shard} - {train_loader.last_shard}")
 
@@ -322,6 +324,7 @@ def main():
         batch_size=micro_batch,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
+        device=device,
     )
     print0(f"Eval dataloader initialized with dataset {args.dataset} shards {eval_loader.first_shard} - {eval_loader.last_shard}")
     
@@ -333,10 +336,13 @@ def main():
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
         print0(f"Resumed checkpoint from step {step}")
+        x, y = train_loader.get_last_batch_without_advancing()
     else:
         step, total_time, smooth_tloss = 0, 0.0, 0.0
+        x, y = train_loader.get_batch_bos()
 
     # Training Loop
+    do_gc = True
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
     while True:
@@ -389,15 +395,13 @@ def main():
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
-            x, y = train_loader.get_batch_bos()
-            x = x.to(device)
-            y = y.to(device)
             _, loss, metrics = model(x, y, return_logits=False)
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
+            x, y = train_loader.get_batch_bos()
 
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
@@ -478,6 +482,15 @@ def main():
         
         # Advance Step
         step += 1
+
+        # Custom GC, see Nanochat
+        if do_gc:
+            do_gc = False  # do once
+            gc.collect()  # clear setup related leftovers
+            gc.freeze()  # exclude current objects from gc
+            gc.disable()  # completely disable auto gc
+        elif step % 5000 == 0:
+            gc.collect()  # manually collect from time to time
 
     file_logger.log('run_summary', step=None, data={
         'user_config': user_config,
