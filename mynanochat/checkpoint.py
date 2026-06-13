@@ -13,7 +13,6 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
         metadata = {
             'step': step,
             'total_time': loop_vars['total_time'],
-            'smooth_dt': loop_vars['smooth_dt'],
             'smooth_tloss': loop_vars['smooth_tloss'],
             'model_config': model.config.to_dict(),
             'user_config': user_config,
@@ -58,7 +57,6 @@ def load_checkpoint(checkpoints_path, model, optimizers, dataloader, device, ste
     loop_vars = {
         "step": metadata["step"],
         "total_time": metadata["total_time"],
-        "smooth_dt": metadata["smooth_dt"],
         "smooth_tloss": metadata["smooth_tloss"],
     }
 

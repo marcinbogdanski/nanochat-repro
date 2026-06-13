@@ -442,6 +442,23 @@ class GPTModel(nn.Module):
         return optimizers
 
 
+    def estimate_flops_per_token(self):
+        """Estimate FLOPs per token, for the forward and backward pass."""
+        # Param Matmuls
+        # each matmul is: 2 flops forward per param (multiply and add), 2 matmuls per backward (4 flops), total 2+4=6
+        num_params = self.number_scaling_params()
+        matmul_flops = 6 * (num_params['transformer_active'] + num_params['lm_head'])
+        # Attention FLOPs
+        # Two extra fwd matmuls in attention (Q @ K.T and attn @ V) - 2 * 6 = 12
+        attn_flops = 0
+        head_size = self.config.n_embd // self.config.n_head
+        for layer_idx in range(self.config.n_layer):
+            window_size, _ = self.window_sizes[layer_idx]  # (left, right), we only use left for causal attention
+            effective_seq_len = min(window_size, self.config.block_size)
+            attn_flops += 12 * self.config.n_head * effective_seq_len * head_size
+        return matmul_flops + attn_flops
+
+
     def number_scaling_params(self):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
@@ -454,15 +471,15 @@ class GPTModel(nn.Module):
             block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
         )
         result = {
-            'wte': wte,
+            'wte': wte,                            # word token embedding
             'value_embeds': value_embeds,
             'lm_head': lm_head,
-            'transformer_matrices': transformer_matrices,
-            'active_transformer_matrices': transformer_matrices - moe_inactive,
+            'transformer_all': transformer_matrices,
+            'transformer_active': transformer_matrices - moe_inactive,
+            'transformer_inactive': moe_inactive,
             'scalars': scalars,
-            'moe_inactive': moe_inactive,
             'total': total,
-            'active_total': total - moe_inactive,
+            'total_active': total - moe_inactive,
         }
         return result
 

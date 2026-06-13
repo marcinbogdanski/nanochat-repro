@@ -237,7 +237,7 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
     return accuracy
 
 @torch.inference_mode()
-def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, bundle_folder=None):
+def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=-1, bundle_folder=None):
 
     if bundle_folder is None:
         bundle_folder = os.path.join(BASE_DIR, "eval_bundle")
@@ -280,7 +280,7 @@ def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=None, b
             # Shuffle
             rng = random.Random(1337)
             rng.shuffle(data_list)
-            if max_examples_per_task is not None:
+            if max_examples_per_task > 0:
                 data_list = data_list[:max_examples_per_task]
             
             # Run evaluation
