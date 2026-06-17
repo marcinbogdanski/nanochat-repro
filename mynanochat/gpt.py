@@ -291,6 +291,14 @@ class GPTModel(nn.Module):
         """Collect metrics, flat list of (block, tensor_name, surface='grad', stat='sq_sum'/'num_el', value)
         
         We opt to iterate over known params explicitly, trying to iterate self.parameters() is messy. Just go through each param and collect metrics.
+
+        The main metrics we want to reconstruct from the data we collect are RMS of fwd activations, gradients and param updates.
+        Note that code below collects only sq_sum and num_el for the elements represented by this rank only. There is an additional
+        step required later in post processing to combine the metrics across the ranks to get the RMS across all elements.
+        This is possible because RMS is calculated as `sqrt(sum(sq(all_elements_across_all_ranks)) / num_el(all_elements_across_all_ranks))`
+        Which can be decomposed into `sqrt(sum_across_ranks(sum(sq(all_elements_on_this_rank))) / sum_across_ranks(num_el(all_elements_on_this_rank)))`
+        Since `sq_sum = sum(sq(all_elements_on_this_rank))` and `num_el = num_el(all_elements_on_this_rank)`, we can later sum the sq_sum and num_el
+        across ranks in post-processing to get the global RMS.
         """
         metrics = []  # flat list of (block, tensor_name, surface='grad', stat='sq_sum'/'num_el', value)
 
@@ -337,12 +345,10 @@ class GPTModel(nn.Module):
 
         # Gradient, params and update metrics        
         def extend_metrics(tensor, block, tensor_name):
-            sq_sum = 0.0 if tensor.grad is None else tensor.grad.detach().float().square().sum().item()
-            num_el = 0 if tensor.grad is None else tensor.grad.numel()
-            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'sq_sum', 'value': sq_sum})
-            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'num_el', 'value': num_el})
-            # opt_metrics has 3x keys: 'update_sq_sum', 'params_sq_sum', 'params_num_el'
+            # opt_metrics has 4x keys: 'grad_sq_sum', 'update_sq_sum', 'params_sq_sum', 'params_num_el'
             # currently all params are in some opt group, so no need to check if tensor is in opt_metrics
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['grad_sq_sum']})
+            metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'grad', 'stat': 'num_el', 'value': opt_metrics[tensor]['params_num_el']})
             metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['params_sq_sum']})
             metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'params', 'stat': 'num_el', 'value': opt_metrics[tensor]['params_num_el']})
             metrics.append({'block': block, 'tensor_name': tensor_name, 'surface': 'update', 'stat': 'sq_sum', 'value': opt_metrics[tensor]['update_sq_sum']})

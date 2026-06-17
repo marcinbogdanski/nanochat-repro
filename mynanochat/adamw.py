@@ -19,8 +19,9 @@ def fused_adamw_step(
     # sum(delta_W**2) and sum(W**2) for the whole block, before we can reduce and divide.
     # This is why we return per-tensor sums here. Then later on, in GPT class,
     # we can aggregate them by block and calculate the final ratio.
-    update_sum_squares, params_sum_squares = None, None
+    grad_sum_squares, update_sum_squares, params_sum_squares = None, None, None
     if metrics:
+        grad_sum_squares = grad.float().square().sum()
         params_sum_squares = params.float().square().sum()
 
     # Weight Decay
@@ -53,7 +54,7 @@ def fused_adamw_step(
         final_update = -(optim_update + wd_update)
         update_sum_squares = final_update.float().square().sum()
 
-    return update_sum_squares, params_sum_squares
+    return grad_sum_squares, update_sum_squares, params_sum_squares
 
 
 class AdamW(torch.optim.Optimizer):
@@ -105,7 +106,7 @@ class AdamW(torch.optim.Optimizer):
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
-                update_sum_squares, params_sum_squares = fused_adamw_step(
+                grad_sum_squares, update_sum_squares, params_sum_squares = fused_adamw_step(
                     params=params,
                     grad=grad,
                     exp_avg=exp_avg,
@@ -119,9 +120,11 @@ class AdamW(torch.optim.Optimizer):
                     metrics=self.enable_metrics,
                 )
                 if self.enable_metrics:
+                    grad_sum_squares = grad_sum_squares.item() if grad_sum_squares is not None else None
                     update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
                     params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
                     self.debug_stats[params] = {
+                        'grad_sq_sum': grad_sum_squares,
                         'update_sq_sum': update_sum_squares,
                         'params_sq_sum': params_sum_squares,
                         'params_num_el': grad.numel(),
@@ -210,7 +213,7 @@ class DistAdamW(torch.optim.Optimizer):
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
-                update_sum_squares, params_sum_squares = fused_adamw_step(
+                grad_sum_squares, update_sum_squares, params_sum_squares = fused_adamw_step(
                     params=params_slice,
                     grad=grad_slice,
                     exp_avg=exp_avg,
@@ -224,15 +227,18 @@ class DistAdamW(torch.optim.Optimizer):
                     metrics=self.enable_metrics,
                 )
                 if self.enable_metrics:
+                    grad_sum_squares = grad_sum_squares.item() if grad_sum_squares is not None else None
                     update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
                     params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
                     params_num_el = grad_slice.numel()
                     if rank != 0 and group['is_small']:
                         # For small params, rank 0 has the full param and grad, zero other ranks to avoid duplication
+                        grad_sum_squares = 0.0
                         update_sum_squares = 0.0
                         params_sum_squares = 0.0
                         params_num_el = 0
                     self.debug_stats[params] = {
+                        'grad_sq_sum': grad_sum_squares,
                         'update_sq_sum': update_sum_squares,
                         'params_sq_sum': params_sum_squares,
                         'params_num_el': params_num_el,
