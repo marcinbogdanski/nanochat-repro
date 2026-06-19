@@ -1,7 +1,7 @@
 [project]
-name = "gpt-sketchpad"
+name = "nanochat-repro"
 version = "0.1.0"
-description = "Collection of Jupyter Notebooks building up to reproduce GPT-2 from scratch"
+description = "From-scratch reproduction of Andrej Karpathy nanochat"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

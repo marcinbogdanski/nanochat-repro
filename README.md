@@ -1,4 +1,4 @@
-# My NanoChat
+# Nanochat Repro
 
 Reproduction of Karpathy nanochat. All credit to the Great Sensei!
 
@@ -26,7 +26,7 @@ SSH to the instance, something like:
 
 ```bash
 # Copy local repo to remote
-rsync -av --delete --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' --exclude '.pytest_cache/' -e "ssh -i ~/.ssh/mb-vastai-cVxX -p 4932" /home/user/Projects/the-nanochat/my-nanochat/ root@20.119.175.17:/workspace/my-nanochat/
+rsync -av --delete --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' --exclude '.pytest_cache/' -e "ssh -i ~/.ssh/mb-vastai-cVxX -p 4932" /home/user/Projects/the-nanochat/nanochat-repro/ root@20.119.175.17:/workspace/nanochat-repro/
 # SSH to remote
 ssh -i ~/.ssh/mb-vastai-cVxX -p 4932 root@20.119.175.17 -L 8080:localhost:8080
 ```
@@ -48,7 +48,7 @@ Test runs
 # WandB Login
 uv run wandb login
 
-# my-nanochat
+# nanochat-repro
 uv run python -m scripts.base_train --depth=12 --device-batch-size=32 --log-wandb-every=1 --eval-every=-1 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --save-every=-1 --num-iterations=20 --run=h100m
 
 # nanochat

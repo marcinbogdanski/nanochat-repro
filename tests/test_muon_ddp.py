@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn.functional as F
-from mynanochat.muon import Muon, DistMuon
+from nanorepro.muon import Muon, DistMuon
 
 # NOTE: If you disable fp16 in newtonschulz, the diff is <1e-06
 # The current DistMuon matches NanoChat bit-wise on this test (yay!)

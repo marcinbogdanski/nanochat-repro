@@ -1,6 +1,6 @@
 import os
 import torch
-from mynanochat.adamw import AdamW, DistAdamW
+from nanorepro.adamw import AdamW, DistAdamW
 
 
 

@@ -2,7 +2,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mynanochat.moe import MoE
+from nanorepro.moe import MoE
 
 # Run like this
 # python -m dev.microbenchmark_moe

@@ -4,7 +4,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mynanochat.fp8 import LinearFP8
+from nanorepro.fp8 import LinearFP8
 from dev.fp32_temp import LinearFP32
 
 

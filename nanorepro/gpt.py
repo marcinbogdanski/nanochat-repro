@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mynanochat.fp8 import LinearFP8
-from mynanochat.moe import MoE
-from mynanochat.flash_attention import sdpa_attn_func, fa3_attn_func
-from mynanochat.adamw import AdamW, DistAdamW
-from mynanochat.muon import Muon, DistMuon
+from nanorepro.fp8 import LinearFP8
+from nanorepro.moe import MoE
+from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func
+from nanorepro.adamw import AdamW, DistAdamW
+from nanorepro.muon import Muon, DistMuon
 
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_n_experts, moe_top_k):

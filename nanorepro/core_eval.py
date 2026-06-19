@@ -11,7 +11,7 @@ import json
 import random
 import torch
 import jinja2
-from mynanochat.common import get_base_path
+from nanorepro.common import get_base_path
 BASE_DIR = get_base_path()
 
 

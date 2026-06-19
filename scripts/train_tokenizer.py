@@ -3,7 +3,7 @@ import rustbpe
 import tiktoken
 import pickle
 import torch
-from mynanochat.common import get_base_path
+from nanorepro.common import get_base_path
 import pyarrow.parquet as pq
 BASE_DIR = get_base_path()
 

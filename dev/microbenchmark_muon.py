@@ -6,8 +6,8 @@ else:
 import time
 import torch
 import torch.nn as nn
-from mynanochat.muon import Muon, DistMuon
-# from mynanochat.optim import MuonAdamW, DistMuonAdamW
+from nanorepro.muon import Muon, DistMuon
+# from nanorepro.optim import MuonAdamW, DistMuonAdamW
 
 # Run like this
 # python -m scripts.muon_optimizer

@@ -6,8 +6,8 @@ else:
 import time
 import torch
 import torch.nn as nn
-from mynanochat.adamw import AdamW, DistAdamW
-# from mynanochat.optim import MuonAdamW, DistMuonAdamW
+from nanorepro.adamw import AdamW, DistAdamW
+# from nanorepro.optim import MuonAdamW, DistMuonAdamW
 
 # Run like this
 # CUDA_VISIBLE_DEVICES=0 python -m scripts.adamw_optimizer
