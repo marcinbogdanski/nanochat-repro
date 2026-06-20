@@ -1,6 +1,6 @@
 # Nanochat Repro
 
-This repo is a from-scratch, by-hand reproduction of the pretraining stage of Andrej Karpathy [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from ground up. This repo includes training scripts, GPT model, distributed AdamW/Muon, FP8 and some other tricks to bring performance on par with reference nanochat. I also reproduced scaling laws experiments.
+This repo is a from-scratch, by-hand reproduction of the pretraining stage of Andrej Karpathy [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from the ground up. This repo includes training scripts, GPT model, distributed AdamW/Muon, FP8 and some other tricks to bring performance on par with reference nanochat. I also reproduced scaling laws experiments.
 
 Two extensions beyond original nanochat include:
 
@@ -10,7 +10,7 @@ Two extensions beyond original nanochat include:
 
 To more deeply internalize core concepts I wrote most of the code by hand. I used AI agents as educational resource and for code review, but not to edit code. In similar spirit I used `nanochat` for learning, and tried not to overuse it during coding.
 
-I would like to deeply thank to Andrej and everyone who supported him in building original `nanochat`. In my opinion, it is the best resource currently available for learning LLM training.
+I would like to deeply thank Andrej and everyone who supported him in building original `nanochat`. In my opinion, it is the best resource currently available for learning LLM training.
 
 # Run
 
