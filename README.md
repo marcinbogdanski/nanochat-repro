@@ -12,13 +12,15 @@ To more deeply internalize core concepts I wrote most of the code by hand. I use
 
 I would like to deeply thank Andrej and everyone who supported him in building original `nanochat`. In my opinion, it is the best resource currently available for learning LLM training.
 
-# Run
+## Quick Run
 
 ```bash
 uv sync
 uv run python -m scripts.download_dataset -n 10
 uv run python -m scripts.download_eval_bundle
 uv run python -m scripts.train_tokenizer
-uv run ./train_d12.sh
+uv run ./runs/train_d12.sh
 ```
+
+The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
 
