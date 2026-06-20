@@ -1,6 +1,16 @@
 # Nanochat Repro
 
-Reproduction of Karpathy nanochat. All credit to the Great Sensei!
+This repo is a from-scratch, by-hand reproduction of the pretraining stage of Andrej Karpathy [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from ground up. This repo includes training scripts, GPT model, distributed AdamW/Muon, FP8 and some other tricks to bring performance on par with reference nanochat. I also reproduced scaling laws experiments.
+
+Two extensions beyond original nanochat include:
+
+**Logging Metrics**: To explore deeper training dynamics, with `--log-metrics` training run will generate additional local logs with data required to later construct RMS/norms plots of post-block activations, gradients and param updates, etc.
+
+**Deterministic Validation**: Runs can be made bit-for-bit deterministic by using `--deterministic` flag. With small patch to Andrej nanochat, it is possible to match some of the runs bit-for-bit with Andrej nanochat. This was the main correctness test when developing this repo.
+
+To more deeply internalize core concepts I wrote most of the code by hand. I used AI agents as educational resource and for code review, but not to edit code. In similar spirit I used `nanochat` for learning, and tried not to overuse it during coding.
+
+I would like to deeply thank to Andrej and everyone who supported him in building original `nanochat`. In my opinion, it is the best resource currently available for learning LLM training.
 
 # Run
 
@@ -9,48 +19,6 @@ uv sync
 uv run python -m scripts.download_dataset -n 10
 uv run python -m scripts.download_eval_bundle
 uv run python -m scripts.train_tokenizer
-uv run ./test_speed_d12_solo.sh
+uv run ./train_d12.sh
 ```
 
-or
-
-```bash
-torchrun --standalone --nproc_per_node=2 -m scripts.base_train
-```
-
-## On VastAI
-
-If running on vast.ai:
-
-SSH to the instance, something like:
-
-```bash
-# Copy local repo to remote
-rsync -av --delete --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' --exclude '.pytest_cache/' -e "ssh -i ~/.ssh/mb-vastai-cVxX -p 4932" /home/user/Projects/the-nanochat/nanochat-repro/ root@20.119.175.17:/workspace/nanochat-repro/
-# SSH to remote
-ssh -i ~/.ssh/mb-vastai-cVxX -p 4932 root@20.119.175.17 -L 8080:localhost:8080
-```
-
-Setup instance
-
-```bash
-touch ~/.no_auto_tmux
-nano ~/.bashrc              # comment line that activates conda
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-```
-
-Repo setup here, uv sync, dataset download, train tokenizer
-
-Test runs
-
-```bash
-# WandB Login
-uv run wandb login
-
-# nanochat-repro
-uv run python -m scripts.base_train --depth=12 --device-batch-size=32 --log-wandb-every=1 --eval-every=-1 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --save-every=-1 --num-iterations=20 --run=h100m
-
-# nanochat
-uv run --extra gpu python -m scripts.base_train --depth=12 --device-batch-size=32 --eval-every=-1 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --save-every=-1 --num-iterations=20 --fp8 --run=h100k
-```
