@@ -1,6 +1,6 @@
 # Nanochat Repro
 
-This repo is a from-scratch, by-hand reproduction of the pretraining stage of Andrej Karpathy [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from the ground up. This repo includes training scripts, GPT model, distributed AdamW/Muon, FP8 and some other tricks to bring performance on par with reference nanochat. I also reproduced scaling laws experiments.
+This repo is a from-scratch, by-hand reproduction of the pretraining stage of Andrej Karpathy's [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from the ground up. This repo includes training scripts, GPT model, distributed AdamW/Muon, FP8 and some other tricks to bring performance on par with reference nanochat. I also reproduced scaling laws experiments.
 
 Two extensions beyond original nanochat include:
 
@@ -22,7 +22,7 @@ uv run python -m scripts.train_tokenizer
 uv run ./runs/train_d12.sh
 ```
 
-The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
+The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `runs/train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
 
 ## Scaling Laws
 
