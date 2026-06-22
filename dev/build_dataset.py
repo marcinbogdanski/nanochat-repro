@@ -12,7 +12,7 @@ import tiktoken
 import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
-from mynanochat.common import get_base_path
+from nanorepro.common import get_base_path
 assert pa.__version__ == '21.0.0'  # bitwise parity with Nanochat
 BASE_DIR = get_base_path()
 REF_DIR = os.path.expanduser("~/.cache/nanochat")

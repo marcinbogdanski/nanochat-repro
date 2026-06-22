@@ -2,7 +2,7 @@ import os
 import time
 import torch
 import torch.nn as nn
-from mynanochat.muon import Muon, DistMuon
+from nanorepro.muon import Muon, DistMuon
 
 # Run like this
 # CUBLAS_WORKSPACE_CONFIG=:4096:8 uv run python -m dev.example_muon_3d

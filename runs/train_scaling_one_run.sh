@@ -5,7 +5,7 @@ TARGET_FLOPS="$1"
 MODEL_DEPTH="$2"
 DEVICE_BATCH_SIZE="$3"
 TAG="scaling3_${TARGET_FLOPS}_d${MODEL_DEPTH}"
-RUN_DIR="${HOME}/.cache/mynanochat/runs/${TAG}"
+RUN_DIR="${HOME}/.cache/nanorepro/runs/${TAG}"
 
 if [ -d "$RUN_DIR" ]; then
   echo "Skipping existing run: $RUN_DIR"

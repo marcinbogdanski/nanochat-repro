@@ -11,14 +11,14 @@ import datasets
 datasets.disable_progress_bars()
 import wandb
 import torch.nn.functional as F
-from mynanochat.gpt import GPTConfig, GPTModel
-from mynanochat.dataloader import DataLoader
-from mynanochat.core_eval import evaluate_core_metric
-from mynanochat.loss_eval import evaluate_bpb
-from mynanochat.generate import generate_test_samples
-from mynanochat.checkpoint import save_checkpoint, load_checkpoint
-from mynanochat.fp8 import LinearFP8
-from mynanochat.common import get_base_path, ddp_init, wandb_init, FileLogger
+from nanorepro.gpt import GPTConfig, GPTModel
+from nanorepro.dataloader import DataLoader
+from nanorepro.core_eval import evaluate_core_metric
+from nanorepro.loss_eval import evaluate_bpb
+from nanorepro.generate import generate_test_samples
+from nanorepro.checkpoint import save_checkpoint, load_checkpoint
+from nanorepro.fp8 import LinearFP8
+from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
 BASE_DIR = get_base_path()
 
 def main():

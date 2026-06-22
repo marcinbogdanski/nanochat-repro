@@ -1,7 +1,7 @@
 import os
 import urllib.request
 import zipfile
-from mynanochat.common import get_base_path
+from nanorepro.common import get_base_path
 BASE_DIR = get_base_path()
 
 EVAL_BUNDLE = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"

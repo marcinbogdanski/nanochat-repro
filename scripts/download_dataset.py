@@ -2,7 +2,7 @@ import os
 import shutil
 import argparse
 from urllib.request import urlopen
-from mynanochat.common import get_base_path
+from nanorepro.common import get_base_path
 BASE_DIR = get_base_path()
 
 

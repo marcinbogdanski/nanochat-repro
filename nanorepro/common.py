@@ -6,7 +6,7 @@ import wandb
 
 def get_base_path():
     """Returns the base path for storing logs and checkpoints."""
-    base_path = os.environ.get('MYNANOCHAT_BASE_PATH', os.path.expanduser("~/.cache/mynanochat"))
+    base_path = os.environ.get('NANOREPRO_BASE_PATH', os.path.expanduser("~/.cache/nanorepro"))
     os.makedirs(base_path, exist_ok=True)
     return base_path
 
