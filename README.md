@@ -16,14 +16,13 @@ I would like to deeply thank Andrej and everyone who supported him in building o
 
 ```bash
 uv sync
-uv run python -m scripts.download_dataset -n 10
+uv run python -m scripts.download_dataset -n 10   # 250 for proper training runs
 uv run python -m scripts.download_eval_bundle
 uv run python -m scripts.train_tokenizer
 uv run ./runs/train_d12.sh
 ```
 
 The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
-
 
 ## Scaling Laws
 
@@ -53,6 +52,28 @@ optimal params = 10**-0.3996 * flops**0.4698
 optimal tokens = 10**-0.7693 * flops**0.5489
 ```
 
-Dropping constants, we get `D ∝ C^0.4698` and `N ∝ C^0.5489` which is close-ish to Andrej results `D ∝ C^0.5` and `N ∝ C^0.5`.
+Dropping constants, we get `N ∝ C^0.4698` and `D ∝ C^0.5489` which is close-ish to Andrej results `N ∝ C^0.5` and `D ∝ C^0.5`.
 
 My conclusion is that sweep is broadly sane and valid. Having said that, optima are fitted with only six depths per FLOP budget, and minima are fairly flat around neighbouring depths, so I would urge not to overinterpret these results and treat them as approximate sanity check.
+
+Scaling run can be reproduced on 8xH100/H200 with `uv run ./runs/train_scaling_laws.sh` and analyzed with `notebooks/analyze_scaling_laws.ipynb`.
+
+## Detailed Training Metrics
+
+I extended nanochat to collect detailed training metrics. While loss/BPB shows that training is progressing, the detailed metrics allow us to understand more deeply how the signal propagates through the network both forward and backwards. Andrej explains the fundamentals brilliantly in his [video](https://www.youtube.com/watch?v=P6sfmUTpUmc). These detailed metrics are mainly a diagnostic tool, they help notice deeper training issues and help tune the training runs.
+
+![Detailed train metrics](assets/train_metrics_collage.png)
+
+Here I am going to focus on three metrics:
+
+**Post-Block Residual RMS** - shows forward activations "magnitude" after each transformer block. Importantly the activation RMS of different layers is roughly the same order of magnitude, which means signal is propagating well into the network
+
+**Param Gradient RMS by Layer** - shows raw gradient RMS for each layer, this includes gradients for attention weights and MLP weights grouped together and omits embeddings. This plot helps us track overall raw gradients before optimizer takes action.
+
+**Parameter Update Ratio by Layer** - similar to above, but tracks param delta/param value. This helps us track updates after the optimizer (here Muon) takes action. All layers show similar dynamics and we can clearly see update magnitude decreasing towards the end of training where warmdown decreases the learning rate.
+
+So to sum up, the plots show no obvious pathological divergence between layers, nor weird spikes or offsets. Gradient and Update Ratio plots also show reasonable magnitude ranges.
+
+Note on implementation: this repo (like original Nanochat) implements ZeRO-2-style distributed optimizers, so each rank has only a slice of true gradient and param update. Because of that we can't simply calculate RMS of PyTorch `.grad` during training. Extra synchronization between ranks is not feasible due to slowdown it would cause. In this repo on each rank I save partial sum of squared elements (grad or param updates). Then in post processing the partial sums are combined into final RMS. On 4x3090 there is no noticeable slowdown when recording detailed metrics.
+
+Detailed metrics are recorded with `uv run ./runs/train_d12.sh` and analyzed with `notebooks/analyze_train_metrics.ipynb`.
