@@ -1,4 +1,5 @@
 import os
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import gc
 import json
@@ -350,7 +351,7 @@ def main():
 
         # BPB Evaluation
         # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
-        if step == start_step or (args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps)):
+        if args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
