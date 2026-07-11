@@ -208,6 +208,25 @@ class DistMuon(torch.optim.Optimizer):
         self.compute_dtype = compute_dtype
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
+        self.group_buffers = []
+
+        # Initialize Static Buffers
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+
+        for i, group in enumerate(self.param_groups):
+            p = group['params'][0]  # shape, dtype, device
+            num_params = len(group['params'])
+            num_params_padded = -(-num_params // world_size) * world_size  # ceil div * world_size
+            params_buffer_shape = [num_params_padded, *p.shape]
+            params_buffer = torch.zeros(params_buffer_shape, dtype=p.dtype, device=p.device)  # no requires_grad=True because this is just storage
+            for j, pp in enumerate(group["params"]):
+                params_buffer[j].copy_(pp.detach())
+                pp.data = params_buffer[j]  # assign view, now p.data points to our params_buffer[i]
+
+            self.group_buffers.append({
+                'params': params_buffer,
+            })
 
     def get_metrics(self):
         return self.debug_stats
@@ -253,6 +272,8 @@ class DistMuon(torch.optim.Optimizer):
 
         # Do fused muon step
         for i, group in enumerate(self.param_groups):
+            buffers = self.group_buffers[i]
+
             p = group['params'][0]  # shape, dtype, device
             num_params = len(group['params'])
             padded_num_params = ((len(group['params']) + world_size - 1) // world_size) * world_size
@@ -267,7 +288,7 @@ class DistMuon(torch.optim.Optimizer):
             padded_params = [p for p in group['params']]
             if len(group['params']) % world_size != 0:
                 padded_params.extend([group['zero_buffer']] * (padded_num_params-len(group['params'])))
-            stacked_params = torch.stack(padded_params[idx_start:idx_start+num_params_per_rank])
+            stacked_params = buffers["params"][idx_start:idx_start+num_params_per_rank]
 
             # Create buffers
             if 'momentum_buffer' not in self.state[p]:
@@ -329,16 +350,12 @@ class DistMuon(torch.optim.Optimizer):
                         }
 
 
-            # Reuse the stacked_all_grads buffer for params
-            stacked_all_grads = temp_buffers[i]['stacked_all_grads']
+            # Do all-gather directly to static buffer
             all_gather_future = torch.distributed.all_gather_into_tensor(
-                stacked_all_grads, stacked_params, async_op=True
+                buffers["params"], stacked_params, async_op=True
             ).get_future()
             temp_buffers[i]['all_gather_future'] = all_gather_future
 
-        # Copy back params
+        # Wait for futures
         for i, group in enumerate(self.param_groups):
-            num_params = len(group['params'])
             temp_buffers[i].pop('all_gather_future').wait()
-            stacked_all_grads = temp_buffers[i].pop('stacked_all_grads')
-            torch._foreach_copy_(group["params"], list(stacked_all_grads[:num_params].unbind(0)))
