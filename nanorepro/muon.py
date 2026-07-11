@@ -220,16 +220,26 @@ class DistMuon(torch.optim.Optimizer):
             num_params_padded = -(-num_params // world_size) * world_size  # ceil div * world_size
             params_buffer_shape = [num_params_padded, *p.shape]
             params_buffer = torch.zeros(params_buffer_shape, dtype=p.dtype, device=p.device)  # no requires_grad=True because this is just storage
+            grads_buffer = torch.zeros_like(params_buffer)
             for j, pp in enumerate(group["params"]):
                 params_buffer[j].copy_(pp.detach())
                 pp.data = params_buffer[j]  # assign view, now p.data points to our params_buffer[i]
+                pp.grad = grads_buffer[j]   # same here for grad, no copy needed since grads were not computed yet at init
 
             self.group_buffers.append({
                 'params': params_buffer,
+                'grads': grads_buffer,
             })
 
     def get_metrics(self):
         return self.debug_stats
+
+    @torch.no_grad()
+    def zero_grad(self, set_to_none=True):
+        # Ignore set_to_none since we took over grad storage anyway
+        # Note calling model.zero_grad(set_to_none=True) will still set .grad = None and break things, hence assert in step()
+        for buffer in self.group_buffers:
+            buffer['grads'].zero_()
 
     @torch.no_grad()
     def step(self):
@@ -242,23 +252,24 @@ class DistMuon(torch.optim.Optimizer):
 
         # This will reduce scatter grads, such that each rank gets full averaged grad for owned param
         for i, group in enumerate(self.param_groups):
+            buffers = self.group_buffers[i]
             p = group['params'][0]  # shape, dtype, device
             num_params = len(group['params'])
             padded_num_params = ((len(group['params']) + world_size - 1) // world_size) * world_size
             num_params_per_rank = padded_num_params // world_size
 
+            # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
+            for j, pp in enumerate(group["params"]):
+                assert pp.grad and pp.grad.data_ptr() == buffers['grads'][j].data_ptr()  # not None and points to static buffer
+
             if len(group['params']) % world_size != 0:
                 group['zero_buffer'] = torch.zeros_like(group['params'][0].grad)
 
-            padded_grads = [p.grad for p in group['params']]
-            if len(group['params']) % world_size != 0:
-                padded_grads.extend([group['zero_buffer']] * (padded_num_params-len(group['params'])))
-            stacked_all_grads = torch.stack(padded_grads)
             stacked_grads = torch.empty(num_params_per_rank, *p.shape, dtype=p.dtype, device=p.device)
 
             reduce_scatter_future = torch.distributed.reduce_scatter_tensor(
                 output=stacked_grads,
-                input=stacked_all_grads,
+                input=buffers['grads'],
                 op=torch.distributed.ReduceOp.AVG,
                 async_op=True
             ).get_future()
@@ -267,7 +278,6 @@ class DistMuon(torch.optim.Optimizer):
             temp_buffers[i] = {
                 'reduce_scatter_future': reduce_scatter_future,
                 'stacked_grads': stacked_grads,
-                'stacked_all_grads': stacked_all_grads
             }
 
         # Do fused muon step
