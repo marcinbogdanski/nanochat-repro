@@ -1,5 +1,19 @@
 # Assorted Development Notes
 
+## 2026.07.11 - Muon static buffers
+
+Implemented static param/grad buffers for Muon parameters. This avoids creating temporary buffers in DistMuon.step() and saves a copy. Parameter .data/.grad fields become pointers to static buffers. Reduce-scatter and all-gather operate on the buffers directly. This introduces coupling between model and optimizer.
+
+Tests on 4x3090, depth=20:
+
+| Configuration        | Micro-batch | Grad accum | Peak memory | Tok/s  | Speedup |
+|----------------------|------------:|-----------:|------------:|-------:|--------:|
+| Before               |           6 |         21 |  21.922 GiB | 64,587 |       — |
+| Static, same config  |           6 |         21 |  19.725 GiB | 64,633 |  +0.07% |
+| Static, larger batch |           7 |         18 |  21.676 GiB | 64,825 |  +0.37% |
+
+It ain't much, but it's honest work.
+
 ## 2026.06.19 - FA3 community kernel
 
 Training default d12 model, with BPB eval every 250 steps, causes bumps in `plot17_value_embed.weight_update_ratio` plots.
@@ -12,7 +26,7 @@ Two runs with same params on same 2x3090 system produce bumps/no-bumps depending
 
 Me, Claude and Codex inspected the code, and found not other paths through with eval could affect subsequent training code.
 
-Since dissabling FA3 or changing kernel removes the issue, I am inclined to tenatively put it as issue in `kernels-community/flash-attn3`
+Since disabling FA3 or changing kernel removes the issue, I am inclined to tentatively put it as issue in `kernels-community/flash-attn3`
 
 Would be cool to investigate further at some point.
 

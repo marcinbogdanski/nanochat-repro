@@ -208,7 +208,7 @@ class DistMuon(torch.optim.Optimizer):
         self.compute_dtype = compute_dtype
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
-        self.group_buffers = []  # static param/grad buffers, parameter .data/.gard point here
+        self.group_buffers = []  # static param/grad buffers, parameter .data/.grad point here
 
         # Initialize Static Buffers
         rank = torch.distributed.get_rank()
@@ -229,7 +229,7 @@ class DistMuon(torch.optim.Optimizer):
                 params_buffer[i].copy_(param.detach())
                 param.data = params_buffer[i]  # assign view, now p.data points to our params_buffer[i]
                 param.grad = grads_buffer[i]   # same here for grad, no copy needed since grads were not computed yet at init
-            grads_shard = torch.empty(num_params_per_rank, *anchor.shape, dtype=anchor.dtype, device=anchor.device)
+            grads_shard = grads_buffer[param_start:param_start+num_params_per_rank]  # just a view
             params_shard = params_buffer[param_start:param_start+num_params_per_rank]  # just a view
             num_params_this_rank = min(num_params_per_rank, max(0, num_params-param_start))  # last rank may be padded
             self.group_buffers.append({
