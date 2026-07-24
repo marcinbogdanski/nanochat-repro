@@ -66,7 +66,7 @@ def fused_muon_step(
             A = X @ X.mT
             B = b * A + c * (A @ A)
             X = a * X + B @ X
-    grad = X
+    grad = X.to(params.dtype)  # MPS compatibility fix from Nanochat
 
     # -----------------------
     # Muon+ renormalization
