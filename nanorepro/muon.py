@@ -70,6 +70,7 @@ def fused_muon_step(
 
     # -----------------------
     # Muon+ renormalization
+    # https://arxiv.org/abs/2602.21545
     target_norm = min(grad.size(-2), grad.size(-1))**0.5
     grad_norm = grad.float().norm(dim=(-2, -1), keepdim=True).clamp_min(1e-6)
     grad = grad * (target_norm / grad_norm).to(grad.dtype)
