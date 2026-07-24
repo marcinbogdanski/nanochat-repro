@@ -133,22 +133,19 @@ class Block(nn.Module):
     def __init__(self, config, ve_enable, enable_fa3, enable_metrics=False):
         super().__init__()
         self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
-        self.moe_enable = config.moe_enable
         self.enable_metrics = enable_metrics
         if not config.moe_enable:
             self.mlp = MLP(config)
         else:
-            self.moe = MoE(dim=config.n_embd, n_routed_experts=config.moe_n_experts, top_k=config.moe_top_k)
+            # keep the same interface as MLP for the forward pass
+            self.mlp = MoE(dim=config.n_embd, n_routed_experts=config.moe_n_experts, top_k=config.moe_top_k)
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
 
     def forward(self, x, ve, cos, sin, window_size):
         x = x + self.attn(self._norm(x), ve, cos, sin, window_size)        # B,T,E pre-norm
-        if not self.moe_enable:
-            x = x + self.mlp(self._norm(x))
-        else:
-            x = x + self.moe(self._norm(x))
+        x = x + self.mlp(self._norm(x))  # MoE, if enabled
         if self.enable_metrics:
             sq_sum_t = x.detach().float().square().sum()  # keep as tensor so we don't break graph
             num_el = x.numel()
@@ -233,17 +230,19 @@ class GPTModel(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
-            if not self.config.moe_enable:
+            if isinstance(block.mlp, MLP):
                 torch.nn.init.uniform_(block.mlp.c_fc.weight, -s*0.4, s*0.4)  # smaller init for feedforward
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            elif isinstance(block.mlp, MoE):
+                torch.nn.init.uniform_(block.mlp.router.gate.weight, -s, s)
+                torch.nn.init.uniform_(block.mlp.experts.w_up, -s*0.4, s*0.4)
+                torch.nn.init.zeros_(block.mlp.experts.w_down)
+                torch.nn.init.uniform_(block.mlp.shared_expert.w_up.weight, -s*0.4, s*0.4)
+                torch.nn.init.zeros_(block.mlp.shared_expert.w_down.weight)
+                torch.nn.init.zeros_(block.mlp.router.expert_bias)
+                torch.nn.init.zeros_(block.mlp.router.tokens_per_expert_counter)
             else:
-                torch.nn.init.uniform_(block.moe.router.gate.weight, -s, s)
-                torch.nn.init.uniform_(block.moe.experts.w_up, -s, s)
-                torch.nn.init.zeros_(block.moe.experts.w_down)
-                torch.nn.init.uniform_(block.moe.shared_expert.w_up.weight, -s, s)
-                torch.nn.init.zeros_(block.moe.shared_expert.w_down.weight)
-                torch.nn.init.zeros_(block.moe.router.expert_bias)
-                torch.nn.init.zeros_(block.moe.router.tokens_per_expert_counter)
+                raise ValueError(f"Unknown MLP type: {type(block.mlp)}")
 
         # Per layer scalars
         n_layer = self.config.n_layer
@@ -370,15 +369,17 @@ class GPTModel(nn.Module):
             extend_metrics(block.attn.c_k.weight, block=i, tensor_name='attn.c_k.weight')
             extend_metrics(block.attn.c_v.weight, block=i, tensor_name='attn.c_v.weight')
             extend_metrics(block.attn.c_proj.weight, block=i, tensor_name='attn.c_proj.weight')
-            if not self.config.moe_enable:
+            if isinstance(block.mlp, MLP):
                 extend_metrics(block.mlp.c_fc.weight, block=i, tensor_name='mlp.c_fc.weight')
                 extend_metrics(block.mlp.c_proj.weight, block=i, tensor_name='mlp.c_proj.weight')
+            elif isinstance(block.mlp, MoE):
+                extend_metrics(block.mlp.router.gate.weight, block=i, tensor_name='moe.router.gate.weight')
+                extend_metrics(block.mlp.experts.w_up, block=i, tensor_name='moe.experts.w_up')
+                extend_metrics(block.mlp.experts.w_down, block=i, tensor_name='moe.experts.w_down')
+                extend_metrics(block.mlp.shared_expert.w_up.weight, block=i, tensor_name='moe.shared_expert.w_up.weight')
+                extend_metrics(block.mlp.shared_expert.w_down.weight, block=i, tensor_name='moe.shared_expert.w_down.weight')
             else:
-                extend_metrics(block.moe.router.gate.weight, block=i, tensor_name='moe.router.gate.weight')
-                extend_metrics(block.moe.experts.w_up, block=i, tensor_name='moe.experts.w_up')
-                extend_metrics(block.moe.experts.w_down, block=i, tensor_name='moe.experts.w_down')
-                extend_metrics(block.moe.shared_expert.w_up.weight, block=i, tensor_name='moe.shared_expert.w_up.weight')
-                extend_metrics(block.moe.shared_expert.w_down.weight, block=i, tensor_name='moe.shared_expert.w_down.weight')
+                raise ValueError(f"Unknown MLP type: {type(block.mlp)}")
         extend_metrics_scalars(self.resid_lambdas, tensor_name='resid_lambdas')  # for scalars we just log the value, no grad/update metrics
         extend_metrics_scalars(self.x0_lambdas, tensor_name='x0_lambdas')
         extend_metrics(self.smear_gate.weight, block=None, tensor_name='smear_gate.weight')
@@ -392,7 +393,7 @@ class GPTModel(nn.Module):
         return metrics
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, weight_decay, enable_metrics=False):
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, weight_decay, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
@@ -404,7 +405,11 @@ class GPTModel(nn.Module):
         params_resid = [self.resid_lambdas]
         params_x0 = [self.x0_lambdas]
         smear_backout_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params)
+        # Move MoE router params from params_matrix to a separate AdamW group (if MoE disabled, params_router will be empty)
+        params_router = [block.mlp.router.gate.weight for block in self.transformer.h if isinstance(block.mlp, MoE)]
+        router_params_ids = {id(p) for p in params_router}
+        params_matrix = [p for p in params_matrix if id(p) not in router_params_ids]
+        assert len(list(self.parameters())) == len(params_matrix) + len(params_embedding) + len(params_val_embds) + len(params_lm_head) + len(params_resid) + len(params_x0) + len(smear_backout_params) + len(params_router)
 
         # Apply learning rate scaling based on parameter counts, similar to Chinchilla scaling
         dmodel_lr_scale = (self.config.n_embd / 768) ** -0.5
@@ -418,6 +423,9 @@ class GPTModel(nn.Module):
             dict(params=params_x0, lr=scalar_lr, betas=(0.96, 0.95), weight_decay=0.0, is_small=True),
             dict(params=smear_backout_params, lr=0.2, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
         ]
+        if params_router:
+            # No weight decay for MoE to prevent drift towards sigmoid(0.0)=0.5
+            adam_groups.append(dict(params=params_router, lr=router_lr * dmodel_lr_scale, betas=(0.8, 0.96), weight_decay=0.0, is_small=False))
         adamw_factory = DistAdamW if ddp else AdamW
         adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
@@ -474,7 +482,7 @@ class GPTModel(nn.Module):
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Counted params do not match total params"
         moe_inactive = sum(
-            block.moe.num_expert_params()['inactive'] for block in self.transformer.h if block.moe_enable
+            block.mlp.num_expert_params()['inactive'] for block in self.transformer.h if isinstance(block.mlp, MoE)
         )
         result = {
             'wte': wte,                            # word token embedding
@@ -517,13 +525,13 @@ class GPTModel(nn.Module):
 
     def update_moe_balancing(self):
         for block in self.transformer.h:
-            if block.moe_enable:
-                block.moe.update_expert_bias()
+            if isinstance(block.mlp, MoE):
+                block.mlp.update_expert_bias()
 
     def zero_moe_counters(self):
         for block in self.transformer.h:
-            if block.moe_enable:
-                block.moe.zero_token_counters()
+            if isinstance(block.mlp, MoE):
+                block.mlp.zero_token_counters()
 
     def _apply_smear(self, x):
         """Mix previous token's embedding into current token (bigram-like)"""
