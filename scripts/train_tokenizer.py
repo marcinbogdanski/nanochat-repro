@@ -102,15 +102,15 @@ def main():
 
     # Save token bytes
     # Should be bitwise identical to Nanochat version
-    token_strings = [enc.decode([i]) for i in range(enc.n_vocab)]  # list[str] (token id -> token string)
+    special_token_ids = set(special_tokens.values())
     token_bytes = []
-    for i in range(enc.n_vocab):
-        tok_str = token_strings[i]
-        if tok_str in special_tokens:
+    for token_id in range(enc.n_vocab):
+        if token_id in special_token_ids:
             # special tokens are not byte sequences
             token_bytes.append(0)
         else:
-            token_bytes.append(len(tok_str.encode("utf-8")))
+            tok_bytes = enc.decode_single_token_bytes(token_id)
+            token_bytes.append(len(tok_bytes))
     token_bytes_pt = torch.tensor(token_bytes, dtype=torch.int32, device='cpu')
     token_bytes_path = os.path.join(tokenizer_path, "token_bytes.pt")
     with open(token_bytes_path, "wb") as f:
