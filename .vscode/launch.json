@@ -34,6 +34,31 @@
                 "--deterministic",
                 "--log-metrics"
             ]
+        },
+        {
+            "name": "Python Debugger: torchrun",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "subProcess": true,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0",
+                "OMP_NUM_THREADS": "1"
+            },
+            "args": [
+                "--standalone",
+                "--nproc_per_node=1",
+                "-m",
+                "scripts.base_train",
+                "--",
+                "--depth=4",
+                "--num-iterations=2",
+                "--eval-every=-1",
+                "--eval-tokens=65536",
+                "--core-metric-every=-1",
+                "--sample-every=-1",
+                "--save-every=-1"
+            ]
         }
     ]
 }

@@ -23,7 +23,15 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
         
         # Model state
         model_path = os.path.join(checkpoints_path, f"model_{step:06d}.pt")
-        torch.save(model.state_dict(), model_path)
+        model_state = model.state_dict()
+        # Model params may be views into static buffers created by optimizer. Here we save them as clean, independent copies.
+        # Preferably I would just save them as clean CPU tensors, but I want MD5 checkpoint compatibility with Nanochat,
+        # so instead I preserve original container class and _metadata and keep tensors on GPU. Prob cleanup later.
+        # Also, this GPU copy creates unnecessary memory pressure point during save, but at that point fwd/bwd/optim are dormant, so hopefully ok for now.
+        model_state_meta = model_state._metadata
+        model_state = model_state.__class__((name, tensor.detach().clone()) for name, tensor in model_state.items())
+        model_state._metadata = model_state_meta
+        torch.save(model_state, model_path)
         model_md5sum = os.popen(f"md5sum {model_path}").read().split()[0]
     
     # Optimizer state
