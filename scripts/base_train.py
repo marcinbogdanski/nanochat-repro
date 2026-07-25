@@ -38,6 +38,9 @@ def main():
     parser.add_argument('--max-seq-len', type=int, default=2048, help='Context length (block size).')
     parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
     parser.add_argument('--moe', action='store_true', help='Use Mixture of Experts (MoE) layers instead of dense MLPs.')
+    parser.add_argument("--num-experts", type=int, default=8, help="MoE: number of routed experts (plus one always-on shared, only when MoE enabled)")
+    parser.add_argument("--top-k", type=int, default=2, help="MoE: active per-token routed experts (only when MoE enabled)")
+
     # Training horizon
     parser.add_argument('--dataset', type=str, default='climbmix', choices=['fineweb', 'climbmix'], help='Training dataset to use.')
     parser.add_argument('--num-iterations', type=int, default=-1, help='Maximum number of training steps. Set to -1 to calculate from params.')
@@ -51,6 +54,7 @@ def main():
     parser.add_argument('--weight-decay', type=float, default=0.28, help='Weight decay for Muon optimizer.')
     parser.add_argument('--matrix-lr', type=float, default=0.02, help='Base learning rate for matrix parameters.')
     parser.add_argument('--scalar-lr', type=float, default=0.5, help='Learning rate for scalars: resid_lambas, x0_lambdas.')
+    parser.add_argument('--router-lr', type=float, default=0.005, help='Learning rate for MoE router gate parameters.')
     parser.add_argument('--warmup-steps', type=int, default=40, help='Number of steps for LR warmup')
     parser.add_argument('--warmdown-ratio', type=float, default=0.65, help='Ratio of iterations for LR warmdown')
     parser.add_argument('--final-lr-frac', type=float, default=0.05, help='Final LR fraction of initial LR')
@@ -142,8 +146,8 @@ def main():
             n_embd=model_dim,
             window_pattern=args.window_pattern,
             moe_enable=args.moe,
-            moe_n_experts=8,
-            moe_top_k=2,
+            moe_n_experts=args.num_experts,
+            moe_top_k=args.top_k,
         )
         with torch.device('meta'):
             model_meta = GPTModel(
@@ -236,6 +240,7 @@ def main():
         matrix_lr=args.matrix_lr * batch_lr_scale,
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
         scalar_lr=args.scalar_lr * batch_lr_scale,
+        router_lr=args.router_lr * batch_lr_scale,
         weight_decay=scaled_weight_decay,
         enable_metrics=args.log_metrics,
     )

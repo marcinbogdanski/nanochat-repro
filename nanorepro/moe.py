@@ -57,7 +57,7 @@ class MoE(nn.Module):
         }
     
     @torch.compiler.disable  # Dynamic slicing breaks the torch.compile
-    def _exec_experts_loop(self, x_flat_sorted_weighted, sel_experts_flat):
+    def _exec_experts_loop(self, x_flat_sorted, sel_experts_flat):
         """Execute the experts using a loop - fallback when torch._grouped_mm is not available (e.g. on CPU)"""
         start_idx = 0
         outs = []
@@ -65,37 +65,37 @@ class MoE(nn.Module):
         for i in range(E):
             num_expert = (sel_experts_flat==i).sum().item()
             end_idx = start_idx + num_expert
-            expert_w_up = self.experts.w_up[i].to(x_flat_sorted_weighted.dtype)
-            h = x_flat_sorted_weighted[start_idx:end_idx] @ expert_w_up.T
+            expert_w_up = self.experts.w_up[i].to(x_flat_sorted.dtype)
+            h = x_flat_sorted[start_idx:end_idx] @ expert_w_up.T
             z = F.relu(h).square()
-            expert_w_down = self.experts.w_down[i].to(x_flat_sorted_weighted.dtype)
+            expert_w_down = self.experts.w_down[i].to(x_flat_sorted.dtype)
             o = z @ expert_w_down.T
             outs.append(o)
             start_idx += num_expert
         out_flat_stacked_flat_sorted = torch.cat(outs)   # B*T*K, C
         return out_flat_stacked_flat_sorted
 
-    def _exec_experts_grouped_mm(self, x_flat_sorted_weighted, sel_experts_flat):
+    def _exec_experts_grouped_mm(self, x_flat_sorted, sel_experts_flat):
         """Execute the experts using grouped matrix multiplication - CUDA only"""
         E = self.experts.w_up.size(0)
         expert_ids = torch.arange(E, device=sel_experts_flat.device).unsqueeze(-1)
         expert_mask = expert_ids == sel_experts_flat.unsqueeze(0)
         expert_offsets = expert_mask.sum(dim=1).cumsum(dim=0).to(torch.int32)  # E
 
-        expert_w_up = self.experts.w_up.to(x_flat_sorted_weighted.dtype)
+        expert_w_up = self.experts.w_up.to(x_flat_sorted.dtype)
         h_experts = torch._grouped_mm(
-            input=x_flat_sorted_weighted,
+            input=x_flat_sorted,
             mat2=expert_w_up.mT,
             offs=expert_offsets,
         )
         z_experts = F.relu(h_experts).square()
-        expert_w_down = self.experts.w_down.to(x_flat_sorted_weighted.dtype)
+        expert_w_down = self.experts.w_down.to(x_flat_sorted.dtype)
         out_experts = torch._grouped_mm(
             input=z_experts,
             mat2=expert_w_down.mT,
             offs=expert_offsets,
         )
-        out_flat_stacked_flat_sorted = out_experts.to(x_flat_sorted_weighted.dtype)
+        out_flat_stacked_flat_sorted = out_experts.to(x_flat_sorted.dtype)
         return out_flat_stacked_flat_sorted
 
     def forward(self, x):
@@ -125,8 +125,6 @@ class MoE(nn.Module):
         # ^^
         values_flat = sel_scores.reshape(-1)                     # B*T*K
         values_flat_sorted = values_flat[sel_experts_flat_sorted_idx]  # B*T*K
-        x_flat_sorted_weighted = x_flat_sorted.float() * values_flat_sorted.unsqueeze(-1)  # B*T*K, C
-        x_flat_sorted_weighted = x_flat_sorted_weighted.to(x.dtype)
 
         # Shared expert path
         h_shared = self.shared_expert.w_up(x_flat)
@@ -142,13 +140,14 @@ class MoE(nn.Module):
             self.router.tokens_per_expert_counter += num_tokens_per_expert
         
         if x.is_cuda:
-            out_flat_sorted = self._exec_experts_grouped_mm(x_flat_sorted_weighted, sel_experts_flat)
+            out_flat_sorted = self._exec_experts_grouped_mm(x_flat_sorted, sel_experts_flat)
         else:
-            out_flat_sorted = self._exec_experts_loop(x_flat_sorted_weighted, sel_experts_flat)
+            out_flat_sorted = self._exec_experts_loop(x_flat_sorted, sel_experts_flat)
+        out_flat_sorted_weighted = out_flat_sorted * values_flat_sorted.unsqueeze(-1).to(out_flat_sorted.dtype)  # B*T*K, C
 
         # Combine routed experts and project back
-        out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=out_flat_sorted.dtype)
-        out_flat_stacked_flat[sel_experts_flat_sorted_idx] = out_flat_sorted   # B*T*K, C
+        out_flat_stacked_flat = torch.zeros(B*T*K, C, device=x.device, dtype=out_flat_sorted_weighted.dtype)
+        out_flat_stacked_flat[sel_experts_flat_sorted_idx] = out_flat_sorted_weighted   # B*T*K, C
         out_flat_stacked = out_flat_stacked_flat.reshape(B*T, K, C)
         out_flat = out_flat_stacked.sum(dim=1)   # B*T, C
 

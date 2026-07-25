@@ -24,18 +24,24 @@ def fused_adamw_step(
         grad_sum_squares = grad.float().square().sum()
         params_sum_squares = params.float().square().sum()
 
+    # FP32 math is a MPS compatibility fix from Nanochat - technically on CUDA equivalent implicit impl.
+    params_fp32 = params.float()
+    exp_avg_fp32 = exp_avg.float()
+    exp_avg_sq_fp32 = exp_avg_sq.float()
+    grad_fp32 = grad.float()
+
     # Weight Decay
     # p = p - lr * weight_decay * p
-    wd_update = params * lr * wd
-    params.mul_(1 - lr * wd)
+    wd_update = params_fp32 * lr * wd
+    params_fp32.mul_(1 - lr * wd)
 
     # Update v
     # v = B1 * v + (1-B1) * g
-    exp_avg.lerp_(grad, 1-beta1)
+    exp_avg_fp32.lerp_(grad_fp32, 1-beta1)
 
     # Update s
     # s = B2 * s + (1-B2) * g**2
-    exp_avg_sq.lerp_(grad.square(), 1-beta2)
+    exp_avg_sq_fp32.lerp_(grad_fp32.square(), 1-beta2)
     
     # Correction
     # Somewhat convoluted way to do:
@@ -44,11 +50,16 @@ def fused_adamw_step(
     # p = p - lr * v_corrected / (sqrt(s_corrected)+eps)
     bias1 = 1-beta1**step
     bias2 = 1-beta2**step
-    denom = (exp_avg_sq / bias2).sqrt().add_(eps)
-    optim_update = exp_avg.div(denom).mul_(lr / bias1)
+    denom = (exp_avg_sq_fp32 / bias2).sqrt().add_(eps)
+    optim_update = exp_avg_fp32.div(denom).mul_(lr / bias1)
 
     # Modify in-place
-    params.add_(optim_update, alpha=-1.0)
+    params_fp32.add_(optim_update, alpha=-1.0)
+
+    # Copy back to original dtype
+    params.copy_(params_fp32)
+    exp_avg.copy_(exp_avg_fp32)
+    exp_avg_sq.copy_(exp_avg_sq_fp32)
 
     if metrics:
         final_update = -(optim_update + wd_update)
