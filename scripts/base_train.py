@@ -112,11 +112,10 @@ def main():
     print0("Vocabulary size:", tokenizer.n_vocab)
    
     # Reproducibility
-    if args.deterministic:
-        torch.manual_seed(42)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(42)
-            torch.cuda.manual_seed_all(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
     
     # Precision
     if device.startswith("cuda"):
@@ -165,6 +164,14 @@ def main():
     for k, v in model.config.to_dict().items():
         print0(f"  {k:>16}: {v}")
     file_logger.log('model_config', step=None, data=model.config.to_dict())
+
+    # Sync across ranks - technically not needed since we seed identically
+    if torch.distributed.is_initialized():
+        with torch.no_grad():
+            for p in model.parameters():
+                torch.distributed.broadcast(p, src=0)
+            for b in model.buffers():
+                torch.distributed.broadcast(b, src=0)
 
     # FP8 Print
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
