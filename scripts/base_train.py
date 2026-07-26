@@ -1,5 +1,6 @@
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import gc
 import json
@@ -362,7 +363,7 @@ def main():
         total_flops = step * total_batch_size * flops_per_token
 
         # BPB Evaluation
-        # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
+        # Always eval on step 0 to get a initial baseline
         if args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
