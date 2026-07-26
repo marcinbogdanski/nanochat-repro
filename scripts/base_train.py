@@ -402,7 +402,8 @@ def main():
         # Training
         model.train()
         synchronize()
-        torch.cuda.reset_peak_memory_stats()
+        if device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
@@ -441,7 +442,7 @@ def main():
 
         # Sync & Time
         synchronize()
-        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3) if device.startswith("cuda") else 0.0
         dt = (time.time() - ts)
         total_time += dt
 
