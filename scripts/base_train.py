@@ -130,7 +130,7 @@ def main():
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
 
-    # Mode Setup
+    # Model Setup
     def create_model_meta(depth):
         # Hyperparameters
         vocab_size = tokenizer.n_vocab
