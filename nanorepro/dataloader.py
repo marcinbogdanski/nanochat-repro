@@ -56,6 +56,7 @@ class DataLoader:
         self.shard_idx = self.first_shard
         self.group_idx = self.rank
         self.idx_in_group = 0
+        self.last_step = False  # api compatibility with DataLoaderSFT
 
         # Cached Shards
         self.loaded_shard_idx = None
@@ -223,8 +224,8 @@ class DataLoaderSFT:
         self.conv_buffer = []
 
         # Distributed
-        self.rank = 3 # torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        self.world_size = 4 # torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+        self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        self.world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
         # Create Cursor
         self.current_task_idx = self.rank
@@ -245,6 +246,24 @@ class DataLoaderSFT:
         self.gpu_buffer = torch.empty((2*B*T), dtype=torch.long, device=device)
         self.result_x = self.gpu_buffer[:B*T].view(B, T)
         self.result_y = self.gpu_buffer[B*T:].view(B, T)
+
+    def reset(self):
+        """Called to reset eval dataloader."""
+        self.conv_buffer = []
+
+        self.current_task_idx = self.rank
+        self.consumed_indicator = self.rank
+        self.current_iteration = 0
+        self.last_step = False
+
+    def state_dict(self):
+        # Just some useful info, we don't support resume in SFT
+        return {
+            "current_task_idx": self.current_task_idx,
+            "consumed_indicator": self.consumed_indicator,
+            "current_iteration": self.current_iteration,
+            "last_step": self.last_step,
+        }
 
     def _step_cursor(self):
         self.current_task_idx += self.world_size

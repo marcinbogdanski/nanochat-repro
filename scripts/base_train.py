@@ -146,7 +146,7 @@ def main():
             n_embd=model_dim,
             window_pattern=args.window_pattern,
             moe_enable=args.moe,
-            moe_n_experts=args.num_experts,
+            moe_experts=args.num_experts,
             moe_top_k=args.top_k,
         )
         with torch.device('meta'):

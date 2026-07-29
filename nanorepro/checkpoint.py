@@ -45,14 +45,19 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
 
     return model_md5sum
 
+
+def get_latest_checkpoint_step(checkpoints_path):
+    fn_list = [fn for fn in os.listdir(checkpoints_path) if fn.startswith("meta_") and fn.endswith(".json")]
+    steps_list = [int(fn[len("meta_"):-len(".json")]) for fn in fn_list]
+    return max(steps_list)  # Throws if no checkpoints found
+
+
 def load_checkpoint(checkpoints_path, model, optimizers, dataloader, device, step=None):
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
     # If step is not specified, load the latest checkpoint
     if step is None:
-        fn_list = [fn for fn in os.listdir(checkpoints_path) if fn.startswith("meta_") and fn.endswith(".json")]
-        steps_list = [int(fn[len("meta_"):-len(".json")]) for fn in fn_list]
-        step = max(steps_list)  # Throws if no checkpoints found
+        step = get_latest_checkpoint_step(checkpoints_path)
 
     meta_path = os.path.join(checkpoints_path, f"meta_{step:06d}.json")
     model_path = os.path.join(checkpoints_path, f"model_{step:06d}.pt")
