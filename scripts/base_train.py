@@ -345,7 +345,9 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device)
+        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device)
+        if not args.deterministic:
+            model = torch.compile(orig_model, dynamic=False)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
@@ -391,7 +393,7 @@ def main():
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
+            checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 

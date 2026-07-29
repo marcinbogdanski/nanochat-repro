@@ -61,10 +61,8 @@ class TaskMMLU:
 class TaskGSM8K:
     def __init__(self, subset, split, stop=None):
         self.dataset = load_dataset("openai/gsm8k", subset, split=split)
-        print(stop)
         self.dataset = self.dataset.shuffle(seed=42)
         self.length = stop if stop is not None else len(self.dataset)
-        print(self.length, len(self.dataset))
     
     def __len__(self):
         return self.length
