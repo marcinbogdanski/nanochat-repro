@@ -153,7 +153,8 @@ def main():
 
     # Training Hyperparameters
     pretrain_user_cfg = pretrain_metadata["user_config"]
-    total_batch_size = args.total_batch_size if args.total_batch_size is not None else pretrain_user_cfg['total_batch_size']
+    pretrain_hyperparm_cfg = pretrain_metadata["training_hyperparameters"]
+    total_batch_size = args.total_batch_size if args.total_batch_size is not None else pretrain_hyperparm_cfg['total_batch_size']
     micro_batch = args.device_batch_size if args.device_batch_size is not None else pretrain_user_cfg['device_batch_size']
     max_seq_len = pretrain_user_cfg['max_seq_len']
     assert total_batch_size % (max_seq_len*micro_batch*ddp_world_size) == 0
@@ -239,7 +240,7 @@ def main():
         if last_step:
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
+            checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 

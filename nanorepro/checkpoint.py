@@ -2,7 +2,7 @@ import os
 import json
 import torch
 
-def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, user_config):
+def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, user_config, training_hyperparameters):
     os.makedirs(checkpoints_path, exist_ok=True)
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     step = loop_vars['step']
@@ -16,6 +16,7 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
             'smooth_tloss': loop_vars['smooth_tloss'],
             'model_config': model.config.to_dict(),
             'user_config': user_config,
+            'training_hyperparameters': training_hyperparameters,
         }
         meta_path = os.path.join(checkpoints_path, f"meta_{step:06d}.json")
         with open(meta_path, "w") as f:
