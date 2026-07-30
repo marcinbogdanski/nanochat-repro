@@ -233,6 +233,7 @@ class DataLoaderSFT:
         self.num_iterations = None if num_iterations == -1 else num_iterations
         self.current_iteration = 0
         self.last_step = False
+        self.progress = 0.0
 
         # Tensor Buffers
         self.use_cuda = device.startswith("cuda")
@@ -314,11 +315,19 @@ class DataLoaderSFT:
                     row_pos += num_tokens_to_fill
 
         # Check stop conditions
+        # BUG: with grad_accum != 0, this will increment every micro step.
+        # I'm leaving it in for now to keep equivalence with Nanochat (which on 8xH100 has grad_accum=1, and is not affected)
         self.current_iteration += 1
         if self.consumed_indicator >= len(self.tasks):
             self.last_step = True
         if self.num_iterations is not None and self.current_iteration >= self.num_iterations:
             self.last_step = True
+
+        # Track Progress
+        if self.num_iterations is not None:
+            self.progress = self.current_iteration / self.num_iterations
+        else:
+            self.progress = self.consumed_indicator / len(self.tasks)
 
         # Copy to GPU
         self.cpu_x.copy_(self.row_buffer[:,:-1])  # copy to first half of cpu_buffer through a view

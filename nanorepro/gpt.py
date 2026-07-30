@@ -393,7 +393,7 @@ class GPTModel(nn.Module):
         return metrics
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, weight_decay, enable_metrics=False):
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
@@ -421,7 +421,7 @@ class GPTModel(nn.Module):
             dict(params=params_val_embds, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), weight_decay=0.01, is_small=False),
             dict(params=params_resid, lr=scalar_lr * 0.01, betas=(0.8, 0.95), weight_decay=0.05, is_small=True),
             dict(params=params_x0, lr=scalar_lr, betas=(0.96, 0.95), weight_decay=0.0, is_small=True),
-            dict(params=smear_backout_params, lr=0.2, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
+            dict(params=smear_backout_params, lr=smear_backout_lr, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
         ]
         if params_router:
             # No weight decay for MoE to prevent drift towards sigmoid(0.0)=0.5

@@ -184,6 +184,7 @@ def main():
     if not args.deterministic:
         model = torch.compile(model, dynamic=False)
 
+    # Hyperparameter Scaling and Training Horizon
     # (1) Scaling laws / transfer recipe
     # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
     #   find the compute-optimal tokens/param ratio
@@ -235,7 +236,7 @@ def main():
     scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
     print0(f"Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
-    # Training Hyperparameters
+    # Grad Accumulation
     micro_batch = args.device_batch_size
     assert total_batch_size % (args.max_seq_len*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (args.max_seq_len*micro_batch*ddp_world_size)
@@ -249,6 +250,7 @@ def main():
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
         scalar_lr=args.scalar_lr * batch_lr_scale,
         router_lr=args.router_lr * batch_lr_scale,
+        smear_backout_lr=0.2,
         weight_decay=scaled_weight_decay,
         enable_metrics=args.log_metrics,
     )
@@ -288,7 +290,7 @@ def main():
         # cosine decay to zero over the course of training
         return scaled_weight_decay * 0.5 * (1.0 + math.cos(math.pi * step / max_steps))
 
-    # LR / Muon Scheduler functions
+    # LR Scheduler
     def get_lr(step: int):
         warmup_steps = args.warmup_steps
         warmdown_steps = round(args.warmdown_ratio * max_steps)
@@ -300,6 +302,7 @@ def main():
             progress = (max_steps - step) / warmdown_steps
             return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
+    # Muon Momentum Scheduler
     def get_muon_momentum(step: int):
         warmdown_steps = round(args.warmdown_ratio * max_steps)
         warmdown_start = max_steps - warmdown_steps
