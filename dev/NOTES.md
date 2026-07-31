@@ -1,5 +1,26 @@
 # Assorted Development Notes
 
+## 2026.07.30 - SFT and few issues carried from Nanochat
+
+When testing SFT for equality vs Nanochat `92d63d4e`, I found few potential issues on Nanochat side.
+
+**Related to incorrect progress accounting in SFT**
+
+- The dataloader counts each micro-batch (`grad_accum > 1`) as whole iteration - at `--num-iterations=128` and `grad_accum=128` training finishes in one training step. Causes progress to overshoot 100% and LR to go negative.
+- The dataloader pre-fetch (before train loop, and after loss.backward) causes off-by-one early termination and off-by-two progress tracking and LR scaling
+- In train loop `step += 1` is before EMA debias - causing EMA to have wrong exponents
+
+These are covered in PR: https://github.com/karpathy/nanochat/pull/816
+
+Hopefully this gets merged, otherwise we need to diverge train SFT.
+
+**Related to conversations trimmed to hard-coded 2048**
+
+- If `max_seq_len` is lower than 2048 (like 512 in `runcpu.sh`), batch holds rows of length 512, but the `conv_buffer` is populated with conversations up to length 2048. Long conversation will never be fetched into the batch.
+- When `max_seq_len` is above 2048, batch holds long rows, but the conversations in `conv_buffer` are needlessly trimmed.
+
+Notably, discussion in [#486](https://github.com/karpathy/nanochat/pull/486) discovered the same things, and solution to trim conversations to `row_capacity` was not accepted. Explanation being, a lot of conversations start with long masked prompt (say 1500 tokens), which when trimmed to fit 512 buffer provide no training target. Discussion explores alternative, where all conversations are kept at full length, and trimmed only if no short (below 512) conversations are available anymore.
+
 ## 2026.07.25 - Bug: seed/param init divergent across ranks
 
 In this repo parameter initialization across ranks was dependent on identical seeding. The problem was that `manual_seed(42)` calls were behind `--deterministic` argument only:

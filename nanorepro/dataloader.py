@@ -280,6 +280,7 @@ class DataLoaderSFT:
             # effect is: targets for tokens are shifted 1 left and last token gets padded with <|bos|>
             # with +1 we would load 2049 and last input token would get proper target
             # effect is likely minimal, but we follow Nanochat for now
+            # relevant discussion why Nanochat uses 2048: https://github.com/karpathy/nanochat/pull/486
             conv_tokens_list = conv_tokens_list[:self.block_size]
             conv_mask_list = conv_mask_list[:self.block_size]
             self.conv_buffer.append((conv_tokens_list, conv_mask_list))
