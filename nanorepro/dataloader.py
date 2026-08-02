@@ -56,7 +56,6 @@ class DataLoader:
         self.shard_idx = self.first_shard
         self.group_idx = self.rank
         self.idx_in_group = 0
-        self.last_step = False  # api compatibility with DataLoaderSFT
 
         # Cached Shards
         self.loaded_shard_idx = None
@@ -209,8 +208,7 @@ class DataLoader:
 
 
 class DataLoaderSFT:
-    def __init__(self, tasks, batch_size, block_size, tokenizer, device, num_iterations):
-        assert num_iterations == -1 or num_iterations > 0
+    def __init__(self, tasks, batch_size, block_size, tokenizer, device):
         assert device == 'cpu' or device.startswith('cuda')
         self.tasks = tasks
 
@@ -229,11 +227,7 @@ class DataLoaderSFT:
 
         # Create Cursor
         self.current_task_idx = self.rank
-        self.consumed_indicator = self.rank
-        self.num_iterations = None if num_iterations == -1 else num_iterations
-        self.current_iteration = 0
-        self.last_step = False
-        self.progress = 0.0
+        self.consumed = self.rank
 
         # Tensor Buffers
         self.use_cuda = device.startswith("cuda")
@@ -253,17 +247,13 @@ class DataLoaderSFT:
         self.conv_buffer = []
 
         self.current_task_idx = self.rank
-        self.consumed_indicator = self.rank
-        self.current_iteration = 0
-        self.last_step = False
+        self.consumed = self.rank
 
     def state_dict(self):
         # Just some useful info, we don't support resume in SFT
         return {
             "current_task_idx": self.current_task_idx,
-            "consumed_indicator": self.consumed_indicator,
-            "current_iteration": self.current_iteration,
-            "last_step": self.last_step,
+            "consumed": self.consumed,
         }
 
     def _step_cursor(self):
@@ -276,11 +266,15 @@ class DataLoaderSFT:
             example = self.tasks[self.current_task_idx]
             self._step_cursor()
             conv_tokens_list, conv_mask_list = self.renderer.render_conversation(example['messages'])
-            # should be [:self.block_size+1], but Nanochat truncates to 2048 (why?)
-            # effect is: targets for tokens are shifted 1 left and last token gets padded with <|bos|>
-            # with +1 we would load 2049 and last input token would get proper target
-            # effect is likely minimal, but we follow Nanochat for now
-            # relevant discussion why Nanochat uses 2048: https://github.com/karpathy/nanochat/pull/486
+            # Nanochat trims conversations to hard-coded 2048, we trim to block_size.
+            # (Technically this should be block_size+1 to avoid losing one target, but this keeps bit parity with Nanochat.)
+            # There are good comments on the subject why hard-cap 2048 was not removed: https://github.com/karpathy/nanochat/pull/486
+            # In short: considering runs with lower block_size (say 512), a lot of conversations start with long user prompts,
+            # which when trimmed would be fully masked and provide no training target. The dataloader tries to load the
+            # "longest conversation that fits", so with trimming these fully masked prompts now seem like a perfect fit.
+            # With hard-trim to 2048, they are too long and skipped, and dataloader picks <512 "natural" conversations, which is better.
+            # The issue is that this in turn populates conv_tokens_list with long, unusable conversations that don't fit in 512 and
+            # eventually clog the buffer completely. When that happens batch becomes fully padded (no convo fits) and loss goes to NaN
             conv_tokens_list = conv_tokens_list[:self.block_size]
             conv_mask_list = conv_mask_list[:self.block_size]
             self.conv_buffer.append((conv_tokens_list, conv_mask_list))
@@ -308,27 +302,12 @@ class DataLoaderSFT:
                     self.row_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_that_fits, dtype=torch.long)
                     self.mask_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_mask, dtype=torch.long)
                     row_pos += len(longest_conv_that_fits)
-                    self.consumed_indicator += self.world_size
+                    self.consumed += self.world_size
                 else:
                     # No conversation fits, pad the reminder
                     self.row_buffer[bi, row_pos:] = self.renderer.bos_token  # pad with <|bos|> token
                     self.mask_buffer[bi, row_pos:] = 0  # mask out the reminder
                     row_pos += num_tokens_to_fill
-
-        # Check stop conditions
-        # BUG: with grad_accum != 0, this will increment every micro step.
-        # I'm leaving it in for now to keep equivalence with Nanochat (which on 8xH100 has grad_accum=1, and is not affected)
-        self.current_iteration += 1
-        if self.consumed_indicator >= len(self.tasks):
-            self.last_step = True
-        if self.num_iterations is not None and self.current_iteration >= self.num_iterations:
-            self.last_step = True
-
-        # Track Progress
-        if self.num_iterations is not None:
-            self.progress = self.current_iteration / self.num_iterations
-        else:
-            self.progress = self.consumed_indicator / len(self.tasks)
 
         # Copy to GPU
         self.cpu_x.copy_(self.row_buffer[:,:-1])  # copy to first half of cpu_buffer through a view

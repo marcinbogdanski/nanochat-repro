@@ -223,8 +223,8 @@ def main():
         if progress <= 1.0 - args.warmdown_ratio:
             return 1.0
         else:
-            decay = (progress - args.warmdown_ratio) / args.warmdown_ratio  # 0..1 inside warmdown
-            return (1.0 - decay) + decay * args.final_lr_frac
+            decay = (progress - (1.0 - args.warmdown_ratio)) / args.warmdown_ratio  # 0..1 inside warmdown
+            return (1.0 - decay) * 1.0 + decay * args.final_lr_frac
 
     # Muon Momentum Scheduler
     def get_muon_momentum(step):
@@ -244,7 +244,6 @@ def main():
         block_size=max_seq_len,
         tokenizer=tokenizer,
         device=device,
-        num_iterations=args.num_iterations,
     )
 
     # Eval Dataloader
@@ -261,17 +260,27 @@ def main():
         block_size=max_seq_len,
         tokenizer=tokenizer,
         device=device,
-        num_iterations=-1,  # run through the whole eval set
     )
 
     # Training Loop
     step, total_time, smooth_tloss = 0, 0.0, 0.0
     x, y = train_loader.get_batch_bos()
+    # Progress tracking and stop conditions
+    trained_consumed = 0  # data items that were actually used for training
     while True:
+        # Stop Conditions
+        last_step = args.num_iterations > 0 and step >= args.num_iterations
+        # This caps training at approximately one epoch even if num_iterations asks for more
+        if trained_consumed >= len(tasks_train):
+            last_step = True
+        # Progress Tracking
+        if args.num_iterations > 0:
+            trained_progress = step / args.num_iterations
+        else:
+            trained_progress = trained_consumed / len(tasks_train)
         total_flops = step * total_batch_size * flops_per_token
 
-        # Fetch last_step flag and sync across ranks
-        last_step = train_loader.last_step
+        # Sync the stop condition across ranks
         if torch.distributed.is_initialized():
             last_step_t = torch.tensor(last_step, dtype=torch.int32, device=device)
             torch.distributed.all_reduce(last_step_t, op=torch.distributed.ReduceOp.MAX)
@@ -318,13 +327,14 @@ def main():
             loss = loss / grad_accum
             loss_accum += loss.detach()
             loss.backward()
-            x, y = train_loader.get_batch_bos()    # Fetch next batch
+            trained_consumed = train_loader.consumed  # cache to reflect training reality
+            x, y = train_loader.get_batch_bos()    # fetch the next batch
 
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # LR Scheduler
-        lrm = get_lr(train_loader.progress)
+        lrm = get_lr(trained_progress)
         for opt in optimizers:
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
@@ -348,7 +358,7 @@ def main():
 
         # Logs
         tps = int(total_batch_size / dt)
-        pct = train_loader.progress * 100
+        pct = trained_progress * 100
         smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * rank_tloss.item()
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
@@ -379,7 +389,7 @@ def main():
                 'other/dt': dt,
                 'other/tps': tps,
                 'other/max_mem': max_mem,
-                'other/progress': train_loader.progress,
+                'other/progress': trained_progress,
                 'other/total_flops': total_flops,
                 'other/total_time': total_time,
             }
