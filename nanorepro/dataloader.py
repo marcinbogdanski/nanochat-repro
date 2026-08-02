@@ -2,6 +2,7 @@ import os
 import torch
 import pyarrow.parquet as pq
 from nanorepro.common import get_base_path
+from nanorepro.tokenizer import ConversationRenderer
 BASE_DIR = get_base_path()
 
 class DataLoader:
@@ -205,3 +206,113 @@ class DataLoader:
         return self.result_x, self.result_y
 
 
+
+class DataLoaderSFT:
+    def __init__(self, tasks, batch_size, block_size, tokenizer, device):
+        assert device == 'cpu' or device.startswith('cuda')
+        self.tasks = tasks
+
+        # Hyperparameters
+        self.batch_size = batch_size
+        self.block_size = block_size
+
+        # Tokenizer
+        self.tokenizer = tokenizer
+        self.renderer = ConversationRenderer(tokenizer)
+        self.conv_buffer = []
+
+        # Distributed
+        self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        self.world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+
+        # Create Cursor
+        self.current_task_idx = self.rank
+        self.consumed = self.rank
+
+        # Tensor Buffers
+        self.use_cuda = device.startswith("cuda")
+        B, T = batch_size, block_size
+        # T+1 because targets look "one beyond" the sequence length
+        self.row_buffer = torch.empty((B, T+1), dtype=torch.long)  # Construct rows w/o massive python lists
+        self.mask_buffer = torch.empty((B, T+1), dtype=torch.long)  # Mask buffer
+        self.cpu_buffer = torch.empty((2*B*T), dtype=torch.long, pin_memory=self.use_cuda)  # cpu-side contiguous buffer
+        self.cpu_x = self.cpu_buffer[:B*T].view(B, T)  # first half of cpu_buffer is inputs
+        self.cpu_y = self.cpu_buffer[B*T:].view(B, T)  # second half is targets
+        self.gpu_buffer = torch.empty((2*B*T), dtype=torch.long, device=device)
+        self.result_x = self.gpu_buffer[:B*T].view(B, T)
+        self.result_y = self.gpu_buffer[B*T:].view(B, T)
+
+    def reset(self):
+        """Called to reset eval dataloader."""
+        self.conv_buffer = []
+
+        self.current_task_idx = self.rank
+        self.consumed = self.rank
+
+    def state_dict(self):
+        # Just some useful info, we don't support resume in SFT
+        return {
+            "current_task_idx": self.current_task_idx,
+            "consumed": self.consumed,
+        }
+
+    def _step_cursor(self):
+        self.current_task_idx += self.world_size
+        if self.current_task_idx >= len(self.tasks):
+            self.current_task_idx = self.current_task_idx % len(self.tasks)
+
+    def _fill_conv_buffer(self):
+        while len(self.conv_buffer) < 100:
+            example = self.tasks[self.current_task_idx]
+            self._step_cursor()
+            conv_tokens_list, conv_mask_list = self.renderer.render_conversation(example['messages'])
+            # Nanochat trims conversations to hard-coded 2048, we trim to block_size.
+            # (Technically this should be block_size+1 to avoid losing one target, but this keeps bit parity with Nanochat.)
+            # There are good comments on the subject why hard-cap 2048 was not removed: https://github.com/karpathy/nanochat/pull/486
+            # In short: considering runs with lower block_size (say 512), a lot of conversations start with long user prompts,
+            # which when trimmed would be fully masked and provide no training target. The dataloader tries to load the
+            # "longest conversation that fits", so with trimming these fully masked prompts now seem like a perfect fit.
+            # With hard-trim to 2048, they are too long and skipped, and dataloader picks <512 "natural" conversations, which is better.
+            # The issue is that this in turn populates conv_tokens_list with long, unusable conversations that don't fit in 512 and
+            # eventually clog the buffer completely. When that happens batch becomes fully padded (no convo fits) and loss goes to NaN
+            conv_tokens_list = conv_tokens_list[:self.block_size]
+            conv_mask_list = conv_mask_list[:self.block_size]
+            self.conv_buffer.append((conv_tokens_list, conv_mask_list))
+
+    def get_batch_bos(self):
+        need_row_tokens = self.block_size + 1
+
+        for bi in range(self.batch_size):
+            row_pos = 0
+            while row_pos < need_row_tokens:
+                self._fill_conv_buffer()
+                # Find longest conv that fits
+                longest_conv_idx = None
+                longest_conv_len = 0
+                num_tokens_to_fill = need_row_tokens - row_pos
+                for conv_idx in range(len(self.conv_buffer)):
+                    candidate_conv, candidate_mask = self.conv_buffer[conv_idx]
+                    if len(candidate_conv) <= num_tokens_to_fill and len(candidate_conv) > longest_conv_len:
+                        longest_conv_idx = conv_idx
+                        longest_conv_len = len(candidate_conv)
+                # Extend row
+                if longest_conv_idx is not None:
+                    longest_conv_that_fits, longest_conv_mask = self.conv_buffer.pop(longest_conv_idx)
+                    doc_length = len(longest_conv_that_fits)
+                    self.row_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_that_fits, dtype=torch.long)
+                    self.mask_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_mask, dtype=torch.long)
+                    row_pos += len(longest_conv_that_fits)
+                    self.consumed += self.world_size
+                else:
+                    # No conversation fits, pad the reminder
+                    self.row_buffer[bi, row_pos:] = self.renderer.bos_token  # pad with <|bos|> token
+                    self.mask_buffer[bi, row_pos:] = 0  # mask out the reminder
+                    row_pos += num_tokens_to_fill
+
+        # Copy to GPU
+        self.cpu_x.copy_(self.row_buffer[:,:-1])  # copy to first half of cpu_buffer through a view
+        self.row_buffer[self.mask_buffer == 0] = -1  # mask out the targets that are masked
+        self.cpu_y.copy_(self.row_buffer[:,1:])
+        self.gpu_buffer.copy_(self.cpu_buffer, non_blocking=self.use_cuda)
+
+        return self.result_x, self.result_y

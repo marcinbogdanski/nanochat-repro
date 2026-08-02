@@ -8,7 +8,7 @@ from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
 
 class GPTConfig:
-    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_n_experts, moe_top_k):
+    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_experts, moe_top_k):
         self.block_size = block_size
         self.vocab_size = vocab_size
         self.n_layer = n_layer
@@ -16,7 +16,7 @@ class GPTConfig:
         self.n_embd = n_embd
         self.window_pattern = window_pattern
         self.moe_enable = moe_enable
-        self.moe_n_experts = moe_n_experts
+        self.moe_experts = moe_experts
         self.moe_top_k = moe_top_k
 
     def to_dict(self):
@@ -28,7 +28,7 @@ class GPTConfig:
             'n_embd': self.n_embd,
             'window_pattern': self.window_pattern,
             'moe_enable': self.moe_enable,
-            'moe_experts': self.moe_n_experts,
+            'moe_experts': self.moe_experts,
             'moe_top_k': self.moe_top_k,
         }
 
@@ -138,7 +138,7 @@ class Block(nn.Module):
             self.mlp = MLP(config)
         else:
             # keep the same interface as MLP for the forward pass
-            self.mlp = MoE(dim=config.n_embd, n_routed_experts=config.moe_n_experts, top_k=config.moe_top_k)
+            self.mlp = MoE(dim=config.n_embd, n_routed_experts=config.moe_experts, top_k=config.moe_top_k)
 
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
@@ -393,7 +393,7 @@ class GPTModel(nn.Module):
         return metrics
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, weight_decay, enable_metrics=False):
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
@@ -421,7 +421,7 @@ class GPTModel(nn.Module):
             dict(params=params_val_embds, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), weight_decay=0.01, is_small=False),
             dict(params=params_resid, lr=scalar_lr * 0.01, betas=(0.8, 0.95), weight_decay=0.05, is_small=True),
             dict(params=params_x0, lr=scalar_lr, betas=(0.96, 0.95), weight_decay=0.0, is_small=True),
-            dict(params=smear_backout_params, lr=0.2, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
+            dict(params=smear_backout_params, lr=smear_backout_lr, betas=(0.8, 0.95), weight_decay=0.0, is_small=True),
         ]
         if params_router:
             # No weight decay for MoE to prevent drift towards sigmoid(0.0)=0.5
@@ -611,7 +611,7 @@ class GPTModel(nn.Module):
             B, T, C = logits.shape
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
-            loss = F.cross_entropy(logits_, targets_, reduction=reduction)
+            loss = F.cross_entropy(logits_, targets_, ignore_index=-1, reduction=reduction)
             if return_logits:
                 return logits, loss, metrics
             else:

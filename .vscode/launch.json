@@ -12,7 +12,7 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "Python Debugger: Module",
+            "name": "Python Debugger: Module base_train",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.base_train",
@@ -58,6 +58,18 @@
                 "--core-metric-every=-1",
                 "--sample-every=-1",
                 "--save-every=-1"
+            ]
+        },
+        {
+            "name": "Python Debugger: Module chat_sft",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.chat_sft",
+            "env": {
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "CUDA_VISIBLE_DEVICES": "3"
+            },
+            "args": [
             ]
         }
     ]

@@ -1,5 +1,6 @@
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import gc
 import json
@@ -112,11 +113,10 @@ def main():
     print0("Vocabulary size:", tokenizer.n_vocab)
    
     # Reproducibility
-    if args.deterministic:
-        torch.manual_seed(42)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(42)
-            torch.cuda.manual_seed_all(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
     
     # Precision
     if device.startswith("cuda"):
@@ -130,7 +130,7 @@ def main():
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
 
-    # Mode Setup
+    # Model Setup
     def create_model_meta(depth):
         # Hyperparameters
         vocab_size = tokenizer.n_vocab
@@ -146,7 +146,7 @@ def main():
             n_embd=model_dim,
             window_pattern=args.window_pattern,
             moe_enable=args.moe,
-            moe_n_experts=args.num_experts,
+            moe_experts=args.num_experts,
             moe_top_k=args.top_k,
         )
         with torch.device('meta'):
@@ -166,6 +166,14 @@ def main():
         print0(f"  {k:>16}: {v}")
     file_logger.log('model_config', step=None, data=model.config.to_dict())
 
+    # Sync across ranks - technically not needed since we seed identically
+    if torch.distributed.is_initialized():
+        with torch.no_grad():
+            for p in model.parameters():
+                torch.distributed.broadcast(p, src=0)
+            for b in model.buffers():
+                torch.distributed.broadcast(b, src=0)
+
     # FP8 Print
     num_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
     num_eligible = sum([m.is_fp8_legal() for m in model.modules() if isinstance(m, LinearFP8)])
@@ -176,6 +184,7 @@ def main():
     if not args.deterministic:
         model = torch.compile(model, dynamic=False)
 
+    # Hyperparameter Scaling and Training Horizon
     # (1) Scaling laws / transfer recipe
     # - target_param_data_ratio: at fixed FLOPs, sweep model size vs training horizon,
     #   find the compute-optimal tokens/param ratio
@@ -227,7 +236,7 @@ def main():
     scaled_weight_decay = args.weight_decay * math.sqrt(total_batch_size / ref_d12_batch_size_B_REF) * (ref_d12_target_tokens_D_REF / target_tokens)
     print0(f"Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
-    # Training Hyperparameters
+    # Grad Accumulation
     micro_batch = args.device_batch_size
     assert total_batch_size % (args.max_seq_len*micro_batch*ddp_world_size) == 0
     grad_accum = total_batch_size // (args.max_seq_len*micro_batch*ddp_world_size)
@@ -241,6 +250,7 @@ def main():
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
         scalar_lr=args.scalar_lr * batch_lr_scale,
         router_lr=args.router_lr * batch_lr_scale,
+        smear_backout_lr=0.2,
         weight_decay=scaled_weight_decay,
         enable_metrics=args.log_metrics,
     )
@@ -280,7 +290,7 @@ def main():
         # cosine decay to zero over the course of training
         return scaled_weight_decay * 0.5 * (1.0 + math.cos(math.pi * step / max_steps))
 
-    # LR / Muon Scheduler functions
+    # LR Scheduler
     def get_lr(step: int):
         warmup_steps = args.warmup_steps
         warmdown_steps = round(args.warmdown_ratio * max_steps)
@@ -292,6 +302,7 @@ def main():
             progress = (max_steps - step) / warmdown_steps
             return (progress * 1.0) + (1.0 - progress) * args.final_lr_frac
 
+    # Muon Momentum Scheduler
     def get_muon_momentum(step: int):
         warmdown_steps = round(args.warmdown_ratio * max_steps)
         warmdown_start = max_steps - warmdown_steps
@@ -337,7 +348,9 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device)
+        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device)
+        if not args.deterministic:
+            model = torch.compile(orig_model, dynamic=False)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
@@ -355,7 +368,7 @@ def main():
         total_flops = step * total_batch_size * flops_per_token
 
         # BPB Evaluation
-        # Always eval on step 0 to get memory allocation warmup (helps if GPU mem super tight)
+        # Always eval on step 0 to get a initial baseline
         if args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
@@ -383,7 +396,7 @@ def main():
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config)
+            checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
@@ -394,7 +407,8 @@ def main():
         # Training
         model.train()
         synchronize()
-        torch.cuda.reset_peak_memory_stats()
+        if device.startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
@@ -433,7 +447,7 @@ def main():
 
         # Sync & Time
         synchronize()
-        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3) if device.startswith("cuda") else 0.0
         dt = (time.time() - ts)
         total_time += dt
 
