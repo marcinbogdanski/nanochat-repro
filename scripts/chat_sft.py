@@ -323,6 +323,7 @@ def main():
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
             _, loss, metrics = model(x, y, return_logits=False)
+            fwd_metrics.append(metrics)
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
