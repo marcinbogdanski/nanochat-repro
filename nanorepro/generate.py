@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 @torch.inference_mode()
 def sample_one_token(logits, temperature=1.0, top_k=None, sample_rng=None):
