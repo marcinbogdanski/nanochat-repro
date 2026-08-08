@@ -616,3 +616,43 @@ class GPTModel(nn.Module):
                 return logits, loss, metrics
             else:
                 return None, loss, metrics
+
+    @torch.inference_mode()
+    def sample_one_token(self, logits, temperature=1.0, top_k=None, sample_rng=None):
+        assert logits.ndim == 2  # B,C
+        assert temperature >= 0.0
+        assert top_k is None or 0 < top_k <= logits.size(-1)
+        if temperature == 0.0:
+            return torch.argmax(logits, dim=-1, keepdim=True)  # greedy
+        if top_k is None:
+            probs = F.softmax(logits / temperature, dim=-1)  # B,C
+            ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
+            return ix
+        else:
+            topk_logits, topk_indices = torch.topk(logits, k=top_k, dim=-1)  # B,k
+            probs = F.softmax(topk_logits / temperature, dim=-1)  # B,k
+            ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
+            return torch.gather(topk_indices, -1, ix)  # B,1
+
+    @torch.inference_mode()
+    def generate(self, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng=None):
+        """Generate max_tokens starting from idx[B,T]"""
+        assert isinstance(idx, torch.Tensor)
+        assert idx.dtype == torch.long
+        assert len(idx.shape) == 2  # B,T
+        assert isinstance(max_new_tokens, int)
+        
+        is_training = self.training
+        self.eval()
+
+        block_size = self.config.block_size
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                idx_tail = idx[:, -block_size:]      # B,T  sliding window
+                logits, _, _ = self(idx_tail)      # B,T,C <- B,T
+                logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
+                xcol = self.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
+                idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
+        
+        self.train(is_training)
+        return idx
