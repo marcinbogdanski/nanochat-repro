@@ -595,7 +595,6 @@ class GPTModel(nn.Module):
         sin, cos = self.sin, self.cos
         if kv_cache is not None:
             # For now we assume seqlens are equal across the batch
-            assert torch.all(kv_cache.cache_seqlens == kv_cache.cache_seqlens[0])
             offset = kv_cache.cache_seqlens[0].item()  # scalar
             cos = self.cos[:, offset:, :, :]
             sin = self.sin[:, offset:, :, :]

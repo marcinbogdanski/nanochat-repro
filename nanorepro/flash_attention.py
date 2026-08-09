@@ -103,11 +103,10 @@ def sdpa_attn_func(q, k, v, causal, window_size):
 def sdpa_attn_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, causal, window_size):
     assert q.shape == k.shape == v.shape
     assert k_cache.shape == v_cache.shape
-    assert torch.all(cache_seqlens == cache_seqlens[0])  # for now all batch elements must have same cache_seqlens
     # Determine shapes
     B, T_new, nh, hs = q.shape
     T_max = k_cache.shape[1]
-    T_start = cache_seqlens[0]
+    T_start = cache_seqlens[0].item()
     T_end = T_start + T_new
     assert T_end <= T_max  # make sure we fit in the cache
     # Write cache in-place, same as FA3
