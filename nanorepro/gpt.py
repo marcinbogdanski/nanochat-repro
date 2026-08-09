@@ -54,9 +54,6 @@ class CausalSelfAttentionRoPE(nn.Module):
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
-        # Trim sin, cos to T and add batch dim
-        sin = sin[:, :T, :, :]     # 1,T,1,hs/2
-        cos = cos[:, :T, :, :]     # 1,T,1,hs/2
         # Split x/y
         q_x, q_y = q[..., :hs//2], q[..., hs//2:]  # B,T,nh,hs/2
         # Apply rotation
@@ -592,12 +589,12 @@ class GPTModel(nn.Module):
         x = self._apply_smear(x, kv_cache)
 
         # Offset sin/cos
-        sin, cos = self.sin, self.cos
+        offset = 0
         if kv_cache is not None:
             # For now we assume seqlens are equal across the batch
             offset = kv_cache.cache_seqlens[0].item()  # scalar
-            cos = self.cos[:, offset:, :, :]
-            sin = self.sin[:, offset:, :, :]
+        cos = self.cos[:, offset:offset+T, :, :]
+        sin = self.sin[:, offset:offset+T, :, :]
 
         # Transformer
         x0 = x
