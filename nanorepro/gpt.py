@@ -558,18 +558,29 @@ class GPTModel(nn.Module):
     def _apply_smear(self, x, kv_cache):
         """Mix previous token's embedding into current token (bigram-like)"""
         B, T, E = x.shape
-        if kv_cache is not None and kv_cache.previous_embd is not None:
-            assert kv_cache.previous_embd.shape == (B, 1, E)
-            x = torch.cat([kv_cache.previous_embd, x], dim=1)          # B,T+1,E - prepend embd so smear works correctly
-        x_gate_input = x[:, 1:, :24]                                   # B,T-1,24
-        x_score = torch.sigmoid(self.smear_gate(x_gate_input))         # B,T-1,1
-        x_score = self.smear_lambda.to(x.dtype) * x_score              # B,T-1,1
-        outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
-        if kv_cache is not None and kv_cache.previous_embd is not None:
-            outputs = outputs[:,1:,:]
-        if kv_cache is not None:
-            kv_cache.previous_embd = x[:,-1:,:].clone()  # B,1,E,  store for later
-        assert outputs.dtype == x.dtype
+        if kv_cache is None:
+            # No KV cache path
+            x_gate_input = x[:, 1:, :24]                                   # B,T-1,24
+            x_score = torch.sigmoid(self.smear_gate(x_gate_input))         # B,T-1,1
+            x_score = self.smear_lambda.to(x.dtype) * x_score              # B,T-1,1
+            outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
+        else:
+            # KV Cache path
+            if kv_cache.previous_embd is None:
+                # Prefill
+                x_gate_input = x[:, 1:, :24]                                    # B,T-1,24
+                x_score = torch.sigmoid(self.smear_gate(x_gate_input))          # B,T-1,1
+                x_score = self.smear_lambda.to(x.dtype) * x_score               # B,T-1,1
+                outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
+                kv_cache.previous_embd = x[:,-1:,:]   # B,1,E, store for later, view ok since no grads in inference mode
+            else:
+                # Generation
+                assert T==1
+                x_gate_input = x[:, :, :24]                                     # B,1,24
+                x_score = torch.sigmoid(self.smear_gate(x_gate_input))          # B,1,1
+                x_score = self.smear_lambda.to(x.dtype) * x_score               # B,1,1
+                outputs = x + x_score * kv_cache.previous_embd
+                kv_cache.previous_embd = x            # B,1,E, store for later, view ok since no grads in inference mode
         return outputs
 
     def get_device(self):
@@ -580,6 +591,7 @@ class GPTModel(nn.Module):
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
         assert idx.device == self.cos.device, "Input device does not match model device."
         assert self.cos.dtype == self.compute_dtype, "Model buffers are not in compute_dtype."
+        assert kv_cache is None or not torch.is_grad_enabled()   # if kv_cache, then ensure no_grad
 
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
