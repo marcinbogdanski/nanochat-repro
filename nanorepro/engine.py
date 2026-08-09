@@ -51,8 +51,9 @@ class Engine:
 
         # Will return Python lists
         results = [indices[0].tolist() for _ in range(num_samples)]
-        for i in range(num_samples):
-            results[i].append(x_col[i].item())
+        x_col_list = x_col[:, 0].tolist()
+        for result, token in zip(results, x_col_list):
+            result.append(token)
         if return_logits:
             logits_list = [logits]
 
@@ -64,8 +65,9 @@ class Engine:
             if return_logits:
                 logits_list.append(logits)
             x_col = self.model.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=rng)  # B,1
-            for i in range(num_samples):
-                results[i].append(x_col[i].item())
+            x_col_list = x_col[:, 0].tolist()
+            for result, token in zip(results, x_col_list):
+                result.append(token)
             num_generated += 1
 
         if return_logits:
