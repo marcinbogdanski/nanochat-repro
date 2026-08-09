@@ -6,10 +6,11 @@ import json
 import pickle
 import torch
 import torch.nn.functional as F
+import time
 from nanorepro.gpt import GPTConfig, GPTModel
 from nanorepro.checkpoint import get_latest_checkpoint_step
 from nanorepro.common import get_base_path
-from nanorepro.engine import KVCache
+from nanorepro.engine import KVCache, Engine
 BASE_DIR = get_base_path()
 
 def check_diff(title, t1, t2):
@@ -90,12 +91,16 @@ def main():
     ]
     max_new_tokens = 16
     block_size = model.config.block_size
-    
     bos = tokenizer.encode_single_token('<|bos|>')
+
+    print()
+    print("Test 1: Compare naive generation vs KV cache generation w/o Engine")
+    print()
     for prompt in prompts:
         tokens =  [bos] + tokenizer.encode(prompt)
         idx = torch.tensor([tokens], dtype=torch.long, device=device)  # B,T
-        kv_cache = KVCache(config=model.config, batch_size=1, compute_dtype=compute_dtype, device=device)
+        max_seq_len = len(tokens) + max_new_tokens
+        kv_cache = KVCache(config=model.config, batch_size=1, max_seq_len=max_seq_len, compute_dtype=compute_dtype, device=device)
         for i in range(max_new_tokens):
             # Forward without KV cache
             idx_tail = idx[:, -block_size:]      # B,T  sliding window
@@ -110,8 +115,8 @@ def main():
             logits_kv = logits_kv[:, -1, :]            # B,C <- B,T,C  discard all but last
             # print max difference between logits and logits_kv
             assert torch.allclose(logits, logits_kv, atol=1e-4, rtol=1e-4)
-            if i % 4 == 0:
-                check_diff(f"logits vs logits_kv (step={i})", logits, logits_kv)
+            #if i % 4 == 0:
+            #    check_diff(f"logits vs logits_kv (step={i})", logits, logits_kv)
             # Sample
             xcol = model.sample_one_token(logits, temperature=0.0, top_k=None, sample_rng=None)  # B,1
             xcol_kv = model.sample_one_token(logits_kv, temperature=0.0, top_k=None, sample_rng=None)  # B,1
@@ -122,6 +127,134 @@ def main():
         gen_text = tokenizer.decode(idx[0].tolist())
         print(gen_text)
 
+    print()
+    print("Test 2: Compare naive generation vs KV cache generation with Engine")
+    print()
+    engine = Engine(model, tokenizer)
+    total_time_naive, total_time_kv = 0.0, 0.0
+    for prompt in prompts:
+        tokens = [bos] + tokenizer.encode(prompt)
+        results, logits = engine.generate_naive(
+            tokens,
+            num_samples=3,
+            max_new_tokens=max_new_tokens,
+            temperature=1.0,
+            top_k=50,
+            seed=42,
+            return_logits=True
+        )
+        results_kv, logits_kv = engine.generate(
+            tokens,
+            num_samples=3,
+            max_new_tokens=max_new_tokens,
+            temperature=1.0,
+            top_k=50,
+            seed=42,
+            return_logits=True
+        )
+        for res, res_kv in zip(results, results_kv):
+            gen_text = tokenizer.decode(res)
+            print(gen_text)
+            gen_text_kv = tokenizer.decode(res_kv)
+            print(gen_text_kv)
+            # check_diff(f"logits vs logits_kv (prompt={prompt})", logits, logits_kv)
+            assert res == res_kv
+        assert torch.allclose(logits, logits_kv, atol=1e-4, rtol=1e-4)
 
+    print()
+    print("Test 3: time naive generation vs KV cache generation with Engine")
+    print()
+
+    # Model
+    compute_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    enable_fa3 = True if torch.cuda.is_available() else False
+    with torch.device("meta"):
+        model = GPTModel(
+            model_config,
+            compute_dtype=compute_dtype,
+            enable_fa3=enable_fa3,
+            fp8_training=True,
+            enable_metrics=False,
+        )
+    model.to_empty(device=device)
+    model.init_weights()  # RoPE buffers, rest of weights will be loaded from checkpoint
+    print("Model configuration:")
+    for k, v in model.config.to_dict().items():
+        print(f"  {k:>16}: {v}")
+
+    # Load Model State
+    model_path = os.path.join(checkpoints_path, f"model_{latest_checkpoint_step:06d}.pt")
+    model_state = torch.load(model_path, map_location=device)
+    model_state = {k.replace("_orig_mod.", ""): v for k, v in model_state.items()}
+    model.load_state_dict(model_state)
+    model.eval()
+
+    # Engine
+    engine = Engine(model, tokenizer)
+
+    # Long prompt:
+    long_prompt = "The quick brown fox jumps over the lazy dog. " * 100
+    tokens = [bos] + tokenizer.encode(long_prompt)
+    num_samples = 8
+    max_new_tokens = 128
+    print(f"Timing generation for prompt of length {len(tokens)} tokens, num_samples={num_samples}, max_new_tokens={max_new_tokens}")
+
+    # Warmup
+    for _ in range(2):
+        _ = engine.generate_naive(
+            tokens,
+            num_samples=num_samples,
+            max_new_tokens=max_new_tokens,
+            temperature=1.0,
+            top_k=50,
+            seed=42,
+            return_logits=False
+        )
+    # Timing naive generation
+    torch.cuda.synchronize() if device.startswith("cuda") else None
+    start_time = time.time()
+    _ = engine.generate_naive(
+        tokens,
+        num_samples=num_samples,
+        max_new_tokens=max_new_tokens,
+        temperature=1.0,
+        top_k=50,
+        seed=42,
+        return_logits=False
+    )
+    torch.cuda.synchronize() if device.startswith("cuda") else None
+    end_time = time.time()
+    total_time_naive = end_time - start_time
+    print(f"Total time naive generation: {total_time_naive:.4f} seconds")
+
+    # Warmup
+    for _ in range(2):
+        _ = engine.generate(
+            tokens,
+            num_samples=num_samples,
+            max_new_tokens=max_new_tokens,
+            temperature=1.0,
+            top_k=50,
+            seed=42,
+            return_logits=False
+        )
+    # Timing KV cache generation
+    torch.cuda.synchronize() if device.startswith("cuda") else None
+    start_time = time.time()
+    _ = engine.generate(
+        tokens,
+        num_samples=num_samples,
+        max_new_tokens=max_new_tokens,
+        temperature=1.0,
+        top_k=50,
+        seed=42,
+        return_logits=False
+    )
+    torch.cuda.synchronize() if device.startswith("cuda") else None
+    end_time = time.time()
+    total_time_kv = end_time - start_time
+    print(f"Total time KV cache generation: {total_time_kv:.4f} seconds")
+    print(f"Speedup: {total_time_naive / total_time_kv:.2f}x")
+    
 if __name__ == "__main__":
     main()

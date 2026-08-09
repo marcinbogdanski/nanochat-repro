@@ -575,6 +575,9 @@ class GPTModel(nn.Module):
         assert outputs.dtype == x.dtype
         return outputs
 
+    def get_device(self):
+        return next(self.parameters()).device
+
     def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
