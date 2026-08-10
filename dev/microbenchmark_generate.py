@@ -91,13 +91,13 @@ def main():
     ]
     max_new_tokens = 16
     block_size = model.config.block_size
-    bos = tokenizer.encode_single_token('<|bos|>')
+    bos_token = tokenizer.encode_single_token('<|bos|>')
 
     print()
     print("Test 1: Compare naive generation vs KV cache generation w/o Engine")
     print()
     for prompt in prompts:
-        tokens =  [bos] + tokenizer.encode(prompt)
+        tokens =  [bos_token] + tokenizer.encode(prompt)
         idx = torch.tensor([tokens], dtype=torch.long, device=device)  # B,T
         max_seq_len = len(tokens) + max_new_tokens
         kv_cache = KVCache(config=model.config, batch_size=1, max_seq_len=max_seq_len, compute_dtype=compute_dtype, device=device)
@@ -130,10 +130,9 @@ def main():
     print()
     print("Test 2: Compare naive generation vs KV cache generation with Engine")
     print()
-    engine = Engine(model, tokenizer)
-    total_time_naive, total_time_kv = 0.0, 0.0
+    engine = Engine(model)
     for prompt in prompts:
-        tokens = [bos] + tokenizer.encode(prompt)
+        tokens = [bos_token] + tokenizer.encode(prompt)
         results, logits = engine.generate_naive(
             tokens,
             num_samples=3,
@@ -190,11 +189,11 @@ def main():
     model.eval()
 
     # Engine
-    engine = Engine(model, tokenizer)
+    engine = Engine(model)
 
     # Long prompt:
     long_prompt = "The quick brown fox jumps over the lazy dog. " * 100
-    tokens = [bos] + tokenizer.encode(long_prompt)
+    tokens = [bos_token] + tokenizer.encode(long_prompt)
     num_samples = 8
     max_new_tokens = 128
     print(f"Timing generation for prompt of length {len(tokens)} tokens, num_samples={num_samples}, max_new_tokens={max_new_tokens}")
