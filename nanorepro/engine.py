@@ -17,12 +17,23 @@ class ResultRow:
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
         assert stop_tokens is None or (isinstance(stop_tokens, (tuple, list)) and all(isinstance(t, int) for t in stop_tokens))
         self.tokens = tokens
+        self.forced_tokens = []  # tool output token
         self.stop_tokens = stop_tokens or tuple()   # if None, then replace with empty tuple
 
     def append_token(self, token):
         assert isinstance(token, int)
         if not self.is_stopped():
             self.tokens.append(token)
+
+    def add_forced_tokens(self, tokens):
+        assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
+        assert len(self.forced_tokens) == 0
+        self.forced_tokens = tokens
+
+    def get_forced_token(self):
+        if len(self.forced_tokens) > 0:
+            return self.forced_tokens.pop(0)
+        return None
 
     def get_tokens(self):
         return self.tokens
@@ -33,9 +44,11 @@ class ResultRow:
 
 class Engine:
 
-    def __init__(self, model, stop_tokens=None):
+    def __init__(self, model, stop_tokens=None, tool_handler=None):
         self.model: GPTModel = model
         self.stop_tokens = stop_tokens
+        self.tool_handler = tool_handler
+        self.tool_trigger_token = None if tool_handler is None else tool_handler.tool_trigger_token
 
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
@@ -88,7 +101,19 @@ class Engine:
             x_col = self.model.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=rng)  # B,1
             x_col_list = x_col[:, 0].tolist()
             for i in range(num_samples):
-                results[i].append_token(x_col_list[i])
+                if results[i].is_stopped():
+                    continue
+                forced_token = results[i].get_forced_token()
+                if forced_token is not None:
+                    x_col[i, 0] = forced_token  # is this safe?
+                    results[i].append_token(forced_token)
+                else:
+                    sampled_token = x_col_list[i]
+                    results[i].append_token(sampled_token)
+                    if sampled_token == self.tool_trigger_token:
+                        tool_output_tokens = self.tool_handler.handle_tool_call(results[i].get_tokens())
+                        if tool_output_tokens is not None:
+                            results[i].add_forced_tokens(tool_output_tokens)
             num_generated += 1
 
         result_tokens = [res.get_tokens() for res in results]
