@@ -292,6 +292,41 @@ Then count the occurrences of '{letter}':
         return result
 
 
+class TaskArc:
+    def __init__(self, subset, split, stop=None):
+        self.dataset = load_dataset("allenai/ai2_arc", subset, split=split)
+        self.dataset = self.dataset.shuffle(seed=42)
+        self.length = stop if stop is not None else len(self.dataset)
+    
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx):
+        if idx >= self.length:
+            raise IndexError(idx)
+        example = self.dataset[idx]
+
+        question = example["question"]
+        choices = example["choices"]["text"]  # list of str
+        letters = example["choices"]["label"]  # e.g. ["A", "B", "C", "D"]
+        answer = example["answerKey"]  # e.g. "A"
+        assert answer in letters
+
+        # Same format as MMLU - note letter at the end and no space before letter (both better for small LLM)
+        user_message = f"Multiple Choice question: {question}\n"
+        user_message += "".join([f"- {choice}={letter}\n" for letter, choice in zip(letters, choices)])
+        user_message += "\nRespond only with the letter of the correct answer."
+        agent_message = f"{answer}"
+
+        convo = {
+            "messages": [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": agent_message},
+            ]
+        }
+        return convo
+
+
 class TaskMixture:
     def __init__(self, tasks):
         self.tasks = tasks
