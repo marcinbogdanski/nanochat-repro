@@ -118,6 +118,39 @@ class TaskCustomJSON:
         return result
 
 
+class TaskSimpleSpelling:
+    def __init__(self, filepath, split, stop=None):
+        assert split in ["train", "test"]
+        with open(filepath, "r") as f:
+            self.words = [line.strip() for line in f.readlines() if line.strip()]
+        self.split = split
+        self.length = stop if stop is not None else len(self.words)
+        rng = random.Random(42)
+        rng.shuffle(self.words)  # Shuffle to make it different from SpellingBee
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        if idx >= self.length:
+            raise IndexError(idx)
+        # Weird way to split train/valid inherited from Nanochat (which may have inherited it from SpellingBee)
+        # I'm keeping in like this for now to keep equivalence with Nanochat
+        test_random_seed_offset = 10_000_000
+        seed = idx if self.split == "train" else idx + test_random_seed_offset
+        rng = random.Random(seed)
+        word = rng.choice(self.words)
+        word_letters = ",".join(list(word))
+        messages = [
+            {"role": "user", "content": f"Spell the word: {word}"},
+            {"role": "assistant", "content": f"{word}:{word_letters}"},
+        ]
+        result = {
+            "messages": messages
+        }
+        return result
+
+
 class TaskMixture:
     def __init__(self, tasks):
         self.tasks = tasks
