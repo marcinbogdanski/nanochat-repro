@@ -1,4 +1,5 @@
 import re
+import json
 import random
 from datasets import load_dataset
 
@@ -96,6 +97,25 @@ class TaskGSM8K:
         }
 
         return convo
+
+
+class TaskCustomJSON:
+    def __init__(self, filepath, stop=None):
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        self.examples = [json.loads(line) for line in lines]
+        self.length = stop if stop is not None else len(self.examples)
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        if idx >= self.length:
+            raise IndexError(idx)
+        result = {
+            "messages": self.examples[idx]
+        }
+        return result
 
 
 class TaskMixture:
