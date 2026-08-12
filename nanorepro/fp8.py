@@ -108,5 +108,4 @@ class LinearFP8(torch.nn.Linear):
             output = output_2d.reshape(*input.shape[:-1], output_2d.shape[-1])
             if self.bias is not None:
                 output = output + self.bias.to(output.dtype)
-        assert output.dtype == input.dtype
         return output

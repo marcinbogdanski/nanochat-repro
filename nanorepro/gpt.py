@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from nanorepro.fp8 import LinearFP8
 from nanorepro.moe import MoE
-from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func
+from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
 
@@ -34,12 +34,13 @@ class GPTConfig:
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
-    def __init__(self, config, ve_enable, enable_fa3):
+    def __init__(self, config, layer_idx, ve_enable, enable_fa3):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         assert isinstance(enable_fa3, bool)
         self.n_head = config.n_head
         self.block_size = config.block_size
+        self.layer_idx = layer_idx
         self.enable_fa3 = enable_fa3
 
         self.c_q = LinearFP8(config.n_embd, config.n_embd, bias=False)
@@ -53,9 +54,6 @@ class CausalSelfAttentionRoPE(nn.Module):
 
     def _apply_rope(self, q, cos, sin):
         B, T, nh, hs = q.size()
-        # Trim sin, cos to T and add batch dim
-        sin = sin[:, :T, :, :]     # 1,T,1,hs/2
-        cos = cos[:, :T, :, :]     # 1,T,1,hs/2
         # Split x/y
         q_x, q_y = q[..., :hs//2], q[..., hs//2:]  # B,T,nh,hs/2
         # Apply rotation
@@ -78,7 +76,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         cos, sin = cos.to(dtype=dtype), sin.to(dtype=dtype)
         return cos, sin
 
-    def forward(self, x, ve, cos, sin, window_size):
+    def forward(self, x, ve, cos, sin, window_size, kv_cache):
         B, T, C = x.size()
         q = self.c_q(x)    # B, T, nh*hs
         k = self.c_k(x)    # B, T, nh*hs
@@ -105,10 +103,34 @@ class CausalSelfAttentionRoPE(nn.Module):
 
         if self.enable_fa3:
             # Flash Attention 3
-            y = fa3_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+            if kv_cache is None:
+                y = fa3_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+            else:
+                y = fa3_attn_with_kvcache(
+                    q=q_rot,
+                    k_cache=kv_cache.k_cache[self.layer_idx],  # writes in-place
+                    v_cache=kv_cache.v_cache[self.layer_idx],  # writes in-place
+                    k=k_rot,
+                    v=v,
+                    cache_seqlens=kv_cache.cache_seqlens,
+                    causal=True,
+                    window_size=window_size
+                )
         else:
             # SDPA fallback
-            y = sdpa_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+            if kv_cache is None:
+                y = sdpa_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+            else:
+                y = sdpa_attn_with_kvcache(
+                    q=q_rot,
+                    k_cache=kv_cache.k_cache[self.layer_idx],  # writes in-place
+                    v_cache=kv_cache.v_cache[self.layer_idx],  # writes in-place
+                    k=k_rot,
+                    v=v,
+                    cache_seqlens=kv_cache.cache_seqlens,
+                    causal=True,
+                    window_size=window_size
+                )
 
         y = y.contiguous()
         y = y.view(B,T,C)
@@ -130,9 +152,9 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, ve_enable, enable_fa3, enable_metrics=False):
+    def __init__(self, config, layer_idx, ve_enable, enable_fa3, enable_metrics=False):
         super().__init__()
-        self.attn = CausalSelfAttentionRoPE(config, ve_enable, enable_fa3)
+        self.attn = CausalSelfAttentionRoPE(config, layer_idx, ve_enable, enable_fa3)
         self.enable_metrics = enable_metrics
         if not config.moe_enable:
             self.mlp = MLP(config)
@@ -143,8 +165,8 @@ class Block(nn.Module):
     def _norm(self, x):
         return F.rms_norm(x, (x.size(-1),))
 
-    def forward(self, x, ve, cos, sin, window_size):
-        x = x + self.attn(self._norm(x), ve, cos, sin, window_size)        # B,T,E pre-norm
+    def forward(self, x, ve, cos, sin, window_size, kv_cache):
+        x = x + self.attn(self._norm(x), ve, cos, sin, window_size, kv_cache)        # B,T,E pre-norm
         x = x + self.mlp(self._norm(x))  # MoE, if enabled
         if self.enable_metrics:
             sq_sum_t = x.detach().float().square().sum()  # keep as tensor so we don't break graph
@@ -177,7 +199,7 @@ class GPTModel(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             h = nn.ModuleList([
-                Block(config, self._has_ve(i, config.n_layer), enable_fa3, enable_metrics) for i in range(config.n_layer)
+                Block(config, i, self._has_ve(i, config.n_layer), enable_fa3, enable_metrics) for i in range(config.n_layer)
             ]),
         ))
         self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
@@ -533,27 +555,58 @@ class GPTModel(nn.Module):
             if isinstance(block.mlp, MoE):
                 block.mlp.zero_token_counters()
 
-    def _apply_smear(self, x):
+    def _apply_smear(self, x, kv_cache):
         """Mix previous token's embedding into current token (bigram-like)"""
-        x_gate_input = x[:, 1:, :24]                                   # B,T-1,24
-        x_score = torch.sigmoid(self.smear_gate(x_gate_input))         # B,T-1,1
-        x_score = self.smear_lambda.to(x.dtype) * x_score              # B,T-1,1
-        outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
-        assert outputs.dtype == x.dtype        
+        B, T, E = x.shape
+        if kv_cache is None:
+            # No KV cache path
+            x_gate_input = x[:, 1:, :24]                                   # B,T-1,24
+            x_score = torch.sigmoid(self.smear_gate(x_gate_input))         # B,T-1,1
+            x_score = self.smear_lambda.to(x.dtype) * x_score              # B,T-1,1
+            outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
+        else:
+            # KV Cache path
+            if kv_cache.previous_embd is None:
+                # Prefill
+                x_gate_input = x[:, 1:, :24]                                    # B,T-1,24
+                x_score = torch.sigmoid(self.smear_gate(x_gate_input))          # B,T-1,1
+                x_score = self.smear_lambda.to(x.dtype) * x_score               # B,T-1,1
+                outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
+                kv_cache.previous_embd = x[:,-1:,:]   # B,1,E, store for later, view ok since no grads in inference mode
+            else:
+                # Generation
+                assert T==1
+                x_gate_input = x[:, :, :24]                                     # B,1,24
+                x_score = torch.sigmoid(self.smear_gate(x_gate_input))          # B,1,1
+                x_score = self.smear_lambda.to(x.dtype) * x_score               # B,1,1
+                outputs = x + x_score * kv_cache.previous_embd
+                kv_cache.previous_embd = x            # B,1,E, store for later, view ok since no grads in inference mode
         return outputs
 
-    def forward(self, idx, targets=None, reduction='mean', return_logits=True):
+    def get_device(self):
+        return next(self.parameters()).device
+
+    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
         assert idx.device == self.cos.device, "Input device does not match model device."
         assert self.cos.dtype == self.compute_dtype, "Model buffers are not in compute_dtype."
+        assert kv_cache is None or not torch.is_grad_enabled()   # if kv_cache, then ensure no_grad
 
         # Embeddings
         x = self.transformer.wte(idx)             # B,T,E <- B,T
         x = F.rms_norm(x, (x.size(-1),))
 
         # Smear
-        x = self._apply_smear(x)
+        x = self._apply_smear(x, kv_cache)
+
+        # Offset sin/cos
+        offset = 0
+        if kv_cache is not None:
+            # For now we assume seqlens are equal across the batch
+            offset = kv_cache.cache_seqlens[0].item()  # scalar
+        cos = self.cos[:, offset:offset+T, :, :]
+        sin = self.sin[:, offset:offset+T, :, :]
 
         # Transformer
         x0 = x
@@ -564,12 +617,16 @@ class GPTModel(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
-            x, sq_sum_t, num_el = block(x, ve, self.cos, self.sin, self.window_sizes[i])
+            x, sq_sum_t, num_el = block(x, ve, cos, sin, self.window_sizes[i], kv_cache)
             if i == backout_layer:
                 x_backout = x
             if self.enable_metrics:
                 metrics_resid_post_sq_sum.append(sq_sum_t)
                 metrics_resid_post_num_el.append(num_el)
+
+        # Advance kv_cache seqlens
+        if kv_cache is not None:
+            kv_cache.cache_seqlens.add_(T)
 
         # Final backout blending
         if x_backout is not None:
@@ -616,3 +673,43 @@ class GPTModel(nn.Module):
                 return logits, loss, metrics
             else:
                 return None, loss, metrics
+
+    @torch.inference_mode()
+    def sample_one_token(self, logits, temperature=1.0, top_k=None, sample_rng=None):
+        assert logits.ndim == 2  # B,C
+        assert temperature >= 0.0
+        assert top_k is None or 0 < top_k <= logits.size(-1)
+        if temperature == 0.0:
+            return torch.argmax(logits, dim=-1, keepdim=True)  # greedy
+        if top_k is None:
+            probs = F.softmax(logits / temperature, dim=-1)  # B,C
+            ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
+            return ix
+        else:
+            topk_logits, topk_indices = torch.topk(logits, k=top_k, dim=-1)  # B,k
+            probs = F.softmax(topk_logits / temperature, dim=-1)  # B,k
+            ix = torch.multinomial(probs, num_samples=1, generator=sample_rng)  # B,1
+            return torch.gather(topk_indices, -1, ix)  # B,1
+
+    @torch.inference_mode()
+    def generate(self, idx, max_new_tokens, temperature=0.0, top_k=None, sample_rng=None):
+        """Generate max_tokens starting from idx[B,T]"""
+        assert isinstance(idx, torch.Tensor)
+        assert idx.dtype == torch.long
+        assert len(idx.shape) == 2  # B,T
+        assert isinstance(max_new_tokens, int)
+        
+        is_training = self.training
+        self.eval()
+
+        block_size = self.config.block_size
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                idx_tail = idx[:, -block_size:]      # B,T  sliding window
+                logits, _, _ = self(idx_tail)      # B,T,C <- B,T
+                logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
+                xcol = self.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
+                idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
+        
+        self.train(is_training)
+        return idx

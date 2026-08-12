@@ -18,6 +18,9 @@ def fa3_attn_func(q, k, v, causal, window_size):
     # q, k, v are [B,T,nh,hs] dims
     return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
 
+def fa3_attn_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, causal, window_size):
+    # q, k, v are [B,T_new,nh,hs] dims, k_cache, v_cache are pre-allocated [B,T_max,nh,hs] dims
+    return _fa3.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens, causal=causal, window_size=window_size)
 
 def _sdpa_attn_func(q, k, v, causal, window_size):
     """SDPA wrapper to implement window_size"""
@@ -96,3 +99,22 @@ def sdpa_attn_func(q, k, v, causal, window_size):
 
     # Transpose back
     return y.transpose(1, 2)  # B,T,nh,hs
+
+def sdpa_attn_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, causal, window_size):
+    assert q.shape == k.shape == v.shape
+    assert k_cache.shape == v_cache.shape
+    # Determine shapes
+    B, T_new, nh, hs = q.shape
+    T_max = k_cache.shape[1]
+    T_start = cache_seqlens[0].item()
+    T_end = T_start + T_new
+    assert T_end <= T_max  # make sure we fit in the cache
+    # Write cache in-place, same as FA3
+    k_cache[:,T_start:T_end,:,:] = k
+    v_cache[:,T_start:T_end,:,:] = v
+    # Trim so mask aligns correctly to last active token in cache
+    k_cache_trim = k_cache[:, :T_end, :, :]
+    v_cache_trim = v_cache[:, :T_end, :, :]
+    # Call SDPA with the cache
+    y = sdpa_attn_func(q, k_cache_trim, v_cache_trim, causal=causal, window_size=window_size)
+    return y

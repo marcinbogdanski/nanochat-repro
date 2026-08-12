@@ -17,11 +17,41 @@ from nanorepro.gpt import GPTConfig, GPTModel
 from nanorepro.dataloader import DataLoader
 from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.generate import generate_test_samples
 from nanorepro.checkpoint import save_checkpoint, load_checkpoint
 from nanorepro.fp8 import LinearFP8
 from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
 BASE_DIR = get_base_path()
+
+@torch.inference_mode()
+def generate_test_samples(model, tokenizer, device):
+    prompts = [
+        "The capital of France is",
+        "The chemical symbol of gold is",
+        "If yesterday was Friday, then tomorrow will be",
+        "The opposite of hot is",
+        "The planets of the solar system are:",
+        "My favorite color is",
+        "If 5*x + 3 = 13, then x is",
+    ]
+    sample_rng = torch.Generator(device=device)
+    sample_rng.manual_seed(42)
+
+    was_training = model.training
+    model.eval()
+    try:
+        bos = tokenizer.encode_single_token('<|bos|>')
+        results = []
+        for prompt in prompts:
+            tokens =  [bos] + tokenizer.encode(prompt)
+            idx = torch.tensor(tokens, dtype=torch.long, device=device)
+            idx = idx.unsqueeze(0)  # B,T
+            idx = model.generate(idx, max_new_tokens=16, temperature=0.0, top_k=None, sample_rng=sample_rng)  # B,T
+            gen_text = tokenizer.decode(idx[0].tolist())
+            results.append(gen_text)
+        return results
+    finally:
+        model.train(was_training)
+
 
 def main():
 
