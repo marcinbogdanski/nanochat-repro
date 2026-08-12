@@ -3,6 +3,7 @@ import json
 import datetime
 import torch
 import wandb
+import requests
 
 def get_base_path():
     """Returns the base path for storing logs and checkpoints."""
@@ -52,6 +53,20 @@ def wandb_init(run_name, user_config, ddp_master):
         wandb_logger = WandBDummy()
     return wandb_logger
 
+
+def download_file_rank0(filepath, url):
+    """Downloads a file from a URL if it does not exist, only on rank 0."""
+    ddp_rank = int(os.environ.get('RANK', 0))
+    if ddp_rank == 0 and not os.path.exists(filepath):
+        folder_path = os.path.dirname(filepath)
+        if folder_path:
+            os.makedirs(folder_path, exist_ok=True)
+        r = requests.get(url)
+        r.raise_for_status()
+        with open(filepath, "wb") as f:
+            f.write(r.content)
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()  # wait for rank 0
 
 class FileLogger:
     def __init__(self, run_path):
