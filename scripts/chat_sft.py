@@ -10,10 +10,11 @@ import torch
 from nanorepro.gpt import GPTConfig, GPTModel
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import get_latest_checkpoint_step, save_checkpoint
-from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
+from nanorepro.common import get_base_path, ddp_init, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
+from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON
 BASE_DIR = get_base_path()
 
 class DummyOptimizer:
@@ -54,6 +55,7 @@ def main():
     # Data mixture
     parser.add_argument("--mmlu-epochs", type=int, default=3, help="Num MMLU epochs to use (multiple choice questions, default=3)")
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
+    parser.add_argument("--training-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -233,11 +235,29 @@ def main():
         return muon_momentum
 
     # Train Dataloader
-    tasks_train = TaskMixture([
-        TaskSmolTalk(split="train"),                                                          # 460K tasks
-        *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
-        *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
-    ])
+    if args.training_mixture == "core":
+        tasks_train = TaskMixture([
+            TaskSmolTalk(split="train"),                                                          # 460K tasks
+            *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
+            *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
+        ])
+    elif args.training_mixture == "ext":
+        # Script to generate identity_conversations.jsonl is in dev/generate_sft_data.py
+        # Here for convenience I'm using one from Nanochat
+        url = "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
+        identity_conversations_filepath = os.path.join(BASE_DIR, "train_bundle", "identity_conversations.jsonl")
+        download_file_rank0(identity_conversations_filepath, url)
+        tasks_train = TaskMixture([
+            TaskSmolTalk(split="train"),                                                          # 460K tasks
+            TaskCustomJSON(filepath=identity_conversations_filepath),                             #   1K synthetic
+            TaskCustomJSON(filepath=identity_conversations_filepath),                             #   1K synthetic
+            *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
+            *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
+            TaskSimpleSpelling(split="train", stop=200000),                                       # 200K tasks
+            TaskSpellingBee(split="train", stop=80000),                                           #  80K tasks
+        ])
+    else:
+        raise ValueError(f"Unknown training mixture: {args.training_mixture}")
     train_loader = DataLoaderSFT(
         tasks=tasks_train,
         batch_size=micro_batch,

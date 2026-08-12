@@ -1,9 +1,10 @@
+import os
 import re
 import json
 import random
 from datasets import load_dataset
-
-
+from nanorepro.common import get_base_path, download_file_rank0
+BASE_DIR = get_base_path()
 
 class TaskSmolTalk:
     def __init__(self, split, stop=None):
@@ -119,8 +120,11 @@ class TaskCustomJSON:
 
 
 class TaskSimpleSpelling:
-    def __init__(self, filepath, split, stop=None):
+    def __init__(self, split, stop=None):
         assert split in ["train", "test"]
+        url = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
+        filepath = os.path.join(BASE_DIR, "eval_bundle", "words_alpha.txt")
+        download_file_rank0(filepath, url)
         with open(filepath, "r") as f:
             self.words = [line.strip() for line in f.readlines() if line.strip()]
         self.split = split
@@ -213,8 +217,11 @@ SPELLINGBEE_MSG_TEMPLATES = [
 ]
 
 class TaskSpellingBee:
-    def __init__(self, filepath, split, stop=None):
+    def __init__(self, split, stop=None):
         assert split in ["train", "test"]
+        url = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
+        filepath = os.path.join(BASE_DIR, "eval_bundle", "words_alpha.txt")
+        download_file_rank0(filepath, url)
         with open(filepath, "r") as f:
             self.words = [line.strip() for line in f.readlines() if line.strip()]
         self.split = split
@@ -323,6 +330,32 @@ class TaskArc:
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": agent_message},
             ]
+        }
+        return convo
+
+
+class TaskHumanEval:
+    def __init__(self, split, stop=None):
+        assert split == "test"  # HumanEval has only test split
+        self.dataset = load_dataset("openai/openai_humaneval", split=split)
+        self.length = stop if stop is not None else len(self.dataset)
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        if idx >= self.length:
+            raise IndexError(idx)
+        example = self.dataset[idx]
+        prompt = example['prompt']
+        canonical_solution = example['canonical_solution']
+        full_solution = f"{prompt}\n{canonical_solution}"
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": full_solution},
+        ]
+        convo = {
+            "messages": messages,
         }
         return convo
 
