@@ -2,14 +2,12 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
-import json
 import time
 import pickle
 import argparse
 import torch
-from nanorepro.gpt import GPTConfig, GPTModel
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import get_latest_checkpoint_step, save_checkpoint
+from nanorepro.checkpoint import save_checkpoint, load_model
 from nanorepro.common import get_base_path, ddp_init, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
@@ -118,30 +116,18 @@ def main():
     # Model Setup
     run_name = args.run if args.run is not None else "default"
     checkpoints_path = os.path.join(BASE_DIR, "runs", run_name)
-    latest_checkpoint_step = get_latest_checkpoint_step(checkpoints_path)
-    latest_meta_path = os.path.join(checkpoints_path, f"meta_{latest_checkpoint_step:06d}.json")  # last saved file
-    with open(latest_meta_path, "r") as f:
-        pretrain_metadata = json.load(f)
-    model_config = GPTConfig(**pretrain_metadata["model_config"])
-    with torch.device("meta"):
-        model = GPTModel(
-            model_config,
-            compute_dtype=compute_dtype,
-            enable_fa3=not args.no_fa3,
-            fp8_training=enable_fp8,
-            enable_metrics=args.log_metrics,
-        )
-    model.to_empty(device=device)
-    model.init_weights()  # RoPE buffers, rest of weights will be loaded from checkpoint
+    model, pretrain_metadata = load_model(
+        checkpoints_path=checkpoints_path,
+        compute_dtype=compute_dtype,
+        enable_fa3=not args.no_fa3,
+        fp8_training=enable_fp8,
+        enable_metrics=args.log_metrics,
+        device=device,
+        step=None)
     print0("Model configuration:")
     for k, v in model.config.to_dict().items():
         print0(f"  {k:>16}: {v}")
     file_logger.log('model_config', step=None, data=model.config.to_dict())
-
-    # Load Model State
-    model_path = os.path.join(checkpoints_path, f"model_{latest_checkpoint_step:06d}.pt")
-    model_state = torch.load(model_path, map_location=device)
-    model.load_state_dict(model_state)
 
     # Sync across ranks - technically not needed since we seed identically
     if torch.distributed.is_initialized():
@@ -190,7 +176,8 @@ def main():
         enable_metrics=args.log_metrics,
     )
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    optim_path = os.path.join(checkpoints_path, f"optim_{latest_checkpoint_step:06d}_rank{rank:d}.pt")
+    checkpoint_step = pretrain_metadata["step"]
+    optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
     optim_state = torch.load(optim_path, map_location=device)
     # Load AdamW
     base_lrs = [group['lr'] for group in optimizers[0].param_groups]

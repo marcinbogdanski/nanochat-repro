@@ -3,7 +3,6 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import gc
-import json
 import time
 import math
 import torch
@@ -11,13 +10,11 @@ import pickle
 import argparse
 import datasets
 datasets.disable_progress_bars()
-import wandb
-import torch.nn.functional as F
-from nanorepro.gpt import GPTConfig, GPTModel
+from nanorepro.gpt import GPTConfig
 from nanorepro.dataloader import DataLoader
 from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import save_checkpoint, load_checkpoint
+from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, load_model
 from nanorepro.fp8 import LinearFP8
 from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
 BASE_DIR = get_base_path()
@@ -161,7 +158,7 @@ def main():
         torch.use_deterministic_algorithms(True)
 
     # Model Setup
-    def create_model_meta(depth):
+    def create_model_config(depth):
         # Hyperparameters
         vocab_size = tokenizer.n_vocab
         base_dim = depth * args.aspect_ratio
@@ -179,18 +176,17 @@ def main():
             moe_experts=args.num_experts,
             moe_top_k=args.top_k,
         )
-        with torch.device('meta'):
-            model_meta = GPTModel(
-                model_config,
-                compute_dtype=compute_dtype,
-                enable_fa3=not args.no_fa3,
-                fp8_training=enable_fp8,
-                enable_metrics=args.log_metrics,
-            )
-        return model_meta
-    model = create_model_meta(args.depth)
-    model.to_empty(device=device)
-    model.init_weights()
+        return model_config
+
+    model_config = create_model_config(args.depth)
+    model = create_model(
+        model_config=model_config,
+        compute_dtype=compute_dtype,
+        enable_fa3=not args.no_fa3,
+        fp8_training=enable_fp8,
+        enable_metrics=args.log_metrics,
+        device=device
+    )
     print0("Model configuration:")
     for k, v in model.config.to_dict().items():
         print0(f"  {k:>16}: {v}")
@@ -235,7 +231,15 @@ def main():
     print0(f"  Scaling params (matrices + lm_head): {scaling_params:,}")
     print0(f"  Target tokens (scaling_params * target_param_data_ratio): {target_tokens:,}")
 
-    model_d12_ref = create_model_meta(depth=12)
+    model_d12_ref_config = create_model_config(depth=12)
+    model_d12_ref = create_model(
+        model_config=model_d12_ref_config,
+        compute_dtype=compute_dtype,        # not relevant here
+        enable_fa3=not args.no_fa3,         # not relevant here
+        fp8_training=enable_fp8,            # not relevant here
+        enable_metrics=args.log_metrics,    # not relevant here
+        device="meta",
+    )
     d12_params_dict = model_d12_ref.number_scaling_params()
     ref_d12_scaling_params = d12_params_dict['transformer_active'] + d12_params_dict['lm_head']
     print0(f"  Reference d12 scaling params (matrices + lm_head): {ref_d12_scaling_params:,}")

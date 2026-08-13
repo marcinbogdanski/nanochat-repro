@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+from nanorepro.gpt import GPTModel, GPTConfig
 
 def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, user_config, training_hyperparameters):
     os.makedirs(checkpoints_path, exist_ok=True)
@@ -89,3 +90,38 @@ def load_checkpoint(checkpoints_path, model, optimizers, dataloader, device, ste
     dataloader.load_state_dict(dataloader_state)
 
     return loop_vars
+
+def create_model(model_config, compute_dtype, enable_fa3, fp8_training, enable_metrics, device):
+    """Create a GPT model on device and call init_weights(). Returns ready, non-compiled model."""
+    with torch.device("meta"):
+        model = GPTModel(
+            model_config,
+            compute_dtype=compute_dtype,
+            enable_fa3=enable_fa3,
+            fp8_training=fp8_training,
+            enable_metrics=enable_metrics,
+        )
+    model.to_empty(device=device)
+    model.init_weights()  # RoPE buffers, random weight init
+    return model
+
+def load_model(checkpoints_path, compute_dtype, enable_fa3, fp8_training, enable_metrics, device, step=None):
+    """Load a GPT model from checkpoint to device. Returns ready, non-compiled model in eval mode and loaded metadata."""
+    checkpoint_step = get_latest_checkpoint_step(checkpoints_path) if step is None else step
+
+    # Load Model Metadata
+    metadata_path = os.path.join(checkpoints_path, f"meta_{checkpoint_step:06d}.json")
+    with open(metadata_path, "r") as f:
+        model_metadata = json.load(f)
+    assert model_metadata["step"] == checkpoint_step
+    model_config = GPTConfig(**model_metadata["model_config"])
+    model = create_model(model_config, compute_dtype, enable_fa3, fp8_training, enable_metrics, device)
+
+    # Load Model State
+    model_path = os.path.join(checkpoints_path, f"model_{checkpoint_step:06d}.pt")
+    model_state = torch.load(model_path, map_location=device)
+    model_state = {k.removeprefix("_orig_mod."): v for k, v in model_state.items()}  # patch if loading compiled model
+    model.load_state_dict(model_state)
+
+    model.eval()
+    return model, model_metadata  # model is initialized, ready to use, not compiled
