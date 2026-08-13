@@ -24,6 +24,13 @@ class TaskSmolTalk:
         }
         return result
 
+    @property
+    def eval_type(self):
+        return 'none'
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
+
 
 class TaskMMLU:
     def __init__(self, subset, split, stop=None):
@@ -55,12 +62,37 @@ class TaskMMLU:
             "messages": [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": agent_message},
-            ]
+            ],
+            "eval": {
+                "letters": letters,  # used to focus logits during eval
+                "answer": answer
+            }
         }
         return convo
 
+    @property
+    def eval_type(self):
+        return 'categorical'
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        return assistant_response == eval_data["answer"]
+
+
 
 class TaskGSM8K:
+    # Hide inside class for general cleanliness
+    # https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
+    GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+    @staticmethod
+    def extract_answer(assistant_response):
+        match = TaskGSM8K.GSM_ANS_RE.search(assistant_response)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        return None
+
     def __init__(self, subset, split, stop=None):
         self.dataset = load_dataset("openai/gsm8k", subset, split=split)
         self.dataset = self.dataset.shuffle(seed=42)
@@ -90,14 +122,30 @@ class TaskGSM8K:
                 assistant_parts.append({"type": "python_output", "text": result})
             else:
                 assistant_parts.append({"type": "text", "text": part})
+        # Extract answer
+        last_part = assistant_parts[-1]
+        expected_answer = TaskGSM8K.extract_answer(last_part['text'])
+        int(expected_answer)  # throws if not an integer
         convo = {
             "messages": [
                 {"role": "user", "content": question},
                 {"role": "assistant", "content": assistant_parts},
-            ]
+            ],
+            "eval": {
+                "answer": expected_answer
+            }
         }
 
         return convo
+
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        extracted_answer = TaskGSM8K.extract_answer(assistant_response)
+        return extracted_answer == eval_data["answer"]
 
 
 class TaskCustomJSON:
@@ -117,6 +165,13 @@ class TaskCustomJSON:
             "messages": self.examples[idx]
         }
         return result
+
+    @property
+    def eval_type(self):
+        return 'none'
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
 
 
 class TaskSimpleSpelling:
@@ -329,9 +384,21 @@ class TaskArc:
             "messages": [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": agent_message},
-            ]
+            ],
+            "eval": {
+                "letters": letters,  # used to focus logits during eval
+                "answer": answer
+            }
         }
         return convo
+
+    @property
+    def eval_type(self):
+        return "categorical"
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        return assistant_response == eval_data["answer"]  # expecting exact one-letter match
 
 
 class TaskHumanEval:
