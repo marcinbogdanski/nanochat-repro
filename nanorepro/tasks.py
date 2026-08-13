@@ -209,6 +209,13 @@ class TaskSimpleSpelling:
         }
         return result
 
+    @property
+    def eval_type(self):
+        return 'none'
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
+
 
 # User message templates - adopted from Nanochat's spellingbee.py
 SPELLINGBEE_MSG_TEMPLATES = [
@@ -272,6 +279,18 @@ SPELLINGBEE_MSG_TEMPLATES = [
 ]
 
 class TaskSpellingBee:
+    # Hide inside class for general cleanliness, same as GSM8K
+    # https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
+    GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+    @staticmethod
+    def extract_answer(assistant_response):
+        match = TaskSpellingBee.GSM_ANS_RE.search(assistant_response)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        return None
+
     def __init__(self, split, stop=None):
         assert split in ["train", "test"]
         url = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
@@ -344,15 +363,31 @@ Then count the occurrences of '{letter}':
         # Part 5: Final answer
         assistant_parts.append({"type": "text", "text": f"\n\nPython gives us {real_count}.\n\nMy final answer is:\n\n#### {real_count}"})
 
+        # Extract answer
+        last_part = assistant_parts[-1]
+        expected_answer = TaskSpellingBee.extract_answer(last_part['text'])
+        int(expected_answer)  # throws if not an integer
+
         messages = [
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_parts}
         ]
         result = {
             "messages": messages,
+            "eval": {
+                "answer": expected_answer
+            }
         }
         return result
 
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        extracted_answer = TaskSpellingBee.extract_answer(assistant_response)
+        return extracted_answer == eval_data["answer"]
 
 class TaskArc:
     def __init__(self, subset, split, stop=None):
