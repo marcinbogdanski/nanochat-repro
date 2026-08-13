@@ -4,6 +4,7 @@ import json
 import random
 from datasets import load_dataset
 from nanorepro.common import get_base_path, download_file_rank0
+from nanorepro.executor import execute_code
 BASE_DIR = get_base_path()
 
 class TaskSmolTalk:
@@ -81,17 +82,9 @@ class TaskMMLU:
 
 
 class TaskGSM8K:
-    # Hide inside class for general cleanliness
+    # Static so we don't recompile every time
     # https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
-    GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
-    @staticmethod
-    def extract_answer(assistant_response):
-        match = TaskGSM8K.GSM_ANS_RE.search(assistant_response)
-        if match:
-            match_str = match.group(1).strip()
-            match_str = match_str.replace(",", "")
-            return match_str
-        return None
+    GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")  # adopted from GSM8K via Nanochat
 
     def __init__(self, subset, split, stop=None):
         self.dataset = load_dataset("openai/gsm8k", subset, split=split)
@@ -100,6 +93,14 @@ class TaskGSM8K:
     
     def __len__(self):
         return self.length
+
+    def _extract_answer(self, assistant_response):
+        match = TaskGSM8K.GSM_ANS_RE.search(assistant_response)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        return None
     
     def __getitem__(self, idx):
         if idx >= self.length:
@@ -124,7 +125,7 @@ class TaskGSM8K:
                 assistant_parts.append({"type": "text", "text": part})
         # Extract answer
         last_part = assistant_parts[-1]
-        expected_answer = TaskGSM8K.extract_answer(last_part['text'])
+        expected_answer = self._extract_answer(last_part['text'])
         int(expected_answer)  # throws if not an integer
         convo = {
             "messages": [
@@ -144,7 +145,7 @@ class TaskGSM8K:
 
     def evaluate(self, assistant_response, eval_data):
         assert isinstance(assistant_response, str)
-        extracted_answer = TaskGSM8K.extract_answer(assistant_response)
+        extracted_answer = self._extract_answer(assistant_response)
         return extracted_answer == eval_data["answer"]
 
 
@@ -279,17 +280,9 @@ SPELLINGBEE_MSG_TEMPLATES = [
 ]
 
 class TaskSpellingBee:
-    # Hide inside class for general cleanliness, same as GSM8K
+    # Static so we don't recompile every time, same as GSM8K
     # https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
     GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
-    @staticmethod
-    def extract_answer(assistant_response):
-        match = TaskSpellingBee.GSM_ANS_RE.search(assistant_response)
-        if match:
-            match_str = match.group(1).strip()
-            match_str = match_str.replace(",", "")
-            return match_str
-        return None
 
     def __init__(self, split, stop=None):
         assert split in ["train", "test"]
@@ -303,6 +296,14 @@ class TaskSpellingBee:
 
     def __len__(self):
         return self.length
+
+    def _extract_answer(self, assistant_response):
+        match = TaskSpellingBee.GSM_ANS_RE.search(assistant_response)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        return None
 
     def __getitem__(self, idx):
         if idx >= self.length:
@@ -365,7 +366,7 @@ Then count the occurrences of '{letter}':
 
         # Extract answer
         last_part = assistant_parts[-1]
-        expected_answer = TaskSpellingBee.extract_answer(last_part['text'])
+        expected_answer = self._extract_answer(last_part['text'])
         int(expected_answer)  # throws if not an integer
 
         messages = [
@@ -437,13 +438,34 @@ class TaskArc:
 
 
 class TaskHumanEval:
+    # Class variable so we don't re-compile every time
+    CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*\n(.*?)\n```", re.DOTALL)  # Adopted from Nanochat
+
     def __init__(self, split, stop=None):
         assert split == "test"  # HumanEval has only test split
         self.dataset = load_dataset("openai/openai_humaneval", split=split)
+        self.dataset = self.dataset.shuffle(seed=42)
         self.length = stop if stop is not None else len(self.dataset)
 
     def __len__(self):
         return self.length
+
+    def _extract_imports(self, prompt):
+        imports = []
+        for line in prompt.splitlines():
+            line = line.strip()
+            if line.startswith("import ") or line.startswith("from "):
+                imports.append(line)
+            elif line and not line.startswith("#"):
+                break  # break on first non-empty, non-comment line
+        return '\n'.join(imports)
+
+    def _extract_program(self, completion):
+        """Extracts program from first ```python or ``` block, returns completion.strip() otherwise."""
+        match = TaskHumanEval.CODE_BLOCK_RE.search(completion)
+        if match:
+            return match.group(1).strip()
+        return completion.strip()
 
     def __getitem__(self, idx):
         if idx >= self.length:
@@ -456,10 +478,41 @@ class TaskHumanEval:
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": full_solution},
         ]
+        # according to Nanochat, assistant solutions sometimes omit imports,
+        # so we save them and inject during eval as a bit of "help"
+        imports = self._extract_imports(prompt)
+        test = example['test']
+        entry_point = example['entry_point']
         convo = {
             "messages": messages,
+            "eval": {
+                "imports": imports,
+                "entry_point": entry_point,
+                "test": test
+            }
         }
         return convo
+
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    def evaluate(self, assistant_response, eval_data, return_error=False):
+        assert isinstance(assistant_response, str)
+        imports = eval_data["imports"]  # apparently, assistant not always includes imports, so we help a bit
+        assistant_program = self._extract_program(assistant_response)
+        test = eval_data["test"]
+        entry_point = eval_data["entry_point"]
+        full_program = (
+            imports + "\n\n"
+            + assistant_program + "\n\n"
+            + test + "\n\n"
+            + f"check({entry_point})"
+        )
+        success, error = execute_code(full_program)
+        if return_error:
+            return success, error
+        return success
 
 
 class TaskMixture:
