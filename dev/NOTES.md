@@ -1,5 +1,54 @@
 # Assorted Development Notes
 
+## 2026.08.14 - SFT dataset analysis
+
+Quick analysis on how well SFT data we have fit into SFT train/bpb-eval/ChatCORE tests.
+
+TL;DR: approx ~1% of training examples in SmolTalk exceed 2049. Two HumanEval reference answers exceed allowed 512 tokens. Overall ok for now.
+
+#### SFT Training
+
+During SFT training we cut examples to 2048+1 (block_size + one target token). In SFT only the subset of tokens is used for supervised training (expected assistant replies). 2049 tokens of user prompt with no targets is useless.
+
+| Task                 |   Total | Valid in 2049 | No target in 2049 |
+|----------------------|--------:|--------------:|------------------:|
+| SmolTalk train       | 460,341 |       456,501 |             3,840 |
+| Identity train       |   1,000 |         1,000 |                 0 |
+| MMLU auxiliary_train |  99,842 |        99,842 |                 0 |
+| GSM8K train          |   7,473 |         7,473 |                 0 |
+| SimpleSpelling train | 200,000 |       200,000 |                 0 |
+| SpellingBee train    |  80,000 |        80,000 |                 0 |
+
+#### SFT BPB Evaluation
+
+This is exactly the same situation as in SFT Training. We need some eval targets in 2049 tokens.
+
+| Task           |  Total | Valid in 2049 | No target in 2049 |
+|----------------|-------:|--------------:|------------------:|
+| SmolTalk test  | 24,229 |        24,039 |               190 |
+| MMLU test      |  5,200 |         5,200 |                 0 |
+| GSM8K test     |    420 |           420 |                 0 |
+
+#### ChatCORE categorical
+
+ChatCORE categorical takes prompt, truncates to 2048, adds one <assistant_start> token. Output is one token (e.g. A,B,C,D) generated at the last position, so we don't need extra "space". For data example to be valid, task prompt needs to fit in 2048
+
+| Task               |  Total | Prompt ≤2048 | Prompt >2048 |
+|--------------------|-------:|-------------:|-------------:|
+| MMLU test          | 14,042 |       14,042 |            0 |
+| ARC-Easy test      |  2,376 |        2,376 |            0 |
+| ARC-Challenge test |  1,172 |        1,172 |            0 |
+
+#### ChatCORE generative
+
+ChatCORE generative takes prompt, truncates to 2048, adds one <assistant_start> token. Then it allows up to 512 tokens for free-form generation. Technically model was never trained on sequences of 2048+1+512, but not many examples exceed it.
+
+| Task              | Total | Prompt ≤2048 | Prompt >2048 | Answer ≤512 | Answer >512 |
+|-------------------|------:|-------------:|-------------:|------------:|------------:|
+| GSM8K test        | 1,319 |        1,319 |            0 |       1,319 |           0 |
+| HumanEval test    |   164 |          164 |            0 |         162 |           2 |
+| SpellingBee test  |   256 |          256 |            0 |         256 |           0 |
+
 ## 2026.08.09 - Assorted Engine optimizations
 
 Few fixes that give approx ~10%/~3% speedup for SDPA/FA3 SFT engine generation speed. In both cases SDPA/FA3 ours is approx 2-3% slower than Nanochat Engine. Agent didn't see obvious single target w/o deeper profiling. I'm accepting this result for now.
