@@ -1,5 +1,15 @@
 # Assorted Development Notes
 
+## 2026.08.09 - Assorted Engine optimizations
+
+Few fixes that give approx ~10%/~3% speedup for SDPA/FA3 SFT engine generation speed. In both cases SDPA/FA3 ours is approx 2-3% slower than Nanochat Engine. Agent didn't see obvious single target w/o deeper profiling. I'm accepting this result for now.
+
+- in `GPTModel._apply_smear()` add explicit fast path for single-token generation (T==1) `9ff3c66b` 
+- remove assert from LinearFP8 that was affecting speed even when FP8 disabled `90b69f3c`
+- extract `x_col` tokens once per batch, not per row `20553f53`
+- slice RoPE buffers once, not repeat per-layer `8cbca1c4`
+- remove asserts in hot path `55399574`
+
 ## 2026.07.30 - SFT and few issues carried from Nanochat
 
 When testing SFT for equality vs Nanochat `92d63d4e`, I found few potential issues on Nanochat side.

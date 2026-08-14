@@ -387,7 +387,7 @@ Then count the occurrences of '{letter}':
 
     def evaluate(self, assistant_response, eval_data):
         assert isinstance(assistant_response, str)
-        extracted_answer = TaskSpellingBee.extract_answer(assistant_response)
+        extracted_answer = self._extract_answer(assistant_response)
         return extracted_answer == eval_data["answer"]
 
 class TaskArc:
