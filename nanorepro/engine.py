@@ -54,7 +54,6 @@ class Engine:
     def generate(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
         max_new_tokens = self.model.config.block_size - len(tokens) if max_new_tokens is None else max_new_tokens
-        assert 1 <= max_new_tokens <= self.model.config.block_size - len(tokens)  # confirm fits
 
         device = self.model.get_device()
         compute_dtype = self.model.compute_dtype
@@ -126,7 +125,6 @@ class Engine:
     def generate_naive(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
         max_new_tokens = self.model.config.block_size - len(tokens) if max_new_tokens is None else max_new_tokens
-        assert 1 <= max_new_tokens <= self.model.config.block_size - len(tokens)  # confirm fits
         assert self.stop_tokens is None  # we don't support stop tokens here, this function is for base model only and testing
 
         device = self.model.get_device()
