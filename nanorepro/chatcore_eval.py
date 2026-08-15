@@ -156,7 +156,7 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
                     max_new_tokens=max_new_tokens,
                     max_problems=max_problems_gen
                 )
-                num_samples_str = f" {num_samples} samples"
+                num_samples_str = f", pass@{num_samples}"
             else:
                 raise ValueError(f"Unknown eval_type {task.eval_type} for task {task_label}")
             rand_baseline = task.base_accuracy
@@ -171,8 +171,8 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
             })
             dt = time.time() - ts
             if ddp_master:
-                print(f"Task {task_label:>28} ({task.eval_type}{num_samples_str}) | "
-                      f"dt {dt:.1f} | acc {acc:.4f} | centered_acc {centered_acc:.4f}")
+                print(f"Task {task_label:>16} {'('+task.eval_type+num_samples_str+')':<12} | "
+                      f"dt {dt:.1f}s | acc {acc:.4f} | centered_acc {centered_acc:.4f}")
 
         if device.type == 'cuda':
             torch.cuda.synchronize()  # wait for the GPU to finish work
