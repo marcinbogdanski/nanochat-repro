@@ -12,7 +12,8 @@ from nanorepro.common import get_base_path, ddp_init, wandb_init, download_file_
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
-from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON
+from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON, TaskArc, TaskHumanEval
+from nanorepro.chatcore_eval import evaluate_chatcore_metric
 BASE_DIR = get_base_path()
 
 class DummyOptimizer:
@@ -47,6 +48,9 @@ def main():
     # Evaluations
     parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps (-1 to disable, apart from 0 and last step).')
     parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation. (default: 80*524288)')
+    parser.add_argument("--chatcore-every", type=int, default=200, help="Evaluate core metric every N steps (-1 to disable)")
+    parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
+    parser.add_argument("--chatcore-max-sample", type=int, default=24, help="Number of examples for ChatCORE generative tasks (GSM8K, HumanEval, -1 use all)")
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
@@ -269,6 +273,18 @@ def main():
         device=device,
     )
 
+    # ChatCORE Eval Tasks
+    chatcore_tasks = None
+    if args.chatcore_every > 0:
+        chatcore_tasks = {
+            "arc_easy": TaskArc("ARC-Easy", "test"),
+            "arc_challenge": TaskArc("ARC-Challenge", "test"),
+            "mmlu": TaskMMLU("all", "test"),
+            "gsm8k": TaskGSM8K("main", "test"),
+            "human_eval": TaskHumanEval("test"),
+            "spelling_bee": TaskSpellingBee("test")
+        }
+
     # Training Loop
     step, total_time, smooth_tloss = 0, 0.0, 0.0
     x, y = train_loader.get_batch_bos()
@@ -304,6 +320,29 @@ def main():
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
             bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes}
             file_logger.log0('bpb_eval', step, data=bpb_eval_data)
+
+        # ChatCORE Metric
+        if args.chatcore_every > 0 and step > 0 and (step % args.chatcore_every == 0 or last_step):
+            chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
+                tasks_dict=chatcore_tasks,
+                model=orig_model,
+                tokenizer=tokenizer,
+                micro_batch=micro_batch,
+                max_prompt_len=max_seq_len,
+                num_samples=1,
+                temperature=0.0,
+                top_k=50,
+                max_new_tokens=512,
+                max_problems_cat=args.chatcore_max_cat,
+                max_problems_gen=args.chatcore_max_sample,
+            )
+            print0(f"ChatCORE {step} | core metric {chatcore_metric:.14f} | dt {chatcore_total_time:.2f}s")
+            chatcore_accuracies = {result['task_name']: result['centered_accuracy'] for result in chatcore_results_list}
+            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'chatcore_metric': chatcore_metric,
+                              'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen, 'centered_results': chatcore_accuracies})
+            chatcore_metric_data = {'chatcore_metric': chatcore_metric, 'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen,
+                                    'centered_results': chatcore_accuracies, 'chatcore_eval_time': chatcore_total_time}
+            file_logger.log0('chatcore_metric', step, data=chatcore_metric_data)
 
         # Save Model
         if last_step:

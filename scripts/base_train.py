@@ -411,8 +411,8 @@ def main():
             file_logger.log0('bpb_eval', step, data=bpb_eval_data)
 
         # Core Metric
-        # Use original model because shapes keep changing
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
+            # Use orig_model because shapes keep changing
             core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'core_metric': core_metric, 'centered_results': core_accuracies})
