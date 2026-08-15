@@ -14,13 +14,49 @@ from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
 from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON, TaskArc, TaskHumanEval
 from nanorepro.chatcore_eval import evaluate_chatcore_metric
+from nanorepro.calculator import CalculatorAndCounter
+from nanorepro.engine import Engine
 BASE_DIR = get_base_path()
 
-class DummyOptimizer:
-    def __init__(self):
-        pass
-    def state_dict(self):
-        return {}
+@torch.inference_mode()
+def generate_test_samples_sft(orig_model, tokenizer):
+    prompts = [
+        "What is the capital of France?",
+        "What is the chemical symbol of gold?",
+        "If yesterday was Friday, then what will tomorrow be?",
+        "What is the opposite of hot?",
+        "What are the planets of the solar system?",
+        "What is your favorite color?",
+        "If 5*x + 3 = 13, then what is x?",
+    ]
+
+    was_training = orig_model.training
+    orig_model.eval()
+    try:
+        bos_token = tokenizer.encode_single_token('<|bos|>')
+        user_start_token = tokenizer.encode_single_token('<|user_start|>')
+        user_end_token = tokenizer.encode_single_token('<|user_end|>')
+        assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
+        assistant_end_token = tokenizer.encode_single_token('<|assistant_end|>')
+        calculator = CalculatorAndCounter(tokenizer)
+        engine = Engine(orig_model, stop_tokens=[assistant_end_token, bos_token], tool_handler=calculator)
+        results = []
+        for prompt in prompts:
+            tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
+            gen_results = engine.generate(
+                tokens,
+                num_samples=1,
+                max_new_tokens=16,
+                temperature=0.0,
+                top_k=50,
+                seed=42,
+            )
+            for res in gen_results:
+                gen_text = tokenizer.decode(res)
+                results.append(gen_text)
+        return results
+    finally:
+        orig_model.train(was_training)
 
 def main():
 
@@ -51,6 +87,7 @@ def main():
     parser.add_argument("--chatcore-every", type=int, default=200, help="Evaluate core metric every N steps (-1 to disable)")
     parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
     parser.add_argument("--chatcore-max-sample", type=int, default=24, help="Number of examples for ChatCORE generative tasks (GSM8K, HumanEval, -1 use all)")
+    parser.add_argument('--sample-every', type=int, default=200, help='Generate samples every N steps (-1 to disable).')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
@@ -343,6 +380,13 @@ def main():
             chatcore_metric_data = {'chatcore_metric': chatcore_metric, 'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen,
                                     'centered_results': chatcore_accuracies, 'chatcore_eval_time': chatcore_total_time}
             file_logger.log0('chatcore_metric', step, data=chatcore_metric_data)
+
+        # Generate
+        if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or last_step):
+            print0("Generating test samples...")
+            generated_samples = generate_test_samples_sft(orig_model, tokenizer)
+            print0("\n".join(generated_samples))
+            file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
         if last_step:

@@ -184,8 +184,8 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
         participating_cat = [t for t in participating_tasks if tasks_dict[t].eval_type == "categorical"]
         participating_gen = [t for t in participating_tasks if tasks_dict[t].eval_type == "generative"]
         chatcore_metric = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_tasks]) / len(participating_tasks)
-        chatcore_cat_metric = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_cat]) / len(participating_cat)
-        chatcore_gen_metric = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_gen]) / len(participating_gen)
-        return chatcore_metric, chatcore_cat_metric, chatcore_gen_metric, results_list, total_time
+        chatcore_cat = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_cat]) / len(participating_cat)
+        chatcore_gen = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_gen]) / len(participating_gen)
+        return chatcore_metric, chatcore_cat, chatcore_gen, results_list, total_time
     finally:
         model.train(was_training)
