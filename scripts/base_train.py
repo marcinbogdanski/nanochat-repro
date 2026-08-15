@@ -413,8 +413,9 @@ def main():
         # Core Metric
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
             # Use orig_model because shapes keep changing
-            core_metric, core_accuracies, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            core_metric, core_results_list, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
+            core_accuracies = {result['task_label']: result['centered_accuracy'] for result in core_results_list}
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'core_metric': core_metric, 'centered_results': core_accuracies})
             core_metric_data = {'core_metric': core_metric, 'centered_results': core_accuracies, 'core_eval_time': core_eval_time}
             file_logger.log0('core_metric', step, data=core_metric_data)

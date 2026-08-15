@@ -162,7 +162,7 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
             rand_baseline = task.base_accuracy
             centered_acc = (acc - rand_baseline) / (1.0 - rand_baseline)
             results_list.append({
-                "task_name": task_label,
+                "task_label": task_label,
                 "eval_type": task.eval_type,
                 "accuracy": acc,
                 "passed": passed,
@@ -183,9 +183,9 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
         participating_tasks = ["arc_easy", "arc_challenge", "mmlu", "gsm8k", "human_eval"]  # minus SpellingBee
         participating_cat = [t for t in participating_tasks if tasks_dict[t].eval_type == "categorical"]
         participating_gen = [t for t in participating_tasks if tasks_dict[t].eval_type == "generative"]
-        chatcore_metric = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_tasks]) / len(participating_tasks)
-        chatcore_cat = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_cat]) / len(participating_cat)
-        chatcore_gen = sum([r["centered_accuracy"] for r in results_list if r["task_name"] in participating_gen]) / len(participating_gen)
+        chatcore_metric = sum([r["centered_accuracy"] for r in results_list if r["task_label"] in participating_tasks]) / len(participating_tasks)
+        chatcore_cat = sum([r["centered_accuracy"] for r in results_list if r["task_label"] in participating_cat]) / len(participating_cat)
+        chatcore_gen = sum([r["centered_accuracy"] for r in results_list if r["task_label"] in participating_gen]) / len(participating_gen)
         return chatcore_metric, chatcore_cat, chatcore_gen, results_list, total_time
     finally:
         model.train(was_training)

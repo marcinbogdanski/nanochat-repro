@@ -234,7 +234,9 @@ def evaluate_task_accuracy(data_list, model, tokenizer, device,
         torch.distributed.all_reduce(results_tensor, op=torch.distributed.ReduceOp.SUM)
     
     accuracy = results_tensor.mean().item()
-    return accuracy
+    passed = int(results_tensor.sum().item())
+    total = len(data_list)
+    return accuracy, passed, total
 
 @torch.inference_mode()
 def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=-1, bundle_folder=None):
@@ -263,7 +265,7 @@ def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=-1, bun
     try:
 
         # Evaluate tasks
-        result_centered_accuracies = {}
+        results_list = []
         for task in tasks:
             task_label = task['label']
             task_type = task['icl_task_type']
@@ -284,7 +286,7 @@ def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=-1, bun
                 data_list = data_list[:max_examples_per_task]
             
             # Run evaluation
-            accuracy = evaluate_task_accuracy(
+            accuracy, passed, total = evaluate_task_accuracy(
                 data_list,
                 model, tokenizer, device,
                 task_type, task_dataset_uri, task_num_fewshot, task_cont_delim
@@ -292,7 +294,14 @@ def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=-1, bun
             
             rand_baseline = random_baselines[task_label]
             centered_accuracy = (accuracy-0.01 * rand_baseline) / (1.0 - 0.01 * rand_baseline)
-            result_centered_accuracies[task_label] = centered_accuracy
+            results_list.append({
+                "task_label": task_label,
+                "task_type": task_type,
+                "accuracy": accuracy,
+                "passed": passed,
+                "total": total,
+                "centered_accuracy": centered_accuracy,
+            })
 
             dt = time.time() - ts
             if ddp_master:
@@ -304,9 +313,9 @@ def evaluate_core_metric(model, tokenizer, device, max_examples_per_task=-1, bun
         total_time = time.time() - total_time_start
         
         # Compute core metric
-        centered_accuracies = list(result_centered_accuracies.values())
+        centered_accuracies = [r["centered_accuracy"] for r in results_list]
         core_metric = sum(centered_accuracies) / len(centered_accuracies)
-        return core_metric, result_centered_accuracies, total_time
+        return core_metric, results_list, total_time
     finally:
         model.train(was_training)
 

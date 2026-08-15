@@ -374,7 +374,7 @@ def main():
                 max_problems_gen=args.chatcore_max_sample,
             )
             print0(f"ChatCORE {step} | core metric {chatcore_metric:.14f} | dt {chatcore_total_time:.2f}s")
-            chatcore_accuracies = {result['task_name']: result['centered_accuracy'] for result in chatcore_results_list}
+            chatcore_accuracies = {result['task_label']: result['centered_accuracy'] for result in chatcore_results_list}
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'chatcore_metric': chatcore_metric,
                               'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen, 'centered_results': chatcore_accuracies})
             chatcore_metric_data = {'chatcore_metric': chatcore_metric, 'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen,
