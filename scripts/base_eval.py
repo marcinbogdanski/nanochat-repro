@@ -1,9 +1,9 @@
 """
-Evaluate a SFT tuned model.
+Evaluate a model after training.
 
 Run like:
-uv run python -m scripts.chat_eval --eval-tokens=524288 --run=scaling3_6e18_d16-counting
-OMP_NUM_THREADS=1 uv run torchrun --standalone --nproc_per_node=4 -m scripts.chat_eval -- --eval-tokens=524288 --run=scaling3_6e18_d16-counting
+uv run python -m scripts.base_eval --eval-tokens=524288 --run=scaling3_6e18_d16
+OMP_NUM_THREADS=1 uv run torchrun --standalone --nproc_per_node=4 -m scripts.base_eval -- --eval-tokens=524288 --run=scaling3_6e18_d16
 """
 
 import os
@@ -19,31 +19,31 @@ from pathlib import Path
 root = str((Path.cwd() / "../..").resolve())
 sys.path.insert(0, root) if root not in sys.path else None
 
-from nanorepro.dataloader import DataLoaderSFT
-from nanorepro.tasks import TaskMixture, TaskSmolTalk
-from nanorepro.tasks import TaskArc, TaskMMLU  # categorical
-from nanorepro.tasks import TaskSpellingBee, TaskGSM8K, TaskHumanEval  # generative
+from nanorepro.dataloader import DataLoader
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import load_model
 from nanorepro.common import get_base_path, ddp_init
-from nanorepro.chatcore_eval import evaluate_chatcore_metric
+from nanorepro.core_eval import evaluate_core_metric
 BASE_DIR = get_base_path()
 
+# 
 
 def main():
-    parser = argparse.ArgumentParser(description="Eval a SFT model.")
+
+    parser = argparse.ArgumentParser(description="Eval a base model.")
     # Logging
     parser.add_argument('--run', type=str, default=None, help='Run to load')
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
+    # Training Horizon
+    parser.add_argument('--dataset', type=str, default=None, choices=['fineweb', 'climbmix'], help='Training dataset to use (default: use one indicated in checkpoint)')
     # Optimization
     parser.add_argument('--device-batch-size', type=int, default=None, help='Micro batch size per device. (default: None, load from checkpoint)')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
-    parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation. (default: 80*524288)')
-    parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
-    parser.add_argument("--chatcore-max-sample", type=int, default=24, help="Number of examples for ChatCORE generative tasks (GSM8K, HumanEval, -1 use all)")
+    parser.add_argument('--eval-tokens', type=int, default=80*524288, help='Number of tokens to use for evaluation. (default: 80*524288)')
+    parser.add_argument('--core-metric-max-per-task', type=int, default=500, help='Number of examples for core metric evaluation (-1 to use all).')
     args = parser.parse_args()
 
     # Compute setup and helpers
@@ -80,7 +80,7 @@ def main():
 
     # Model Setup
     run_name = args.run if args.run is not None else "default"
-    checkpoints_path = os.path.join(BASE_DIR, "runs_sft", run_name)
+    checkpoints_path = os.path.join(BASE_DIR, "runs", run_name)
     model, pretrain_metadata = load_model(
         checkpoints_path=checkpoints_path,
         compute_dtype=compute_dtype,
@@ -103,51 +103,30 @@ def main():
     pretrain_user_cfg = pretrain_metadata["user_config"]
     max_seq_len = pretrain_user_cfg['max_seq_len']
     micro_batch = args.device_batch_size if args.device_batch_size is not None else pretrain_user_cfg['device_batch_size']
+    dataset = args.dataset if args.dataset is not None else pretrain_user_cfg['dataset']
 
     # Eval Dataloader
     assert args.eval_tokens % (micro_batch * max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (micro_batch * max_seq_len * ddp_world_size)
-    tasks_eval = TaskMixture([
-        TaskSmolTalk(split="test"),                        # 24K tasks
-        TaskMMLU(subset="all", split="test", stop=5200),   #  5.2K tasks - match training ratio before repetition (whole test set is 14K)
-        TaskGSM8K(subset="main", split="test", stop=420),  #  0.42K tasks (whole test set is 1.32K)
-    ])
-    eval_loader = DataLoaderSFT(
-        tasks=tasks_eval,
+    eval_loader = DataLoader(
+        dataset_or_folderpath=dataset,
+        split="val",
         batch_size=micro_batch,
         block_size=max_seq_len,
         tokenizer=tokenizer,
         device=device,
     )
+    print0(f"Eval dataloader initialized with dataset {dataset} shards {eval_loader.first_shard} - {eval_loader.last_shard}")
+    
 
     # BPB Evaluation
     bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
     print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
-
-    # ChatCORE Evaluation
-    tasks_dict = {
-        "arc_easy": TaskArc("ARC-Easy", "test"),
-        "arc_challenge": TaskArc("ARC-Challenge", "test"),
-        "mmlu": TaskMMLU("all", "test"),
-        "gsm8k": TaskGSM8K("main", "test"),
-        "human_eval": TaskHumanEval("test"),
-        "spelling_bee": TaskSpellingBee("test")
-    }
-    chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
-        tasks_dict=tasks_dict,
-        model=orig_model,
-        tokenizer=tokenizer,
-        micro_batch=micro_batch,
-        max_prompt_len=max_seq_len,
-        num_samples=1,
-        temperature=0.0,
-        top_k=50,
-        max_new_tokens=512,
-        max_problems_cat=args.chatcore_max_cat,
-        max_problems_gen=args.chatcore_max_sample,
-    )
-    print0(f"ChatCORE {step} | chatcore metric {chatcore_metric:.14f} | categorical {chatcore_cat} | generative {chatcore_gen} | dt {chatcore_total_time:.2f}s")
-    for res in chatcore_results_list:
+    
+    # CORE Evaluation
+    core_metric, core_results_list, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+    print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
+    for res in core_results_list:
         print0(res)
 
     if torch.distributed.is_initialized():
