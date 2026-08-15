@@ -29,6 +29,10 @@ class TaskSmolTalk:
     def eval_type(self):
         return 'none'
 
+    @property
+    def base_accuracy(self):
+        return None
+
     def evaluate(self, assistant_response, eval_data):
         raise NotImplementedError
 
@@ -74,6 +78,10 @@ class TaskMMLU:
     @property
     def eval_type(self):
         return 'categorical'
+
+    @property
+    def base_accuracy(self):
+        return 0.25  # random guess over 4 choices
 
     def evaluate(self, assistant_response, eval_data):
         assert isinstance(assistant_response, str)
@@ -142,6 +150,10 @@ class TaskGSM8K:
     @property
     def eval_type(self):
         return 'generative'
+
+    @property
+    def base_accuracy(self):
+        return 0.0
 
     def evaluate(self, assistant_response, eval_data):
         assert isinstance(assistant_response, str)
@@ -213,6 +225,10 @@ class TaskSimpleSpelling:
     @property
     def eval_type(self):
         return 'none'
+
+    @property
+    def base_accuracy(self):
+        return None
 
     def evaluate(self, assistant_response, eval_data):
         raise NotImplementedError
@@ -385,6 +401,10 @@ Then count the occurrences of '{letter}':
     def eval_type(self):
         return 'generative'
 
+    @property
+    def base_accuracy(self):
+        return 0.0
+
     def evaluate(self, assistant_response, eval_data):
         assert isinstance(assistant_response, str)
         extracted_answer = self._extract_answer(assistant_response)
@@ -431,6 +451,10 @@ class TaskArc:
     @property
     def eval_type(self):
         return "categorical"
+
+    @property
+    def base_accuracy(self):
+        return 0.25  # random guess over 4 choices
 
     def evaluate(self, assistant_response, eval_data):
         assert isinstance(assistant_response, str)
@@ -496,6 +520,10 @@ class TaskHumanEval:
     @property
     def eval_type(self):
         return 'generative'
+
+    @property
+    def base_accuracy(self):
+        return 0.0
 
     def evaluate(self, assistant_response, eval_data, return_error=False):
         assert isinstance(assistant_response, str)
