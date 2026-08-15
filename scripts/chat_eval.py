@@ -2,8 +2,8 @@
 Evaluate a SFT tuned model.
 
 Run like:
-uv run python -m scripts.chat_eval --eval-tokens=524288 --run=scaling3_6e18_d16-counting
-OMP_NUM_THREADS=1 uv run torchrun --standalone --nproc_per_node=4 -m scripts.chat_eval -- --eval-tokens=524288 --run=scaling3_6e18_d16-counting
+uv run python -m scripts.chat_eval --data-mixture=ext --eval-tokens=524288 --run=scaling3_6e18_d16-counting
+OMP_NUM_THREADS=1 uv run torchrun --standalone --nproc_per_node=4 -m scripts.chat_eval -- --data-mixture=ext --eval-tokens=524288 --run=scaling3_6e18_d16-counting
 """
 
 import os
@@ -44,6 +44,8 @@ def main():
     parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation. (default: 80*524288)')
     parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
     parser.add_argument("--chatcore-max-sample", type=int, default=24, help="Number of examples for ChatCORE generative tasks (GSM8K, HumanEval, -1 use all)")
+    # Data Mixture
+    parser.add_argument("--data-mixture", type=str, default=None, choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
     args = parser.parse_args()
 
     # Compute setup and helpers
@@ -103,6 +105,7 @@ def main():
     pretrain_user_cfg = pretrain_metadata["user_config"]
     max_seq_len = pretrain_user_cfg['max_seq_len']
     micro_batch = args.device_batch_size if args.device_batch_size is not None else pretrain_user_cfg['device_batch_size']
+    data_mixture = args.data_mixture if args.data_mixture is not None else pretrain_user_cfg['data_mixture']
 
     # Eval Dataloader
     assert args.eval_tokens % (micro_batch * max_seq_len * ddp_world_size) == 0
@@ -125,14 +128,25 @@ def main():
     print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
 
     # ChatCORE Evaluation
-    tasks_dict = {
-        "arc_easy": TaskArc("ARC-Easy", "test"),
-        "arc_challenge": TaskArc("ARC-Challenge", "test"),
-        "mmlu": TaskMMLU("all", "test"),
-        "gsm8k": TaskGSM8K("main", "test"),
-        "human_eval": TaskHumanEval("test"),
-        "spelling_bee": TaskSpellingBee("test")
-    }
+    if data_mixture == "core":
+        tasks_dict = {
+            "arc_easy": TaskArc("ARC-Easy", "test"),
+            "arc_challenge": TaskArc("ARC-Challenge", "test"),
+            "mmlu": TaskMMLU("all", "test"),
+            "gsm8k": TaskGSM8K("main", "test"),
+            "human_eval": TaskHumanEval("test"),
+        }
+    elif data_mixture == "ext":
+        tasks_dict = {
+            "arc_easy": TaskArc("ARC-Easy", "test"),
+            "arc_challenge": TaskArc("ARC-Challenge", "test"),
+            "mmlu": TaskMMLU("all", "test"),
+            "gsm8k": TaskGSM8K("main", "test"),
+            "human_eval": TaskHumanEval("test"),
+            "spelling_bee": TaskSpellingBee("test", stop=256),
+        }
+    else:
+        raise ValueError(f"Unknown data mixture: {data_mixture}")
     chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
         tasks_dict=tasks_dict,
         model=orig_model,

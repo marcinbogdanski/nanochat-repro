@@ -82,7 +82,7 @@ def main():
     parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
-    parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps (-1 to disable, apart from 0 and last step).')
+    parser.add_argument('--eval-every', type=int, default=200, help='Evaluate every N steps (-1 to disable, apart from 0 and last step).')
     parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation. (default: 80*524288)')
     parser.add_argument("--chatcore-every", type=int, default=200, help="Evaluate core metric every N steps (-1 to disable)")
     parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
@@ -94,7 +94,7 @@ def main():
     # Data mixture
     parser.add_argument("--mmlu-epochs", type=int, default=3, help="Num MMLU epochs to use (multiple choice questions, default=3)")
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
-    parser.add_argument("--training-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
+    parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -263,13 +263,13 @@ def main():
         return muon_momentum
 
     # Train Dataloader
-    if args.training_mixture == "core":
+    if args.data_mixture == "core":
         tasks_train = TaskMixture([
             TaskSmolTalk(split="train"),                                                          # 460K tasks
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
         ])
-    elif args.training_mixture == "ext":
+    elif args.data_mixture == "ext":
         # Script to generate identity_conversations.jsonl is in dev/generate_sft_data.py
         # Here for convenience I'm using one from Nanochat
         url = "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
@@ -285,7 +285,7 @@ def main():
             TaskSpellingBee(split="train", stop=80000),                                           #  80K tasks
         ])
     else:
-        raise ValueError(f"Unknown training mixture: {args.training_mixture}")
+        raise ValueError(f"Unknown training mixture: {args.data_mixture}")
     train_loader = DataLoaderSFT(
         tasks=tasks_train,
         batch_size=micro_batch,
@@ -313,14 +313,23 @@ def main():
     # ChatCORE Eval Tasks
     chatcore_tasks = None
     if args.chatcore_every > 0:
-        chatcore_tasks = {
-            "arc_easy": TaskArc("ARC-Easy", "test"),
-            "arc_challenge": TaskArc("ARC-Challenge", "test"),
-            "mmlu": TaskMMLU("all", "test"),
-            "gsm8k": TaskGSM8K("main", "test"),
-            "human_eval": TaskHumanEval("test"),
-            "spelling_bee": TaskSpellingBee("test")
-        }
+        if args.data_mixture == "core":
+            chatcore_tasks = {
+                "arc_easy": TaskArc("ARC-Easy", "test"),
+                "arc_challenge": TaskArc("ARC-Challenge", "test"),
+                "mmlu": TaskMMLU("all", "test"),
+                "gsm8k": TaskGSM8K("main", "test"),
+                "human_eval": TaskHumanEval("test"),
+            }
+        elif args.data_mixture == "ext":
+            chatcore_tasks = {
+                "arc_easy": TaskArc("ARC-Easy", "test"),
+                "arc_challenge": TaskArc("ARC-Challenge", "test"),
+                "mmlu": TaskMMLU("all", "test"),
+                "gsm8k": TaskGSM8K("main", "test"),
+                "human_eval": TaskHumanEval("test"),
+                "spelling_bee": TaskSpellingBee("test", stop=256),
+            }
 
     # Training Loop
     step, total_time, smooth_tloss = 0, 0.0, 0.0

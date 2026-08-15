@@ -179,13 +179,11 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
         total_time = time.time() - total_time_start
 
         # Compute ChatCORE metrics
-        # SpellingBee removed in latest Nanochat, I'm keeping it out of curiosity
-        participating_tasks = ["arc_easy", "arc_challenge", "mmlu", "gsm8k", "human_eval"]  # minus SpellingBee
-        participating_cat = [t for t in participating_tasks if tasks_dict[t].eval_type == "categorical"]
-        participating_gen = [t for t in participating_tasks if tasks_dict[t].eval_type == "generative"]
-        chatcore_metric = sum([r["centered_accuracy"] for r in results_list if r["task_label"] in participating_tasks]) / len(participating_tasks)
-        chatcore_cat = sum([r["centered_accuracy"] for r in results_list if r["task_label"] in participating_cat]) / len(participating_cat)
-        chatcore_gen = sum([r["centered_accuracy"] for r in results_list if r["task_label"] in participating_gen]) / len(participating_gen)
+        def mean(values):
+            return sum(values) / len(values) if values else None
+        chatcore_metric = mean([r["centered_accuracy"] for r in results_list])
+        chatcore_cat = mean([r["centered_accuracy"] for r in results_list if r["eval_type"] == "categorical"])
+        chatcore_gen = mean([r["centered_accuracy"] for r in results_list if r["eval_type"] == "generative"])
         return chatcore_metric, chatcore_cat, chatcore_gen, results_list, total_time
     finally:
         model.train(was_training)
