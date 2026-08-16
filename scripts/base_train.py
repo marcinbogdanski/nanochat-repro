@@ -54,7 +54,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
     # Logging
-    parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
+    parser.add_argument('--run', type=str, default="default", help="Current run name (default: 'default').")
+    parser.add_argument('--wandb', action='store_true', help="Enable logging to Weights & Biases, uses name from --run.")
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
@@ -108,8 +109,8 @@ def main():
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
-    wandb_logger = wandb_init(args.run, user_config, ddp_master)
-    run_path = os.path.join(BASE_DIR, "runs", args.run if args.run is not None else "default")
+    wandb_logger = wandb_init(args.run if args.wandb else None, user_config, ddp_master)
+    run_path = os.path.join(BASE_DIR, "runs", args.run)
     file_logger = FileLogger(run_path)  # dummy on non-master processes
     file_logger.log('user_config', step=None, data=user_config, override=True)  # override=True to initialize empty on all ranks
 
