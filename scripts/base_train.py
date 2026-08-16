@@ -14,7 +14,7 @@ from nanorepro.gpt import GPTConfig
 from nanorepro.dataloader import DataLoader
 from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, load_model
+from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
 from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
 BASE_DIR = get_base_path()
@@ -111,8 +111,9 @@ def main():
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run if args.wandb else None, user_config, ddp_master)
     run_path = os.path.join(BASE_DIR, "runs", args.run)
-    file_logger = FileLogger(run_path)  # dummy on non-master processes
-    file_logger.log('user_config', step=None, data=user_config, override=True)  # override=True to initialize empty on all ranks
+    resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
+    file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
+    file_logger.log('user_config', step=None, data=user_config)
 
     # Warnings
     warnings = []
@@ -383,7 +384,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device)
+        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device, step=resume_from_step)
         if not args.deterministic:
             model = torch.compile(orig_model, dynamic=False)
         step = loaded_vars["step"]

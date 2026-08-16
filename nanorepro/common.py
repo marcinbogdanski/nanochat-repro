@@ -4,6 +4,7 @@ import datetime
 import torch
 import wandb
 import requests
+import tempfile
 
 def get_base_path():
     """Returns the base path for storing logs and checkpoints."""
@@ -69,18 +70,39 @@ def download_file_rank0(filepath, url):
         torch.distributed.barrier()  # wait for rank 0
 
 class FileLogger:
-    def __init__(self, run_path):
+    def __init__(self, run_path, resume_from_step=None):
         self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         self.log_filepath = os.path.join(run_path, f"train_log_rank{self.rank}.jsonl")
-        os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
+        if resume_from_step is None:
+            os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
+            open(self.log_filepath, "w").close()  # clear the file if not resuming
+        else:
+            # Rewrite the log file to remove entries with step >= resume_from_step
+            # Otherwise resume just writes more into old log, which may have more steps, imagine:
+            # run 0..345 steps crashes, then resume from checkpoint at 250 appends: 0..345,250.. and so on
+            with tempfile.NamedTemporaryFile('w', dir=run_path, delete=False) as tmp:
+                tmp_path = tmp.name
+                try:
+                    with open(self.log_filepath, 'r') as src:
+                        for line in src:
+                            obj = json.loads(line)
+                            keep = (
+                                obj["event"] != "run_summary"
+                                and (obj["step"] is None or obj["step"] < resume_from_step)
+                            )
+                            if keep:
+                                tmp.write(line)  # preserve original formatting
+                except Exception:
+                    os.remove(tmp_path)
+                    raise
+            os.replace(tmp_path, self.log_filepath)
 
-    def log0(self, event, step, data, override=False):
+    def log0(self, event, step, data):
         if self.rank == 0:
-            self.log(event, step, data, override=override)
+            self.log(event, step, data)
 
-    def log(self, event, step, data, override=False):
+    def log(self, event, step, data):
         datetime_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        with open(self.log_filepath, 'a' if not override else 'w') as f:
-            json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': rank, **data}, f)
+        with open(self.log_filepath, 'a') as f:
+            json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': self.rank, **data}, f)
             f.write('\n')
