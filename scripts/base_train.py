@@ -111,9 +111,14 @@ def main():
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init(args.run if args.wandb else None, user_config, ddp_master)
     run_path = os.path.join(BASE_DIR, "runs", args.run)
+    stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
     resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
     file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
     file_logger.log('user_config', step=None, data=user_config)
+
+    # Remove STOP file
+    if ddp_master and os.path.exists(stop_filepath):
+        os.remove(stop_filepath)
 
     # Warnings
     warnings = []
@@ -400,8 +405,16 @@ def main():
     do_gc = True
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
+    stop_tensor = torch.tensor(0, device=device)
     while True:
         total_flops = step * total_batch_size * flops_per_token
+
+        # Stop File Check
+        if ddp_master:
+            stop_tensor.fill_(int(os.path.exists(stop_filepath)))
+        if torch.distributed.is_initialized():
+            torch.distributed.broadcast(stop_tensor, src=0)
+        stop_requested = bool(stop_tensor.item())
 
         # BPB Evaluation
         # Always eval on step 0 to get a initial baseline
@@ -430,7 +443,7 @@ def main():
             file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
-        if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
+        if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps or stop_requested):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
             checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
@@ -438,7 +451,7 @@ def main():
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
         # Exit Condition
-        if step == max_steps:
+        if step == max_steps or stop_requested:
             break
 
         # Training
