@@ -2,26 +2,61 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
-import json
 import time
 import pickle
 import argparse
 import torch
-from nanorepro.gpt import GPTConfig, GPTModel
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import get_latest_checkpoint_step, save_checkpoint
+from nanorepro.checkpoint import save_checkpoint, load_model
 from nanorepro.common import get_base_path, ddp_init, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
-from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON
+from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON, TaskArc, TaskHumanEval
+from nanorepro.chatcore_eval import evaluate_chatcore_metric
+from nanorepro.calculator import CalculatorAndCounter
+from nanorepro.engine import Engine
 BASE_DIR = get_base_path()
 
-class DummyOptimizer:
-    def __init__(self):
-        pass
-    def state_dict(self):
-        return {}
+@torch.inference_mode()
+def generate_test_samples_sft(orig_model, tokenizer):
+    prompts = [
+        "What is the capital of France?",
+        "What is the chemical symbol of gold?",
+        "If yesterday was Friday, then what will tomorrow be?",
+        "What is the opposite of hot?",
+        "What are the planets of the solar system?",
+        "What is your favorite color?",
+        "If 5*x + 3 = 13, then what is x?",
+    ]
+
+    was_training = orig_model.training
+    orig_model.eval()
+    try:
+        bos_token = tokenizer.encode_single_token('<|bos|>')
+        user_start_token = tokenizer.encode_single_token('<|user_start|>')
+        user_end_token = tokenizer.encode_single_token('<|user_end|>')
+        assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
+        assistant_end_token = tokenizer.encode_single_token('<|assistant_end|>')
+        calculator = CalculatorAndCounter(tokenizer)
+        engine = Engine(orig_model, stop_tokens=[assistant_end_token, bos_token], tool_handler=calculator)
+        results = []
+        for prompt in prompts:
+            tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
+            gen_results = engine.generate(
+                tokens,
+                num_samples=1,
+                max_new_tokens=16,
+                temperature=0.0,
+                top_k=50,
+                seed=42,
+            )
+            for res in gen_results:
+                gen_text = tokenizer.decode(res)
+                results.append(gen_text)
+        return results
+    finally:
+        orig_model.train(was_training)
 
 def main():
 
@@ -47,15 +82,19 @@ def main():
     parser.add_argument('--final-lr-frac', type=float, default=0.0, help='Final LR fraction of initial LR')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
     # Evaluations
-    parser.add_argument('--eval-every', type=int, default=250, help='Evaluate every N steps (-1 to disable, apart from 0 and last step).')
+    parser.add_argument('--eval-every', type=int, default=200, help='Evaluate every N steps (-1 to disable, apart from 0 and last step).')
     parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation. (default: 80*524288)')
+    parser.add_argument("--chatcore-every", type=int, default=200, help="Evaluate core metric every N steps (-1 to disable)")
+    parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
+    parser.add_argument("--chatcore-max-sample", type=int, default=24, help="Number of examples for ChatCORE generative tasks (GSM8K, HumanEval, -1 use all)")
+    parser.add_argument('--sample-every', type=int, default=200, help='Generate samples every N steps (-1 to disable).')
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
     # Data mixture
     parser.add_argument("--mmlu-epochs", type=int, default=3, help="Num MMLU epochs to use (multiple choice questions, default=3)")
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
-    parser.add_argument("--training-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
+    parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -118,30 +157,18 @@ def main():
     # Model Setup
     run_name = args.run if args.run is not None else "default"
     checkpoints_path = os.path.join(BASE_DIR, "runs", run_name)
-    latest_checkpoint_step = get_latest_checkpoint_step(checkpoints_path)
-    latest_meta_path = os.path.join(checkpoints_path, f"meta_{latest_checkpoint_step:06d}.json")  # last saved file
-    with open(latest_meta_path, "r") as f:
-        pretrain_metadata = json.load(f)
-    model_config = GPTConfig(**pretrain_metadata["model_config"])
-    with torch.device("meta"):
-        model = GPTModel(
-            model_config,
-            compute_dtype=compute_dtype,
-            enable_fa3=not args.no_fa3,
-            fp8_training=enable_fp8,
-            enable_metrics=args.log_metrics,
-        )
-    model.to_empty(device=device)
-    model.init_weights()  # RoPE buffers, rest of weights will be loaded from checkpoint
+    model, pretrain_metadata = load_model(
+        checkpoints_path=checkpoints_path,
+        compute_dtype=compute_dtype,
+        enable_fa3=not args.no_fa3,
+        fp8_training=enable_fp8,
+        enable_metrics=args.log_metrics,
+        device=device,
+        step=None)
     print0("Model configuration:")
     for k, v in model.config.to_dict().items():
         print0(f"  {k:>16}: {v}")
     file_logger.log('model_config', step=None, data=model.config.to_dict())
-
-    # Load Model State
-    model_path = os.path.join(checkpoints_path, f"model_{latest_checkpoint_step:06d}.pt")
-    model_state = torch.load(model_path, map_location=device)
-    model.load_state_dict(model_state)
 
     # Sync across ranks - technically not needed since we seed identically
     if torch.distributed.is_initialized():
@@ -190,7 +217,8 @@ def main():
         enable_metrics=args.log_metrics,
     )
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    optim_path = os.path.join(checkpoints_path, f"optim_{latest_checkpoint_step:06d}_rank{rank:d}.pt")
+    checkpoint_step = pretrain_metadata["step"]
+    optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
     optim_state = torch.load(optim_path, map_location=device)
     # Load AdamW
     base_lrs = [group['lr'] for group in optimizers[0].param_groups]
@@ -235,13 +263,13 @@ def main():
         return muon_momentum
 
     # Train Dataloader
-    if args.training_mixture == "core":
+    if args.data_mixture == "core":
         tasks_train = TaskMixture([
             TaskSmolTalk(split="train"),                                                          # 460K tasks
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
         ])
-    elif args.training_mixture == "ext":
+    elif args.data_mixture == "ext":
         # Script to generate identity_conversations.jsonl is in dev/generate_sft_data.py
         # Here for convenience I'm using one from Nanochat
         url = "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
@@ -257,7 +285,7 @@ def main():
             TaskSpellingBee(split="train", stop=80000),                                           #  80K tasks
         ])
     else:
-        raise ValueError(f"Unknown training mixture: {args.training_mixture}")
+        raise ValueError(f"Unknown training mixture: {args.data_mixture}")
     train_loader = DataLoaderSFT(
         tasks=tasks_train,
         batch_size=micro_batch,
@@ -281,6 +309,27 @@ def main():
         tokenizer=tokenizer,
         device=device,
     )
+
+    # ChatCORE Eval Tasks
+    chatcore_tasks = None
+    if args.chatcore_every > 0:
+        if args.data_mixture == "core":
+            chatcore_tasks = {
+                "arc_easy": TaskArc("ARC-Easy", "test"),
+                "arc_challenge": TaskArc("ARC-Challenge", "test"),
+                "mmlu": TaskMMLU("all", "test"),
+                "gsm8k": TaskGSM8K("main", "test"),
+                "human_eval": TaskHumanEval("test"),
+            }
+        elif args.data_mixture == "ext":
+            chatcore_tasks = {
+                "arc_easy": TaskArc("ARC-Easy", "test"),
+                "arc_challenge": TaskArc("ARC-Challenge", "test"),
+                "mmlu": TaskMMLU("all", "test"),
+                "gsm8k": TaskGSM8K("main", "test"),
+                "human_eval": TaskHumanEval("test"),
+                "spelling_bee": TaskSpellingBee("test", stop=256),
+            }
 
     # Training Loop
     step, total_time, smooth_tloss = 0, 0.0, 0.0
@@ -317,6 +366,36 @@ def main():
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
             bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes}
             file_logger.log0('bpb_eval', step, data=bpb_eval_data)
+
+        # ChatCORE Metric
+        if args.chatcore_every > 0 and step > 0 and (step % args.chatcore_every == 0 or last_step):
+            chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
+                tasks_dict=chatcore_tasks,
+                model=orig_model,
+                tokenizer=tokenizer,
+                micro_batch=micro_batch,
+                max_prompt_len=max_seq_len,
+                num_samples=1,
+                temperature=0.0,
+                top_k=50,
+                max_new_tokens=512,
+                max_problems_cat=args.chatcore_max_cat,
+                max_problems_gen=args.chatcore_max_sample,
+            )
+            print0(f"ChatCORE {step} | chatcore metric {chatcore_metric:.14f} | categorical {chatcore_cat} | generative {chatcore_gen} | dt {chatcore_total_time:.2f}s")
+            chatcore_accuracies = {result['task_label']: result['centered_accuracy'] for result in chatcore_results_list}
+            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'chatcore_metric': chatcore_metric,
+                              'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen, 'centered_results': chatcore_accuracies})
+            chatcore_metric_data = {'chatcore_metric': chatcore_metric, 'chatcore_cat': chatcore_cat, 'chatcore_gen': chatcore_gen,
+                                    'centered_results': chatcore_accuracies, 'chatcore_eval_time': chatcore_total_time}
+            file_logger.log0('chatcore_metric', step, data=chatcore_metric_data)
+
+        # Generate
+        if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or last_step):
+            print0("Generating test samples...")
+            generated_samples = generate_test_samples_sft(orig_model, tokenizer)
+            print0("\n".join(generated_samples))
+            file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
         if last_step:

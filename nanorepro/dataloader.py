@@ -275,8 +275,9 @@ class DataLoaderSFT:
             # With hard-trim to 2048, they are too long and skipped, and dataloader picks <512 "natural" conversations, which is better.
             # The issue is that this in turn populates conv_tokens_list with long, unusable conversations that don't fit in 512 and
             # eventually clog the buffer completely. When that happens batch becomes fully padded (no convo fits) and loss goes to NaN
-            conv_tokens_list = conv_tokens_list[:self.block_size]
-            conv_mask_list = conv_mask_list[:self.block_size]
+            # Edit 2026.08.14: Decided to patch this 2048->2049 both here and on my fork of Nanochat
+            conv_tokens_list = conv_tokens_list[:self.block_size+1]  # +1 to include target for last token
+            conv_mask_list = conv_mask_list[:self.block_size+1]
             self.conv_buffer.append((conv_tokens_list, conv_mask_list))
 
     def get_batch_bos(self):
@@ -299,9 +300,15 @@ class DataLoaderSFT:
                 if longest_conv_idx is not None:
                     longest_conv_that_fits, longest_conv_mask = self.conv_buffer.pop(longest_conv_idx)
                     doc_length = len(longest_conv_that_fits)
-                    self.row_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_that_fits, dtype=torch.long)
-                    self.mask_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_mask, dtype=torch.long)
-                    row_pos += len(longest_conv_that_fits)
+                    if all (x == 0 for x in longest_conv_mask):
+                        # Conversation is fully masked, has zero training/eval value at all
+                        # We skip it completely, note that cursor and consumed are advanced so
+                        # progress tracking (LR scaling, termination) is still accurate.
+                        pass
+                    else:
+                        self.row_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_that_fits, dtype=torch.long)
+                        self.mask_buffer[bi, row_pos:row_pos+doc_length] = torch.tensor(longest_conv_mask, dtype=torch.long)
+                        row_pos += len(longest_conv_that_fits)
                     self.consumed += self.world_size
                 else:
                     # No conversation fits, pad the reminder

@@ -4,6 +4,7 @@ import json
 import random
 from datasets import load_dataset
 from nanorepro.common import get_base_path, download_file_rank0
+from nanorepro.executor import execute_code
 BASE_DIR = get_base_path()
 
 class TaskSmolTalk:
@@ -23,6 +24,17 @@ class TaskSmolTalk:
             'messages': example['messages']
         }
         return result
+
+    @property
+    def eval_type(self):
+        return 'none'
+
+    @property
+    def base_accuracy(self):
+        return None
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
 
 
 class TaskMMLU:
@@ -55,12 +67,33 @@ class TaskMMLU:
             "messages": [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": agent_message},
-            ]
+            ],
+            "eval": {
+                "letters": letters,  # used to focus logits during eval
+                "answer": answer
+            }
         }
         return convo
 
+    @property
+    def eval_type(self):
+        return 'categorical'
+
+    @property
+    def base_accuracy(self):
+        return 0.25  # random guess over 4 choices
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        return assistant_response == eval_data["answer"]
+
+
 
 class TaskGSM8K:
+    # Static so we don't recompile every time
+    # https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
+    GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")  # adopted from GSM8K via Nanochat
+
     def __init__(self, subset, split, stop=None):
         self.dataset = load_dataset("openai/gsm8k", subset, split=split)
         self.dataset = self.dataset.shuffle(seed=42)
@@ -68,6 +101,14 @@ class TaskGSM8K:
     
     def __len__(self):
         return self.length
+
+    def _extract_answer(self, assistant_response):
+        match = TaskGSM8K.GSM_ANS_RE.search(assistant_response)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        return None
     
     def __getitem__(self, idx):
         if idx >= self.length:
@@ -90,14 +131,34 @@ class TaskGSM8K:
                 assistant_parts.append({"type": "python_output", "text": result})
             else:
                 assistant_parts.append({"type": "text", "text": part})
+        # Extract answer
+        last_part = assistant_parts[-1]
+        expected_answer = self._extract_answer(last_part['text'])
+        int(expected_answer)  # throws if not an integer
         convo = {
             "messages": [
                 {"role": "user", "content": question},
                 {"role": "assistant", "content": assistant_parts},
-            ]
+            ],
+            "eval": {
+                "answer": expected_answer
+            }
         }
 
         return convo
+
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    @property
+    def base_accuracy(self):
+        return 0.0
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        extracted_answer = self._extract_answer(assistant_response)
+        return extracted_answer == eval_data["answer"]
 
 
 class TaskCustomJSON:
@@ -117,6 +178,13 @@ class TaskCustomJSON:
             "messages": self.examples[idx]
         }
         return result
+
+    @property
+    def eval_type(self):
+        return 'none'
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
 
 
 class TaskSimpleSpelling:
@@ -153,6 +221,17 @@ class TaskSimpleSpelling:
             "messages": messages
         }
         return result
+
+    @property
+    def eval_type(self):
+        return 'none'
+
+    @property
+    def base_accuracy(self):
+        return None
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
 
 
 # User message templates - adopted from Nanochat's spellingbee.py
@@ -217,6 +296,10 @@ SPELLINGBEE_MSG_TEMPLATES = [
 ]
 
 class TaskSpellingBee:
+    # Static so we don't recompile every time, same as GSM8K
+    # https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
+    GSM_ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+
     def __init__(self, split, stop=None):
         assert split in ["train", "test"]
         url = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
@@ -229,6 +312,14 @@ class TaskSpellingBee:
 
     def __len__(self):
         return self.length
+
+    def _extract_answer(self, assistant_response):
+        match = TaskSpellingBee.GSM_ANS_RE.search(assistant_response)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        return None
 
     def __getitem__(self, idx):
         if idx >= self.length:
@@ -289,15 +380,35 @@ Then count the occurrences of '{letter}':
         # Part 5: Final answer
         assistant_parts.append({"type": "text", "text": f"\n\nPython gives us {real_count}.\n\nMy final answer is:\n\n#### {real_count}"})
 
+        # Extract answer
+        last_part = assistant_parts[-1]
+        expected_answer = self._extract_answer(last_part['text'])
+        int(expected_answer)  # throws if not an integer
+
         messages = [
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_parts}
         ]
         result = {
             "messages": messages,
+            "eval": {
+                "answer": expected_answer
+            }
         }
         return result
 
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    @property
+    def base_accuracy(self):
+        return 0.0
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        extracted_answer = self._extract_answer(assistant_response)
+        return extracted_answer == eval_data["answer"]
 
 class TaskArc:
     def __init__(self, subset, split, stop=None):
@@ -329,19 +440,56 @@ class TaskArc:
             "messages": [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": agent_message},
-            ]
+            ],
+            "eval": {
+                "letters": letters,  # used to focus logits during eval
+                "answer": answer
+            }
         }
         return convo
 
+    @property
+    def eval_type(self):
+        return "categorical"
+
+    @property
+    def base_accuracy(self):
+        return 0.25  # random guess over 4 choices
+
+    def evaluate(self, assistant_response, eval_data):
+        assert isinstance(assistant_response, str)
+        return assistant_response == eval_data["answer"]  # expecting exact one-letter match
+
 
 class TaskHumanEval:
+    # Class variable so we don't re-compile every time
+    CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*\n(.*?)\n```", re.DOTALL)  # Adopted from Nanochat
+
     def __init__(self, split, stop=None):
         assert split == "test"  # HumanEval has only test split
         self.dataset = load_dataset("openai/openai_humaneval", split=split)
+        self.dataset = self.dataset.shuffle(seed=42)
         self.length = stop if stop is not None else len(self.dataset)
 
     def __len__(self):
         return self.length
+
+    def _extract_imports(self, prompt):
+        imports = []
+        for line in prompt.splitlines():
+            line = line.strip()
+            if line.startswith("import ") or line.startswith("from "):
+                imports.append(line)
+            elif line and not line.startswith("#"):
+                break  # break on first non-empty, non-comment line
+        return '\n'.join(imports)
+
+    def _extract_program(self, completion):
+        """Extracts program from first ```python or ``` block, returns completion.strip() otherwise."""
+        match = TaskHumanEval.CODE_BLOCK_RE.search(completion)
+        if match:
+            return match.group(1).strip()
+        return completion.strip()
 
     def __getitem__(self, idx):
         if idx >= self.length:
@@ -354,10 +502,45 @@ class TaskHumanEval:
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": full_solution},
         ]
+        # according to Nanochat, assistant solutions sometimes omit imports,
+        # so we save them and inject during eval as a bit of "help"
+        imports = self._extract_imports(prompt)
+        test = example['test']
+        entry_point = example['entry_point']
         convo = {
             "messages": messages,
+            "eval": {
+                "imports": imports,
+                "entry_point": entry_point,
+                "test": test
+            }
         }
         return convo
+
+    @property
+    def eval_type(self):
+        return 'generative'
+
+    @property
+    def base_accuracy(self):
+        return 0.0
+
+    def evaluate(self, assistant_response, eval_data, return_error=False):
+        assert isinstance(assistant_response, str)
+        imports = eval_data["imports"]  # apparently, assistant not always includes imports, so we help a bit
+        assistant_program = self._extract_program(assistant_response)
+        test = eval_data["test"]
+        entry_point = eval_data["entry_point"]
+        full_program = (
+            imports + "\n\n"
+            + assistant_program + "\n\n"
+            + test + "\n\n"
+            + f"check({entry_point})"
+        )
+        success, error = execute_code(full_program)
+        if return_error:
+            return success, error
+        return success
 
 
 class TaskMixture:
