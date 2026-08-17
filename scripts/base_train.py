@@ -16,7 +16,7 @@ from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
-from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
+from nanorepro.common import get_base_path, ddp_init, save_git_diff, collect_provenance, wandb_init, FileLogger
 BASE_DIR = get_base_path()
 
 @torch.inference_mode()
@@ -115,6 +115,7 @@ def main():
     resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
     file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
     file_logger.log('user_config', step=None, data=user_config)
+    file_logger.log('provenance', step=None, data=collect_provenance(run_path))
 
     # Remove STOP file
     if ddp_master and os.path.exists(stop_filepath):

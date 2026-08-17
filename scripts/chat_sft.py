@@ -8,7 +8,7 @@ import argparse
 import torch
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_model
-from nanorepro.common import get_base_path, ddp_init, wandb_init, download_file_rank0, FileLogger
+from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
@@ -110,6 +110,7 @@ def main():
     run_path = os.path.join(BASE_DIR, "runs_sft", args.run if args.run is not None else "default")
     file_logger = FileLogger(run_path)
     file_logger.log('user_config', step=None, data=user_config)
+    file_logger.log('provenance', step=None, data=collect_provenance(run_path))
 
     # Warnings
     warnings = []

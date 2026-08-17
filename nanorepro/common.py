@@ -1,10 +1,14 @@
 import os
+import sys
 import json
 import datetime
 import torch
 import wandb
 import requests
 import tempfile
+import subprocess
+import platform
+
 
 def get_base_path():
     """Returns the base path for storing logs and checkpoints."""
@@ -34,6 +38,62 @@ def ddp_init():
     if ddp_master:
         print(f"Init: {ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
     return device, ddp_master, ddp_world_size
+
+def save_git_diff(run_path):
+    """Saves git diff to run path. Empty file = no diff. No file = error. Rank 0 only."""
+    ddp_rank = int(os.environ.get('RANK', 0))
+    if ddp_rank != 0:
+        return None
+
+    try:
+        diff = subprocess.check_output(["git", "diff", "HEAD"], text=True)  # empty string if no diff; HEAD to get both staged/unstaged changes
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"git_diff_{timestamp}.patch"
+    with open(os.path.join(run_path, filename), "w") as f:
+        f.write(diff)
+    return filename  # return the filename for logging
+    
+
+def collect_provenance(run_path):
+    """Collect git state, torch info, CPU details, etc. into JSON dict"""
+    # Git info
+    
+    try:
+        git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        git_dirty = subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()
+        git_patch = save_git_diff(run_path)
+    except (OSError, subprocess.SubprocessError):
+        git_commit = None
+        git_dirty = None
+        git_patch = None
+
+    info = {
+        "argv": sys.argv,
+        "cwd": os.getcwd(),
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "git_patch": git_patch,
+        "python": sys.version,
+        "platform": platform.platform(),
+        "torch": str(torch.__version__),
+        "cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+    }
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device)
+        info["gpu"] = {
+            "device": device,
+            "name": props.name,
+            "uuid": str(props.uuid),
+            "compute_capability": f"{props.major}.{props.minor}",
+            "total_memory": props.total_memory,
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", None),
+        }
+    return info
 
 def wandb_init(project, run_name, user_config, ddp_master):
     """Initializes WandB if applicable, returns the logger."""
