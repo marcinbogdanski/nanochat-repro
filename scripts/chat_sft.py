@@ -338,6 +338,7 @@ def main():
     x, y = train_loader.get_batch_bos()
     # Progress tracking and stop conditions
     trained_consumed = 0  # data items that were actually used for training
+    bpb_eval_data, chatcore_metric_data, train_log_dict = None, None, None
     while True:
         # Stop Conditions
         last_step = args.num_iterations > 0 and step >= args.num_iterations
@@ -511,7 +512,7 @@ def main():
         'param_counts': param_counts,
         'training_hyperparameters': training_hyperparameters,
         'final_bpb_eval': bpb_eval_data,
-        # 'final_core_metric': core_metric_data,  # todo: replace with chatCORE
+        'final_chatcore_metric': chatcore_metric_data,
         'final_train_log': train_log_dict,
     })
 
