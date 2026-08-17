@@ -109,7 +109,7 @@ def main():
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
-    wandb_logger = wandb_init(args.run if args.wandb else None, user_config, ddp_master)
+    wandb_logger = wandb_init("nanochat", args.run if args.wandb else None, user_config, ddp_master)
     run_path = os.path.join(BASE_DIR, "runs", args.run)
     stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
     resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None

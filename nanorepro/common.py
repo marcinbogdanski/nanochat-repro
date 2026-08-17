@@ -35,7 +35,7 @@ def ddp_init():
         print(f"Init: {ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
     return device, ddp_master, ddp_world_size
 
-def wandb_init(run_name, user_config, ddp_master):
+def wandb_init(project, run_name, user_config, ddp_master):
     """Initializes WandB if applicable, returns the logger."""
 
     # Dummy WandB Logger to simplify calls in the training loop
@@ -49,7 +49,7 @@ def wandb_init(run_name, user_config, ddp_master):
 
     # WandB Init
     if run_name is not None and ddp_master:
-        wandb_logger = wandb.init(project="nanochat", name=run_name, config=user_config, dir=get_base_path())
+        wandb_logger = wandb.init(project=project, name=run_name, config=user_config, dir=get_base_path())
     else:
         wandb_logger = WandBDummy()
     return wandb_logger
