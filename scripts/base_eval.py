@@ -10,14 +10,9 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
-import sys
 import torch
 import pickle
 import argparse
-
-from pathlib import Path
-root = str((Path.cwd() / "../..").resolve())
-sys.path.insert(0, root) if root not in sys.path else None
 
 from nanorepro.dataloader import DataLoader
 from nanorepro.loss_eval import evaluate_bpb
@@ -26,7 +21,6 @@ from nanorepro.common import get_base_path, ddp_init
 from nanorepro.core_eval import evaluate_core_metric
 BASE_DIR = get_base_path()
 
-# 
 
 def main():
 

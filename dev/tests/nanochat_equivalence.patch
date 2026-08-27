@@ -1,0 +1,329 @@
+Patch for Andrej Karpathy's nanochat enabling bit-for-bit equivalence testing
+against nanochat-repro. Applies to nanochat commit 92d63d4e8bb4df75c3b71618f31ddde2378b2bcd.
+
+Contents: determinism settings (fixed seeds, deterministic algorithms, FA3 and
+torch.compile disabled), high-precision loss/BPB/CORE logging, checkpoint MD5
+printing, SFT step-accounting fixes, and test_equivalence_*.sh harnesses.
+
+Apply from the nanochat repo root with:
+  git apply nanochat_equivalence.patch
+
+diff --git a/scripts/base_train.py b/scripts/base_train.py
+index d1af271..03ca730 100644
+--- a/scripts/base_train.py
++++ b/scripts/base_train.py
+@@ -36,6 +36,11 @@ from nanochat.flash_attention import HAS_FA3
+ from scripts.base_eval import evaluate_core
+ print_banner()
+ 
++# vv MARCIN vv override FA3 with SDPA, FA3 community-kernel is non-deterministic
++import nanochat.flash_attention as fa
++fa.USE_FA3 = False
++# ^^ MARCIN ^^
++
+ # -----------------------------------------------------------------------------
+ # CLI arguments
+ parser = argparse.ArgumentParser(description="Pretrain base model")
+@@ -123,6 +128,26 @@ token_bytes = get_token_bytes(device=device)
+ vocab_size = tokenizer.get_vocab_size()
+ print0(f"Vocab size: {vocab_size:,}")
+ 
++### vv MARCIN vv - reproducibility ###
++# Reproducibility
++# Model init relies on identical random seeds, will address later
++torch.manual_seed(42)
++if torch.cuda.is_available():
++    torch.cuda.manual_seed(42)
++    torch.cuda.manual_seed_all(42)
++
++################################ EQUIVALENCE ###############################
++# Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
++torch.backends.cudnn.deterministic = True
++torch.backends.cudnn.benchmark = False
++torch.use_deterministic_algorithms(True)
++
++# torch.backends.cuda.enable_flash_sdp(False)
++# torch.backends.cuda.enable_mem_efficient_sdp(False)
++# torch.backends.cuda.enable_math_sdp(True)
++############################################################################
++### ^^ MARCIN ^^ ###
++
+ # -----------------------------------------------------------------------------
+ # Initialize the Model
+ 
+@@ -150,6 +175,7 @@ print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
+ model.to_empty(device=device) # 2) All tensors get storage on target device but with uninitialized (garbage) data
+ model.init_weights() # 3) All tensors get initialized
+ 
++
+ # If we are resuming, overwrite the model parameters with those of the checkpoint
+ base_dir = get_base_dir()
+ output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
+@@ -243,7 +269,10 @@ def disable_fp8(model):
+ # Compile the model
+ 
+ orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
+-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
++### vv MARCIN vv disable compile for now ###
++# model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
++### ^^ MARCIN ^^ ###
++
+ 
+ # -----------------------------------------------------------------------------
+ # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.
+@@ -424,7 +453,7 @@ while True:
+         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+         with disable_fp8(model):
+             val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+-        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
++        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.14f}")
+         if val_bpb < min_val_bpb:
+             min_val_bpb = val_bpb
+         wandb_run.log({
+@@ -443,7 +472,7 @@ while True:
+         model.eval()
+         with disable_fp8(orig_model):
+             results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
+-        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
++        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.14f}")
+         wandb_run.log({
+             "step": step,
+             "total_training_flops": flops_so_far,
+@@ -497,6 +526,11 @@ while True:
+             },
+             rank=ddp_rank,
+         )
++        if master_process:
++            model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
++            md5sum = os.popen(f"md5sum {model_path}").read().split()[0]
++            print0(f"Saved model {model_path} MD5 sum: {md5sum}")
++        
+ 
+     # termination conditions (TODO: possibly also add loss explosions etc.)
+     if last_step:
+@@ -564,8 +598,8 @@ while True:
+     else:
+         eta_str = ""
+     epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
+-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
+-    if step % 100 == 0:
++    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.16f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
++    if step % 1 == 0:
+         log_data = {
+             "step": step,
+             "total_training_flops": flops_so_far,
+diff --git a/scripts/chat_sft.py b/scripts/chat_sft.py
+index 86a9e6f..515b952 100644
+--- a/scripts/chat_sft.py
++++ b/scripts/chat_sft.py
+@@ -25,6 +25,11 @@ from nanochat.flash_attention import HAS_FA3
+ from nanochat.engine import Engine
+ from scripts.chat_eval import run_chat_eval
+ 
++# vv MARCIN vv override FA3 with SDPA, FA3 community-kernel is non-deterministic
++import nanochat.flash_attention as fa
++fa.USE_FA3 = False
++# ^^ MARCIN ^^
++
+ from tasks.common import TaskMixture
+ from tasks.gsm8k import GSM8K
+ from tasks.mmlu import MMLU
+@@ -93,6 +98,26 @@ if not HAS_FA3:
+ # Load the model and tokenizer
+ model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+ 
++### vv MARCIN vv - reproducibility ###
++# Reproducibility
++# Model init relies on identical random seeds, will address later
++torch.manual_seed(42)
++if torch.cuda.is_available():
++    torch.cuda.manual_seed(42)
++    torch.cuda.manual_seed_all(42)
++
++################################ EQUIVALENCE ###############################
++# Disable TORCH.COMPILE for reproducibility non-DDP/DDP
++torch.backends.cudnn.deterministic = True
++torch.backends.cudnn.benchmark = False
++torch.use_deterministic_algorithms(True)
++
++# torch.backends.cuda.enable_flash_sdp(False)
++# torch.backends.cuda.enable_mem_efficient_sdp(False)
++# torch.backends.cuda.enable_math_sdp(True)
++############################################################################
++### ^^ MARCIN ^^ ###
++
+ # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
+ pretrain_user_config = meta.get("user_config", {})
+ for name, fallback, source in [
+@@ -115,7 +140,9 @@ for name, fallback, source in [
+         print0(f"Using {name}={arg_val}")
+ 
+ orig_model = model
+-model = torch.compile(model, dynamic=False)
++### vv MARCIN vv - disable compile for now ###
++# model = torch.compile(model, dynamic=False)
++### ^^ MARCIN ^^ ###
+ depth = model.config.n_layer
+ num_flops_per_token = model.estimate_flops()
+ tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
+@@ -205,7 +232,11 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
+         nonlocal cursor, epoch
+         while len(conv_buffer) < buffer_size:
+             conversation = dataset[cursor]
+-            ids, mask = tokenizer.render_conversation(conversation)
++            # vv MARCIN vv - properly cut to 2049 including last target token
++            # ids, mask = tokenizer.render_conversation(conversation)
++            # -- MARCIN --
++            ids, mask = tokenizer.render_conversation(conversation, max_tokens=row_capacity)
++            # ^^ MARCIN ^^
+             conv_buffer.append((ids, mask))
+             cursor += ddp_world_size
+             if cursor >= dataset_size:
+@@ -240,8 +271,15 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
+                 if best_idx >= 0:
+                     # Found a conversation that fits - use it entirely
+                     conv, conv_mask = conv_buffer.pop(best_idx)
+-                    row.extend(conv)
+-                    mask_row.extend(conv_mask)
++                    ## vv MARCIN vv - skip fully masked conversations, but still advance consumed
++                    # row.extend(conv)
++                    # mask_row.extend(conv_mask)
++                    ## -- MARCIN --
++                    if not all(x == 0 for x in conv_mask):
++                        # Fully masked conversation have no training value, skip but still advance consumed
++                        row.extend(conv)
++                        mask_row.extend(conv_mask)
++                    ## ^^ MARCIN ^^
+                     consumed += ddp_world_size  # Track actual consumption
+                 else:
+                     # No conversation fits - pad the remainder instead of cropping
+@@ -269,7 +307,10 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
+         if split == "train":
+             current_epoch = epoch
+             if args.num_iterations > 0:
+-                approx_progress = it / args.num_iterations
++                ## vv MARCIN vv - minimal shim to fix progress accounting for LR scaling - see #816
++                # approx_progress = it / args.num_iterations
++                approx_progress = (it - 2) / (args.num_iterations - 1)
++                ## ^^ MARCIN ^^
+             else:
+                 approx_progress = consumed / dataset_size
+             # Trigger last_step when we've consumed enough (instead of when cursor wraps)
+@@ -342,7 +383,7 @@ while True:
+         val_loader = build_val_loader()
+         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+         val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+-        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
++        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.14f}")
+         if val_bpb < min_val_bpb:
+             min_val_bpb = val_bpb
+         wandb_run.log({
+@@ -413,6 +454,10 @@ while True:
+             },
+             rank=ddp_rank,
+         )
++        if master_process:
++            model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
++            md5sum = os.popen(f"md5sum {model_path}").read().split()[0]
++            print0(f"Saved model {model_path} MD5 sum: {md5sum}")
+ 
+     if last_step:
+         break
+@@ -455,7 +500,9 @@ while True:
+     # -------------------------------------------------------------------------
+ 
+     # State
+-    step += 1
++    ## vv MARCIN vv
++    # step += 1
++    ## ^^ MARCIN ^^
+ 
+     # logging
+     smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
+@@ -466,7 +513,7 @@ while True:
+     mfu = 100 * flops_per_sec / (gpu_peak_flops * ddp_world_size)
+     if step > 10:
+         total_training_time += dt # only count the time after the first 10 steps
+-    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
++    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.16f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
+     if step % 10 == 0:
+         wandb_run.log({
+             "step": step,
+@@ -480,6 +527,10 @@ while True:
+             "train/epoch": current_epoch,
+         })
+ 
++    ## vv MARCIN vv
++    step += 1
++    ## ^^ MARCIN ^^
++
+     # The garbage collector spends ~500ms scanning for cycles quite frequently.
+     # We manually manage it to avoid these pauses during training.
+     if step == 1:
+diff --git a/test_equivalence_d4.sh b/test_equivalence_d4.sh
+new file mode 100755
+index 0000000..117166e
+--- /dev/null
++++ b/test_equivalence_d4.sh
+@@ -0,0 +1,8 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++CUDA_VISIBLE_DEVICES=2,3 CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=2 -m scripts.base_train \
++  -- --depth=4 --total-batch-size=262144 --device-batch-size=8 \
++  --eval-every=10 --eval-tokens=524288 --core-metric-every=0 --sample-every=0 --save-every=10 --num-iterations=4 \
++  --window-pattern=SSSL
++# --run=d4k
+diff --git a/test_equivalence_d4_cpu.sh b/test_equivalence_d4_cpu.sh
+new file mode 100755
+index 0000000..ab705de
+--- /dev/null
++++ b/test_equivalence_d4_cpu.sh
+@@ -0,0 +1,7 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++CUDA_VISIBLE_DEVICES="" python -m scripts.base_train \
++  --depth=4 --total-batch-size=2048 --device-batch-size=1 \
++  --eval-every=10 --eval-tokens=2048 --core-metric-every=0 --sample-every=0 --save-every=10 --num-iterations=4 \
++  --window-pattern=SSSL
+diff --git a/test_equivalence_d4_solo.sh b/test_equivalence_d4_solo.sh
+new file mode 100755
+index 0000000..10a42d8
+--- /dev/null
++++ b/test_equivalence_d4_solo.sh
+@@ -0,0 +1,7 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++CUDA_VISIBLE_DEVICES=2 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m scripts.base_train \
++  --depth=4 --total-batch-size=262144 --device-batch-size=8 \
++  --eval-every=10 --eval-tokens=524288 --core-metric-every=0 --sample-every=0 --save-every=10 --num-iterations=4 \
++  --window-pattern=SSSL
+diff --git a/test_equivalence_sft_d4.sh b/test_equivalence_sft_d4.sh
+new file mode 100755
+index 0000000..5b8cd7b
+--- /dev/null
++++ b/test_equivalence_sft_d4.sh
+@@ -0,0 +1,7 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++CUDA_VISIBLE_DEVICES=2,3 CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft \
++  -- --model-tag=d4 --total-batch-size=32768 \
++  --eval-every=10 --eval-tokens=524288 --chatcore-every=-1 --num-iterations=5
++
+diff --git a/test_equivalence_sft_d4_solo.sh b/test_equivalence_sft_d4_solo.sh
+new file mode 100755
+index 0000000..4adc635
+--- /dev/null
++++ b/test_equivalence_sft_d4_solo.sh
+@@ -0,0 +1,8 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# --num-iterations=5 needed because off-by-one last_step bug, see #816
++CUDA_VISIBLE_DEVICES=2 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m scripts.chat_sft \
++  --model-tag=d4 --total-batch-size=16384 \
++  --eval-every=10 --eval-tokens=524288 --chatcore-every=-1 --num-iterations=5
++

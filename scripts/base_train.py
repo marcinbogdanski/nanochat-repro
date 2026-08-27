@@ -65,7 +65,7 @@ def main():
     parser.add_argument('--aspect-ratio', type=int, default=64, help='Total embedding dimension will be depth * aspect_ratio.')
     parser.add_argument('--head-dim', type=int, default=128, help='Head dimension for multi-head attention. Total embedding dimension must be divisible by this.')
     parser.add_argument('--max-seq-len', type=int, default=2048, help='Context length (block size).')
-    parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window patter: L=full, S=half context')
+    parser.add_argument('--window-pattern', type=str, default="SSSL", help='Sliding window pattern: L=full, S=half context')
     parser.add_argument('--moe', action='store_true', help='Use Mixture of Experts (MoE) layers instead of dense MLPs.')
     parser.add_argument("--num-experts", type=int, default=8, help="MoE: number of routed experts (plus one always-on shared, only when MoE enabled)")
     parser.add_argument("--top-k", type=int, default=2, help="MoE: active per-token routed experts (only when MoE enabled)")
