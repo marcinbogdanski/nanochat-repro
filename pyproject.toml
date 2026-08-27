@@ -3,6 +3,8 @@ name = "nanochat-repro"
 version = "0.1.0"
 description = "From-scratch reproduction of Andrej Karpathy nanochat"
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Marcin Bogdanski" }]
 requires-python = ">=3.12"
 dependencies = [
   "ipykernel==7.1.0",

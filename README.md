@@ -1,6 +1,6 @@
 # Nanochat Repro
 
-This repo is a from-scratch, by-hand reproduction of the pretraining stage of Andrej Karpathy's [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from the ground up. This repo includes training scripts, GPT model, distributed AdamW/Muon, FP8 and some other tricks to bring performance on par with reference nanochat. I also reproduced scaling laws experiments.
+This repo is a from-scratch, by-hand reproduction of the pretraining and SFT stages of Andrej Karpathy's [nanochat](https://github.com/karpathy/nanochat). It is built to understand training of LLMs from the ground up. This repo includes training/eval scripts, GPT model, distributed AdamW/Muon, FP8, KV-cache inference and some other tricks to bring performance roughly on par with reference nanochat. I also reproduced scaling laws experiments.
 
 Two extensions beyond original nanochat include:
 
@@ -12,14 +12,19 @@ To more deeply internalize core concepts I wrote most of the code by hand. I use
 
 I would like to deeply thank Andrej and everyone who supported him in building original `nanochat`. In my opinion, it is the best resource currently available for learning LLM training.
 
+Development log with experiments, intermediate results and failures in [LOG.md](dev/LOG.md)
+
 ## Quick Run
+
+Training data and checkpoints are saved to `~/.cache/nanorepro`. SFT automatically reads last pretrain checkpoint state via `--run` tag.
 
 ```bash
 uv sync
 uv run python -m scripts.download_dataset -n 10   # 250 for proper training runs
 uv run python -m scripts.download_eval_bundle
 uv run python -m scripts.train_tokenizer
-uv run ./runs/train_d12.sh
+uv run ./runs/train_d12.sh --run=d12              # pretrain, assumes GPUs 0,1 available
+uv run ./runs/train_sft_d12.sh --run=d12          # SFT continuation
 ```
 
 The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `runs/train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
@@ -30,7 +35,7 @@ This is a reproduction of Andrej [miniseries_v1](https://github.com/karpathy/nan
 
 ![Scaling laws reproduction](assets/scaling_laws_collage.png)
 
-The **BPB Eval by Depth** plot show BPB eval for different runs at constant target FLOPs=6e18. As the model depth increases, to compensate, the number of training tokens is decreased. The total compute used (in estimated FLOPs) is held constant. The plot shows there is some optimum depth/param ratio to get best BPB eval.
+The **BPB Eval by Depth** plot shows BPB eval for different runs at constant target FLOPs=6e18. As the model depth increases, to compensate, the number of training tokens is decreased. The total compute used (in estimated FLOPs) is held constant. The plot shows there is some optimum depth/param ratio to get best BPB eval.
 
 The **Scaling Laws IsoFLOP Curves** plot shows all training runs together, grouped by target FLOPs budget. For each FLOPs budget, a quadratic fit is used to find optimal number of model params (marked as X). The optimal values are as follows:
 
@@ -41,7 +46,7 @@ FLOPS         Params           Tokens   Ratio      BPB
 6e+18    269,470,252    3,385,658,171   12.56   0.7733
 ```
 
-The compute-optimal ratio seems stable around 12-13, which corresponds to NanoChat default =12 in recent commits.
+The compute-optimal ratio seems stable around `12-13`, which corresponds to NanoChat default `12` in recent commits.
 
 The plots **Optimal Model Params** and **Optimal Training Tokens** show linear fit (in log space) used to estimate `C` scaling factor for both training horizon `D` and model params `N`. We get:
 
