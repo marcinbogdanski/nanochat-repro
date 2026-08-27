@@ -1,11 +1,21 @@
 # Assorted Development Notes
 
+## 2026.08.19 - Assorted Fixes
+
+Operational housekeeping (`551d4362`):
+- split `--run` and `--wandb` so we can have named local runs
+- add ability to stop live run cleanly by creating STOP file
+- fix: resume of saved checkpoint properly preserves .jsonl history and appends from checkpoint step
+- collect provenance (git hash etc.) on run start
+
+Minor concession: when branching runs (multiple continuation from same checkpoint), just duplicate folders manually.
+
 ## 2026.08.19 - Unexplained NaNs on 8.15 and 8.16
 
 Two d16 pretraining runs on 08.15 and 08.16 experienced NaNs at steps 1554 and 257 respectively. The run was a base training for purpose of later ChatCORE testing w/o static buffers.
 
 - system was 4x3090 with GPUs clocks limited to 210-1500MHz range. GPUs 0,2 air cooled; 1,3 water cooled
-- event occurred on ephemeral commit corresponding to `f07e2729` in this repo, with merge `b4eeec49` *not* applied
+- event occurred on ephemeral working tree: `f07e2729` minus static-buffer changes `b4eeec49`
 - BPB evaluation and all training steps up to corrupted steps were clean
 
 Run 1 - NaN on step 1554
@@ -30,10 +40,22 @@ Replication attempts
 
 Other findings/suspicions:
 - BPB eval: NaNs occurred shortly after BPB eval, historically (see 2026.06.19 entry) BPB eval caused unexplained metric bumps, Codex tried to replicate and correlate historical issue to this event, with no success
-- PCIe replay errors: GPU 2 was discovered to have marginal PCIe link, PCIe reply errors above 1000/min, peaking at 5300/min. Likely due to Phanteks 60cm riser. Multiple full clean completed before and after the NaN event.
+- PCIe replay errors: GPU 2 was discovered to have marginal PCIe link, PCIe replay errors above 1000/min, peaking at 5300/min. Likely due to Phanteks 60cm riser. Multiple full clean runs completed before and after the NaN event.
 - GPU temps: both air and water cooled GPUs run hot reaching ~80C core, 96C hotspot, 90C VRAM. This is known and no different from many successful runs w/o NaNs (rig is overdue for rebuild).
 
 Root cause remains unknown. 
+
+## 2026.08.16 - ChatCORE metric
+
+This wraps larger arc of work related to replicating Nanochat SFT functionality
+
+Items (`6ad7d18a`):
+- ChatCORE metric implemented, per-task accuracy (centered, similar to CORE), then averaged over tasks
+- categorical tasks (MMLU, ARC) - logits focused to possible valid answers (A/B/C/D etc.), so this "helps" model a bit
+- generative tasks (GSM8K, SpellingBee, HumanEval) - free form generated and answer extracted by regex or passed to Python executor
+- standalone eval scripts (finally!) in `chat_eval.py` and `base_eval.py`
+
+I'm keeping ChatCORE limits: 2048+1 prompt limit and 512 generation limit, as per data exploration earlier.
 
 ## 2026.08.14 - SFT dataset analysis
 
@@ -84,15 +106,42 @@ ChatCORE generative takes prompt, truncates to 2048, adds one <assistant_start> 
 | HumanEval test    |   164 |          164 |            0 |         162 |           2 |
 | SpellingBee test  |   256 |          256 |            0 |         256 |           0 |
 
-## 2026.08.09 - Assorted Engine optimizations
+## 2026.08.12 - SpellingBee and synthetic dataset
 
-Few fixes that give approx ~10%/~3% speedup for SDPA/FA3 SFT engine generation speed. In both cases SDPA/FA3 ours is approx 2-3% slower than Nanochat Engine. Agent didn't see obvious single target w/o deeper profiling. I'm accepting this result for now.
+Items (`b28d821c`):
+- SimpleSpelling / SpellingBee - a letter counting task demonstrating how to teach model to answer "How many 'r' in 'strawberry'"
+- synthetic data generation - training model identity "I am Nanochat reproduction..."
+- added ARC-Easy, ARC-Challenge and HumanEval - needed for ChatCORE metric soon
+
+SpellingBee and synthetic data generation were both originally in Nanochat SFT, but were removed later in `950a1dc6`. I find them educational so I kept both as optional extras.
+
+## 2026.08.10 - Engine and KV-cache completed
+
+Items (`5e2a1d85`):
+- KV cache implemented in `gpt.py` and `flash_attention.py`, both FA3 and SDPA paths
+- Engine class with batched KV-cache inference, per-row stop-token handling
+- basic tool calling support inside Engine, similar to Nanochat
+
+Quick sampling test (d12, prompt ~1k tokens, 8 samples, ~128 tok per sample) shows naive generation at 11.58s and KV-cache enabled generation at 1.45s (~8x speedup, 1x3090@1500MHz).
+
+## 2026.08.09 - Assorted generation optimizations
+
+Few fixes that give approx ~10%/~3% speedup for SDPA/FA3 SFT generation speed. In both cases SDPA/FA3 ours is approx 2-3% slower than Nanochat Engine. Agent didn't see obvious single target w/o deeper profiling. I'm accepting this result for now.
 
 - in `GPTModel._apply_smear()` add explicit fast path for single-token generation (T==1) `9ff3c66b` 
 - remove assert from LinearFP8 that was affecting speed even when FP8 disabled `90b69f3c`
 - extract `x_col` tokens once per batch, not per row `20553f53`
 - slice RoPE buffers once, not repeat per-layer `8cbca1c4`
 - remove asserts in hot path `55399574`
+
+## 2026.08.02 - SFT groundwork completed
+
+Items `5084c5af`:
+- added `chat_sft.py` and `tasks.py`, expanded `dataloader.py` and `tokenizer.py`
+- load model and selected hyperparameters from a pretrained checkpoint
+- add task layer: SmolTalk/MMLU/GSM8K (dusted off from pre-existing notebooks)
+- add SFT dataloader and conversation renderer
+- added bit-equivalence tests - for `grad_accum > 1` Nanochat-side patches from entry 2026.07.30 are required
 
 ## 2026.07.30 - SFT and few issues carried from Nanochat
 
@@ -106,7 +155,7 @@ When testing SFT for equality vs Nanochat `92d63d4e`, I found few potential issu
 
 These are covered in PR: https://github.com/karpathy/nanochat/pull/816
 
-Hopefully this gets merged, otherwise we need to diverge train SFT.
+Hopefully this gets merged. Otherwise our SFT implementation will diverge from Nanochat.
 
 **Related to conversations trimmed to hard-coded 2048**
 
@@ -127,7 +176,7 @@ if args.deterministic:
         torch.cuda.manual_seed_all(42)
 ```
 
-This means that in normal runs before `cd191a7` (including Scaling Laws runs), parameters were initialized with different RNG across the ranks. This had following effects:
+This means that in normal runs before `cd191a7f` (including Scaling Laws runs), parameters were initialized with different RNG across the ranks. This had following effects:
 
 - params with `is_small=False` (`wte`, `lm_head`, `value_embeds` and all Muon params) - were initialized differently on each rank, and only synced at the end of the first optimizer pass
 - small params (`resid_lambdas`, `x0_lambdas`, `smear_lambda`, `backout_lambda`) - are initialized to constant values and not affected
@@ -135,7 +184,7 @@ This means that in normal runs before `cd191a7` (including Scaling Laws runs), p
 
 The bug has few potentially detrimental effects:
 
-**Runs were unseeded** while intention was to use same seed. Our Scaling Laws experiments repeated each config n=1 times. As each config has different model shape, and resulting matrix shapes affect random init even on same seed. This means each of our Scaling Laws runs would have had effectively differently randomly initialized model, even on same seed. In context of Scaling Laws I'm going to hand wave this.
+**Runs were unseeded** - the intention was to use the same seed. But for this Scaling Laws set of runs this changes very little. Each config ran n=1 times, and since each config has different matrix shapes, even correctly applied seed would result in different random init anyway. So seeded or not, each config has one random init per config. I'm going to hand-wave this.
 
 **1st step cross-rank divergence and sync** - on first step params across ranks were different, so grads had higher variance. In theory this could introduce "shock" to the network on 1st step, which may or may not have had an effect. Given amount of noise present in normal training and initial warmup LR at 1/40 I don't see this 1st-step-only issue having a significant effect.
 
@@ -152,9 +201,22 @@ Result:
 |-----------------|---|----------|----------|
 | A (fixed)       | 9 |  0.97845 |  0.00020 |
 | B (divergent)   | 9 |  0.97842 |  0.00026 |
-| A-B             | - |  0.00002 |        - |
+| A-B             | - |  0.00003 |        - |
 
 The mean difference is on the order of 10x smaller than either A or B spread. It seems the `smear_gate` has no measurable effect in this case.
+
+## 2026.07.24 - EqMuon/Muon+, MoE update, tokenizer fix
+
+Chasing Nanochat again (`d14b8307`):
+
+- Muon upgrades: implemented EqMuon and Muon+
+- aligned MoE to match Nanochat `moe3` branch
+- MPS FP32 optimizer fixes - technically not needed for bit parity, but make code more explicit
+- tokenizer token-bytes fix - to correctly count token length by bytes, not string length
+
+Take a token holding single raw byte `0x80` (invalid UTF-8 fragment). Previously length would be calculated by first converting to string, which in this case produces `U+FFFD`, which is 3-bytes when re-encoded. After fix length is calculated by taking byte length directly, which in this case is 1.
+
+This changes BPB eval values slightly.
 
 ## 2026.07.11 - Muon static buffers
 
@@ -170,17 +232,25 @@ Tests on 4x3090, depth=20:
 
 It ain't much, but it's honest work.
 
+## 2026.06.22 - Scaling Laws analysis
+
+Basically the last Scaling Law run worked, I got scaling params `N ~= C^0.4698` and tokens `D ~= C^0.5489`, which is somewhat close to Nanochat `N ~= C^0.5` and `D ~= C^0.5`. The optimal param:token ratio around `~12` which is also close to Nanochat default `12`. I wrote more extensively in [README.md](../README.md).
+
+I also did quick hyperparameter sweep (matrix/embd LRs, warmdown, batch size, WD) which confirmed current defaults are sensible.
+
+I decided to rename repo from `my-nanochat` to `nanochat-repro` to better reflect what it really is. This includes package rename `mynanochat`->`nanorepro`.
+
 ## 2026.06.19 - FA3 community kernel
 
-Training default d12 model, with BPB eval every 250 steps, causes bumps in `plot17_value_embed.weight_update_ratio` plots.
+BPB eval affects subsequent training steps, which is clearly an error. Training default d12 model, with BPB eval every 250 steps, causes bumps in `plot17_value_embed.weight_update_ratio` training plots.
 
 - 8xH100 with `varunneal/flash-attention-3` - clean, no bumps
-- 2x3090 with `kernels-community/flash-attn3` - yes, bumps exits
+- 2x3090 with `kernels-community/flash-attn3` - yes, bumps exist
 - 2x3090 with SDPA - clean, no bumps
 
 Two runs with same params on same 2x3090 system produce bumps/no-bumps depending if FA3 is enabled.
 
-Me, Claude and Codex inspected the code, and found not other paths through with eval could affect subsequent training code.
+Me, Claude and Codex inspected the code in depth. We found no way in which BPB eval could affect subsequent training in this repo. Issue must be deeper.
 
 Since disabling FA3 or changing kernel removes the issue, I am inclined to tentatively put it as issue in `kernels-community/flash-attn3`
 
@@ -197,10 +267,388 @@ Why? Codex/Claude did code review and batching/grad-accum seems ok, they say it'
 
 I'm not satisfied with that explanation. Since BPB eval during runs overlap, i'm leaving it for now.
 
+## 2026.06.17 - Gradient Metrics Fix
+
+The mistake was to log `num_el`/`sum_sq` based on rank-local gradient after optimizer step. The `.grad` would contain rank-local non-averaged values. The fix was to move `num_el`/`sum_sq` logging into optimizer internals, similar to params/updates. See `f920f86b`.
+
+For single-rank case, gradient RMS is:
+
+```python
+RMS_G =       sqrt( 1/len(G) * sum(G[i]**2) )         # pseudocode
+```
+
+For 2-rank system, we want:
+
+```python
+G = (G_0 + G_1) / 2    # avg over ranks first
+RMS_G =    sqrt( 1/len(G) * sum(G[i]**2) )
+```
+
+What code was doing before the fix was:
+
+```python
+RMS_G = sqrt(  1/(2*len(G)) * (  sum(G_0[i]**2) + sum(G_1[i]**2)  )  )
+```
+
+## 2026.06.10 - Scaling Laws 3
+
+Scaling Law runs completed and look sane. 18 runs (1e18/3e18/6e18, depths: 10,12,14,16,18,20) took ~6.5h on a rented 8xH200. Artifacts saved: logs with BPB every 250 steps at 80x eval tokens, final checkpoints saved, advanced metrics on.
+
+So far so good, more to follow.
+
+## 2026.06.04 - 8xH200 Shakedown and Dataloader Speedup
+
+8xH200 testing showed significant ~30% speed gap between this repo and Nanochat due to dataloader shortcomings.
+
+Dataloader on 8xH200 (`c496b503`)
+
+- on 8xH200 with grad accum 1, this repo ran at approx 70% of Nanochat speed
+- normal steps were slower, but major problem was repeated `1.0-1.8s` stalls
+- traces showed that one rank was stuck in Python dataloader code, while other ranks waited
+- the issue was further narrowed to unnecessary full Parquet shard loading (approx `1.5-1.7s`)
+
+The dataloader fix was multifold:
+
+- load only active row group, instead of full shard - remove the `1.0-1.8s` stalls
+- move data fetch after backward pass (so they overlap with GPU)
+- batch tokenization, pinned CPU transfer buffer, send x/y in single joint transfer
+- periodic manual GC - avoid occasional tok/s drop visible in WandB, likely minor overall impact
+- implement exact save/resume - in `--deterministic` mode save/resume is bit-for-bit identical to uninterrupted run
+
+When starting this project, I consciously decided not to "blindly" transfer techniques or optimizations from Nanochat. Instead decided to use it as guidance and verification. I was aware of dataloader discrepancy between projects. On 4x3090, above optimizations made very little difference, so I didn't port them at a time.
+
+By this point this pattern repeated few times: Do something "my way", while later discover an issue, and see "ah, that's why" and port "Nanochat way".
+
+## 2026.05.25 - 1xH100 Debug
+
+I am going to run Scaling Laws on a proper 8xH100/H200 node - they seem available again, although sparsely.
+
+Initial 1xH100 shakedown (`505eeb00`):
+
+- initial results: `281k tok/s` vs Nanochat `413k tok/s`, disabling FP8 moved both only few percent
+- profiling showed very fragmented graph, 387 regions in ours vs 75 in Nanochat (wait, what?)
+- the cause was lazy FA3 kernel resolution in a hot path in `fa3_attn_func`, causing compiled region break
+- for added comedic value, I made exactly the same mistake earlier and fixed it in `12a33d39`
+- after the fix, recovered approx `413k tok/s`
+
+## 2026.05.25 - Scaling Laws 2
+
+Nine days of compute and I forgot to remove `--eval-tokens=524288` override (should be 80x that). No checkpoints to re-eval. Literally can't believe it. Facepalm doesn't even cut it anymore :head_bang_emoji:
+
+Git `d4e9932c`, run params:
+
+- budgets `1e18`, `3e18`, `6e18`
+- depths: 10, 12, 14, 16, 18, 20
+- extra `6e18` runs at d13 and d15 to better locate the optimum
+- approx 120-130h of compute spent in chunks 15-24 May
+- hardware: 4x3090 @1500MHz
+
+| FLOPs             |    1e18 |    3e18 |    6e18 |
+|-------------------|--------:|--------:|--------:|
+| Best tested depth |      12 |      16 |      16 |
+| Best BPB          | 0.84416 | 0.79459 | 0.76651 |
+
+Fitted scaling roughly `N ~ C^0.46`, `D ~ C^0.55`, which is close to expected square-root allocation. It also supports param:data ratio of roughly 12.
+
+Nanochat scaling sweep `c8d93bee` (2026.01.27) established roughly `N ~ C^0.5`, `D ~ C^0.5`. Nanochat default param:data ratio is 12, established in `1cd94d76` closely after "Autoresearch round 2". So we are in the same ball park.
+
+Reasons I'm not happy with this sweep:
+
+- BPB eval used only `524,288` tokens, the intended default was `80x` that
+- at one run per FLOPs-depth pair we could use more precise BPB estimate
+- no checkpoints saved, so I can't re-eval. new rule: always save checkpoints
+- also, at each FLOPs target minima were pretty flat
+
+To address last point, I tried to add d13/d15 data points, but because model width is rounded up to a multiple of head size, the param counts for d13/d15 ended very close to d14/d16 and added basically no value.
+
+## 2026.04.11 - Scaling Laws 1
+
+I forgot to enable BPB eval. Facepalm. Git `80d02e30`
+
+- target FLOPs budgets: `1e17`, `2.15e17`, `4.64e17`, `1e18`
+- depths: 10, 12, 14, 16, 18
+- 20 runs total, approx 17h of wall clock time
+- hardware: 4x3090 @1500MHz
+
+No final or periodic BPB eval, so it's a wash.
+
+
+## 2026.04.10 - Advanced Metrics: activations RMS, grads and param update norms etc.
+
+I always have anxiety when training: what if there is hidden issue handicapping the run, that I'm not aware off?
+
+I introduced (`a0d73b4b`) few more-or-less canonical metrics for quick visibility:
+
+- total gradient norm (all params)
+- total parameter norm (all params)
+- total update norm and ratio (all params)
+- logits RMS (reduced across ranks)
+- confidence (max prob mean)
+- entropy (mean)
+
+Above are useful to see if something obviously blew up (spikes, runaway growth, update norm health, etc). May also serve as leading indicators in case we hit NaNs (what blew up first).
+
+And a few metrics gathered per-layer for deeper inspection:
+
+- post-block forward residual RMS by layer
+- param gradient RMS by layer (attn+mlp)
+- param update ratio by layer (attn+mlp)
+
+These help see if signal/gradient/updates are healthy across layers and help detect obviously unbalanced training.
+
+The main challenge is that our Optimizers are distributed and sharded. Let's take update_ratio in AdamW as an representative example.
+
+```python
+# Pseudocode
+RMS_delta_W = sqrt( 1/len(delta_W) * sum(delta_W[i]**2) )
+RMS_W =       sqrt( 1/len(W)       * sum(W[i]**2)       )
+update_ratio = RMS_delta_W / RMS_W = sqrt( sum(delta_W[i]**2) / sum(W[i]**2) )
+```
+
+During training, AdamW tensors are sharded by rows. While `W` is replicated, no rank holds full `delta_W`. We have two options:
+
+a) introduce extra synchronization - bad due to added overhead
+b) save per-rank `num_el = len(W)` and `sum_sq = sum(W[i]**2)` (and corresponding deltas), and assemble final `update_ratio` in post
+
+I went with option b). This still adds overhead, but nowhere as much. For each relevant tensor I'm saving `num_el` and `sum_sq` into structured JSONL log. Then in Jupyter notebook `analyze_train_metrics.ipynb` I use Pandas to assemble them into final results.
+
+Muon operates on full tensors (it must due to orthogonalization), so in theory it could assemble full metrics. But notice same mechanism can be applied. Ranks that don't participate in particular tensor just emit `num_el=0` and `sum_sq=0` and everything works the same.
+
+There is corner case of small tensors: they are fully replicated across the ranks, so I just emit `num_el=0`/`sum_sq=0` when `rank != 0`
+
+Param `--log-metrics` by default is off, and should preserve full speed for no-logging case. Notably all that required a bit of torch-yoga to return additional metrics from compiled blocks w/o breaking things.
+
+| Configuration   | Mean step | Median step | Throughput      | Change |
+|-----------------|----------:|------------:|----------------:|-------:|
+| Metrics off     | 3,669.2 ms | 3,674.1 ms | 142,890 tok/s   |      - |
+| Metrics on      | 3,813.1 ms | 3,815.3 ms | 137,495 tok/s   |  -3.8% |
+
+_table: depth=12, 4x3090 @1500MHz, device batch 8, FA3 via kernels-community, vocab 32K_
+
+## 2026.04.05 - Full Runs: FineWeb Dense, MoE, ClimbMix, Autoresearch
+
+With autoresearch changes done, I decided to do some end-to-end pretraining runs.
+
+| Configuration                       | Vocab | Softcap | Final step |     BPB |    CORE | Median throughput | Training time | Peak memory |
+|-------------------------------------|------:|--------:|-----------:|--------:|--------:|------------------:|--------------:|------------:|
+| ClimbMix + Autoresearch `b6de7fdf`  |   32K |      15 |      2,205 | 0.85368 | 0.13917 |     185,421 tok/s |       1:47:50 |     9.37 GB |
+| ClimbMix `3cda3754`                 |   32K |      20 |      2,205 | 0.86260 | 0.14350 |     183,385 tok/s |       1:48:33 |     9.60 GB |
+| FineWeb MoE `94af4d3a`              |   32K |      15 |      2,206 | 0.89066 | 0.14223 |     132,608 tok/s |       2:28:31 |    13.60 GB |
+| FineWeb dense `94af4d3a`            |   32K |      15 |      2,205 | 0.90668 | 0.13895 |     174,602 tok/s |       1:54:04 |     9.60 GB |
+
+_table: depth=12, 4x3090 @1500MHz, device batch 8, FA3 via kernels-community, vocab 32K, training time excludes BPB/CORE/model saving_
+
+CORE seems quite noisy as a metric, having said that:
+
+- MoE improves both BPB and CORE, but at prohibitive ~30% training time increase (and +42% memory). This roughly matches Nanochat findings.
+- the ClimbMix branch improves CORE slightly `0.13895`->`0.14350` (can't compare BPB directly between datasets)
+- autoresearch provides minor improvement to BPB `0.86260`->`0.85368` but reduces CORE in this particular run.
+
+I think n=1 experiments are somewhat indicative, but I wouldn't read too deep into them. Nanochat performed more robust testing of each improvement.
+
+I had to repeat above runs multiple times due to agent-related mini drama: forgot to enable CORE when comparing different datasets, incorrectly using 64K tokenizer for FineWeb runs, and overall artefact/log handling mess. The lesson is to be more specific and to inspect exact run commands ahead of execution.
+
+Hardware Note: minor issues with PCIe risers, causing some links to negotiate 2x/4x instead of PCIe 8x. Resolved before the final runs.
+
+## 2026.04.04 - Autoresearch
+
+This is super cool. Andrej converted Nanochat pre-training stage into single Python file and build a mini prompt-repo around it [here](https://github.com/karpathy/autoresearch). The simplified idea is to tell Agent to "Improve validation BPB, as measured at the end of 5-minute run. Do what you want but don't touch data/test".
+
+I played with it earlier. My humble attempts confirmed that idea works in principle, and replicated initial steps, e.g. to reduce total batch size. I also played briefly with Andrej's separate mini-service allowing agents to communicate and coordinate.
+
+Here, I am adopting Nanochat findings "as is" (`b6de7fdf`). These include wide range of assorted changes, including training and optimizer hyperparameters (LR, warmdown, WD, etc.), initialization, shorter attention, etc. Notably Nanochat did most of the autoresearch on d12 and then tested that changes transfer to d24.
+
+Most "tricky" change is embedding "smear" which mixes previous token embeddings through small gate. Other architectural change was adding backout: ability for final output to "subtract" part of mid-network residual.
+
+Nanochat claims cumulative improvement from 2.02h -> 1.65h, or ~18% shorter.
+
+## 2026.04.03 - ClimbMix dataset and remove autocast
+
+Adapt ClimbMix dataset `3cda3754`. Nanochat claim "single biggest improvement" and reduction by 27% (to reach GPT-2 capability). It also swaps model from d26 to d24 maintaining similar capability.
+
+I added new dataset as an option instead of hard swap in. Also changed tokenizer 64K->32K, see note.
+
+Also removed Torch autocast mechanic and replaced with hard-coded BF16. FP8 remains as an option.
+
+#### 32K Vocab Tokenizer Note
+
+All runs and tests in this repo up to this point were done on 64K vocab tokenizer. Nanochat started with 64K tokenizer from the start (Oct 2025), it changed default tokenizer vocab to 32K in `ccf4b7f9` (2026.01.07), but retained `speedrun.sh` override `--vocab_size=65536`. This project started paired with Nanochat `f5a0ea4d` (01.08, day later) which still had 64K override. Nanochat dropped override somewhat quietly in `8630d32b` (01.26) which I didn't notice.
+
+**As a result, all runs up to this point were done with 64K vocab, both in this repo and Nanochat.**
+
+I think they still provide valid comparison, just on different configuration than Nanochat default. I have added "vocab 64K" to all previous results to make it clear.
+
 ## 2026.04.02 - MoE
 
-MoE path is not optimized - inspect the compiler graph and benchmark.
+Sidequest into MoE territory. Nanochat claims per-step loss improvement, but wall-clock time regression to same loss. My intention was to implement MoE as learning exercise, but not necessarily switch.
+
+Implementation (`94af4d3a`):
+- 8 routed experts, of which two active. One shared expert always on
+- balancing through bias, adjusted during training by maintaining token counters for each expert
+- approximate iso-FLOP sizing, 2 active + 1 shared approximately equal replaced MLP
+- implemented via `torch._grouped_mm` (dynamic slicing impl for reference, doesn't work with `torch.compile`)
+- all experts replicated on all GPUs, Muon slightly modified to handle 3D tensors
+
+I implemented MoE via dynamic slicing first, but it breaks compiler graph. Second implementation via `torch._grouped_mm` works fine. This follows what Nanochat did.
+
+Contrary to Nanochat, I decided to increment expert token-counter only during training and not in BPB. I believe this is a bug on Nanochat side.
+
+| Configuration                  | Throughput    | MoE change | Peak memory | Memory change |
+|--------------------------------|--------------:|-----------:|------------:|--------------:|
+| my-nanochat `94af4d3a` - dense | 159,939 tok/s |          - |    12.27 GB |             - |
+| my-nanochat `94af4d3a` - MoE   | 125,877 tok/s |     -21.3% |    16.27 GB |        +32.6% |
+| Nanochat `48804bf` - dense     | 162,722 tok/s |          - |    12.27 GB |             - |
+| Nanochat `5422d3a` - MoE       | 128,355 tok/s |     -21.1% |    16.26 GB |        +32.5% |
+
+_table: depth=12, 4x3090 @1500MHz, device batch 8, FA3 via kernels-community, vocab 64K_
+
+Comparing to Nanochat, our dense is ~1.7% behind and MoE is 1.9% behind. Ok for now. What I should do later is full run to test time-to-loss on full training horizon.
+
+Suspicious step-1 loss increase showed up again, this time in Nanochat reference runs :S
+
 
 ## 2026.03.28 - FP8
 
-On some runs `--fp8` causes loss to be null. This matches Nanochat behavior, but would be investigated.
+I implemented FP8 via custom `LinearFP8` class. In default 'native' mode it is `nn.Linear` passthrough. In 'fp8' mode it switches to custom forward/backward. It can be flipped any time, allowing evals to remain in BF16.
+
+Implementation (`850db7a0`):
+- custom LinearFP8 based on `torch._scaled_mm` with autocast handling
+- forward inputs/weights in E4M3, backward grads in E5M2
+- master params in FP32, eval is kept in BF16
+- `--fa3` switch, sliding window attention support in SDPA (not related to FP8)
+
+| Shape    | Microbatch | BF16 tok/s  | FP8 tok/s | FP8 change | BF16/FP8 peak memory | mem change |
+|----------|-----------:|------------:|----------:|-----------:|---------------------:|-----------:|
+| d12 SSSL |         32 |     398,797 |   386,139 |      -3.2% |     34.85 / 52.51 GB |     +50.7% |
+| d16 SSSL |         32 |     240,427 |   250,005 |      +4.0% |     55.68 / 68.43 GB |     +22.9% |
+| d20 SSSL |         16 |     143,794 |   157,939 |      +9.8% |     48.31 / 50.98 GB |      +5.5% |
+| d20 full |         16 |     141,689 |   155,953 |     +10.1% |     48.31 / 50.98 GB |      +5.5% |
+
+- _table: 1xH100 attempt #3, FA3 via kernels-community, vocab 64K (realized after the fact that I should have switched to varunneal on H100)_
+
+**Note**: Small amount of runs on 1xH100 show suspicious loss increase on step 1. I'm not sure the cause at this point. Training from step-2 onward seems to proceed normally. Keep in mind to check before scaling runs.
+
+Memory increase is mainly because LinearFP8 preserves quantized copies of inputs/weights for backward pass. I'm keeping it this way to keep parity with Nanochat.
+
+This was a bit of pain to test:
+- 3090 - has no FP8 support, so I could not test locally
+- 4090 - compiled FP8 produced NaNs from step 1 (eager was ok)
+- 5090 - `kernels-community` had no suitable FA3 kernel, with SDPA attention FP8 provided ~20% speedup (d12)
+- H100 attempt 1: test grid completed, but on some runs encountered immediate loss increase on step 1. I discovered it after instance was shut down. Given n=1 runs per cell I decided to re-run.
+- H100 attempt 2: encountered thermal throttling due to faulty host cooling
+- H100 attempt 3: completed test grid (3x runs per cell). Sus step-1 loss increase in some runs, including both FP8 and BF16 at various depths. 
+
+In addition to FP8 work had some fun with FX graph capture (saner higher level) and IR compiler graphs (less sane but illuminating)
+
+Also, discovered that FA3 with `deterministic=True` is not, in fact, deterministic. I made FA3 opt-in via `--fa3` switch and moved bit-parity tests to SDPA, which in turn required implementing SSSL support. Fun.
+
+## 2026.03.22 - Sharded Dataset
+
+Facepalm. Our "simpler" HF dataloader needs ~300GB download and ~800GB space just to do `dataset.shuffle(seed=42)` before "quick test run" on a rented instance.
+
+Items:
+- implemented dataset conversion HF -> Parquet shards, saved shards MD5 matches pre-packaged Nanochat shards.
+  + not to waste HF space, I'm pointing this repo to Andrej dataset
+- update training script to use shards, contrary to Nanochat I'm loading full shards for now.
+
+| Configuration                    |     Throughput |
+|----------------------------------|---------------:|
+| my-nanochat `3e1693c8` - HF      | 157,400 tok/s  |
+| my-nanochat `e2276fee` - Parquet | 160,637 tok/s  |
+| Nanochat `74554be3`              | 162,658 tok/s  |
+
+_table: depth=12, 4x3090 @1500MHz, device batch 8, FA3 via kernels-community in both repos, vocab 64K_
+
+HF upgrade to Parquet improves throughput by 2.06%. Nanochat still 1.26% faster than our Parquet version.  Note GPU clock at 1500, so not directly comparable to earlier tables.
+
+Edit 2026.04.03: The corresponding Nanochat commit (`8630d32b`, 01.26) dropped vocab override in `speedrun.sh`, effectively changing default vocab 64K->32K. I didn't notice, as result I continued to run both this repo and Nanochat at 64K vocab.
+
+## 2026.03.19 - Scaling-Law Recipe
+
+Based on depth (`f9c38f67`):
+- automatic total-batch-size
+- LR/weight-decay adjustments
+- training-horizon calculation
+
+## 2026.03.16 - Value Embeddings
+
+Items (`51a6cbdd`):
+- added gated value embeddings injected into alternating layers
+
+VE substantially increase param count, but they are quite cheap to train. My guess is that Nanochat optimizes for training-time and this change sacrifices memory for time-to-loss. Interesting. I'm omitting throughput run.
+
+## 2026.03.15 - Optimizers Optimizations
+
+Items (`d4134060`, both Muon/AdamW):
+- launch reduce-scatter/all-gather asynchronously, overlap comms with compute
+- moved step math into fused compiled kernels, notably scalar args (LR, WD, etc) need to be passed as 0-D tensors to avoid recompilation
+
+Basically matching Nanochat optimizer setup. Interestingly, in Muon, Nanochat creates staging buffer and copies grads/params there before reduce-scatter/all-gather. I did the same, but it's a bit sus as it may create memory spike in the optimizer. This is required because torch.distributed API requires contiguous input/output buffers. Chat says there is a way to do it w/o these staging buffers, but it seems non trivial. Possibly investigate in the future.
+
+| Configuration                       |     Throughput |
+|-------------------------------------|---------------:|
+| my-nanochat `9d0f603` - before      | 131,051 tok/s  |
+| my-nanochat `44a8a953` - after Muon | 131,675 tok/s  |
+| my-nanochat `d413406` - after AdamW | 131,834 tok/s  |
+| Nanochat `22a71aa`                  | 133,810 tok/s  |
+
+_table: depth=12, 4x3090 @1000MHz, deterministic off, torch.compile on, vocab 64K_
+
+Muon optimization gives +0.48% throughput, AdamW additional +0.12%. Nanochat remains 1.5% higher throughput. Interestingly async/fused optimizer have little benefit on this rig.
+
+PS. Agents _loved_ doing bit-equality on this one (sarcasm).
+
+## 2026.03.08 - Muon Upgrade, FA3, BOS Dataloader
+
+Nanochat ran away a bit, chasing.
+
+Items (`5067340d`):
+- Muon: Cautious WD, NorMuon, Polar Express
+- added residual/x0 connections
+- add support for FA3 and sliding window attention
+- BOS dataloader
+
+| Repository           | Window | Backend | Throughput    |
+|----------------------|--------|---------|--------------:|
+| my-nanochat          | Full   | SDPA    | 128,253 tok/s |
+| my-nanochat          | Full   | FA3     | 129,369 tok/s |
+| my-nanochat          | SSSL   | FA3     | 131,051 tok/s |
+| Nanochat `43c29dd`   | SSSL   | FA3     | 133,822 tok/s |
+
+_table: depth=12, 4x3090 @1000MHz, deterministic off, torch.compile on, vocab 64K_
+
+Quick test shows on d12 FA3 adds 0.87% throughput over SDPA. SSSL adds another 1.30%. Nanochat corresponding commit is 2.11% faster than us. Nanochat using FA3 kernels-community.
+
+Not measuring Muon upgrades or BOS in isolation, since these are time-to-loss and would require full training run.
+
+Hardware update 2026.03.03: second SSD lockout despite running on 2x GPUs. Update 03.05: PSU replaced & 4xGPU burn-in ok.
+
+## 2026.02.09 - Evals: BPB, CORE, Sampling
+
+Items (`9f6c7220`):
+- added BPB eval, confirm matches Nanochat to full float precision
+- added CORE metric, confirm averaged metric matches Nanochat
+- added ability to sample from the model, print samples during training
+- update dataloader quirks to match Nanochat shard boundary behavior
+
+Interestingly BPB eval at step-zero affects GPU memory allocation to prevent CUDA OOMs in narrow cases.
+
+Nanochat (`f5a0ea4d`) bitwise parity patch reduced to just: RNG seeds, deterministic algorithms and disable torch.compile. This repo saved checkpoint .pt file now md5 matches Nanochat reference as well.
+
+One facepalm: returning logits from forward() kills GPU VRAM xD
+
+Our throughput is 130,518 tok/s vs Nanochat 131,790 (0.97% higher). Gap to Nanochat improved (6.23%->0.97%) from last merge. Likely due to removal of `loss.item()` every grad-accum step and not returning logits. Setup: depth=12, 4x3090 @1000MHz, deterministic off, compile on, vocab 64K.
+
+Hardware note 2026.02.07: during testing hit SSD lockout, suspecting cause PSU dip. Apparently on 3090 power limit (`nvidia-smi -pl 180`) does not prevent GPU power spikes, it may even exaggerate them. Switching to clock limit instead `nvidia-smi -lgc 1000`.
+
+## 2026.02.01 - Initial Setup
+
+Initial dataloader, model, train loop, optimizers and schedulers implemented
+
+Items (`427cc426`):
+- RoPE, RMSNorm, ReLU^2, untied embeddings/lm_head, logits softcap
+- from scratch AdamW and Muon and basic very-not-optimized distributed versions
+
+Bit-for-bit parity vs Nanochat on multi-gpu runs preliminarily achieved. Nanochat commit `f5a0ea4d`. Requires small patch on Nanochat side to fix RNG seeds, disable torch.compile, enable deterministic algorithms, disable autocast, force SDPA attention and keep embd and RoPE in fp32 (sounds more scary than it is). Tested by dumping per-layer tensors, see `test_equivalent.ipynb`
+
+Our throughput is 120,985 tok/s vs Nanochat 128,528 (Nanochat 6.23% higher, depth=12, 4x3090 @180W, deterministic off, compile on, vocab 64K)
