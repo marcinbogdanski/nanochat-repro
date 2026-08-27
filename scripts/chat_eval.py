@@ -10,14 +10,9 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
-import sys
 import torch
 import pickle
 import argparse
-
-from pathlib import Path
-root = str((Path.cwd() / "../..").resolve())
-sys.path.insert(0, root) if root not in sys.path else None
 
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.tasks import TaskMixture, TaskSmolTalk
