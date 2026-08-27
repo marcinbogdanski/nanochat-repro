@@ -1,5 +1,40 @@
 # Assorted Development Notes
 
+## 2026.08.19 - Unexplained NaNs on 8.15 and 8.16
+
+Two d16 pretraining runs on 08.15 and 08.16 experienced NaNs at steps 1554 and 257 respectively. The run was a base training for purpose of later ChatCORE testing w/o static buffers.
+
+- system was 4x3090 with GPUs clocks limited to 210-1500MHz range. GPUs 0,2 air cooled; 1,3 water cooled
+- event occurred on ephemeral commit corresponding to `f07e2729` in this repo, with merge `b4eeec49` *not* applied
+- BPB evaluation and all training steps up to corrupted steps were clean
+
+Run 1 - NaN on step 1554
+- BPB eval on step 1500 was ok
+- I'm pretty sure NaNs appeared on GPU1 - I overrode original log by accident, facepalm
+
+Run 2 - with detailed metrics, NaN on step 257
+- all metrics finite up to step 256
+- at step 257, two detailed metrics became NaN
+  + block=13 value_embed.weight gradient sq_sum = NaN
+  + block=13 value_embed.weight update   sq_sum = NaN
+- at step 258, block 13 forward activations became contaminated and subsequently spread
+- metric where NaN appeared first was rank-owned `grad_slice`, after reduce scatter in the optimizer
+  + no way to distinguish between: bad raw gradient, reduction/comms corruption, or compiled optimizer behavior
+- checkpoint saved at step 250 is clean, all other metrics were checked by me and an agent, and show no leading indicators of the event
+
+Replication attempts
+- I got agent to create more deeply instrumented branch, two full instrumented d16 runs completed all 5376 steps
+- exact original-commit re-run completed 1251 steps and was interrupted due to me needing GPUs
+- targeted short runs trying to establish correlation with BPB eval or FA3/SDPA did not surface the issue
+- agent checked for XID, AER, MCE, or NVIDIA driver errors coinciding with failure and didn't find anything
+
+Other findings/suspicions:
+- BPB eval: NaNs occurred shortly after BPB eval, historically (see 2026.06.19 entry) BPB eval caused unexplained metric bumps, Codex tried to replicate and correlate historical issue to this event, with no success
+- PCIe replay errors: GPU 2 was discovered to have marginal PCIe link, PCIe reply errors above 1000/min, peaking at 5300/min. Likely due to Phanteks 60cm riser. Multiple full clean completed before and after the NaN event.
+- GPU temps: both air and water cooled GPUs run hot reaching ~80C core, 96C hotspot, 90C VRAM. This is known and no different from many successful runs w/o NaNs (rig is overdue for rebuild).
+
+Root cause remains unknown. 
+
 ## 2026.08.14 - SFT dataset analysis
 
 Quick analysis on how well SFT data we have fit into SFT train/bpb-eval/ChatCORE tests.

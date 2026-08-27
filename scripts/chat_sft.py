@@ -8,7 +8,7 @@ import argparse
 import torch
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_model
-from nanorepro.common import get_base_path, ddp_init, wandb_init, download_file_rank0, FileLogger
+from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
@@ -62,7 +62,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
     # Logging
-    parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
+    parser.add_argument('--run', type=str, default="default", help="Current run name (default: 'default').")
+    parser.add_argument('--wandb', action='store_true', help="Enable logging to Weights & Biases, uses name from --run.")
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
@@ -105,10 +106,11 @@ def main():
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
-    wandb_logger = wandb_init(args.run, user_config, ddp_master)
+    wandb_logger = wandb_init("nanochat-sft", args.run if args.wandb else None, user_config, ddp_master)
     run_path = os.path.join(BASE_DIR, "runs_sft", args.run if args.run is not None else "default")
-    file_logger = FileLogger(run_path)  # dummy on non-master processes
-    file_logger.log('user_config', step=None, data=user_config, override=True)  # override=True to initialize empty on all ranks
+    file_logger = FileLogger(run_path)
+    file_logger.log('user_config', step=None, data=user_config)
+    file_logger.log('provenance', step=None, data=collect_provenance(run_path))
 
     # Warnings
     warnings = []
@@ -336,6 +338,7 @@ def main():
     x, y = train_loader.get_batch_bos()
     # Progress tracking and stop conditions
     trained_consumed = 0  # data items that were actually used for training
+    bpb_eval_data, chatcore_metric_data, train_log_dict = None, None, None
     while True:
         # Stop Conditions
         last_step = args.num_iterations > 0 and step >= args.num_iterations
@@ -414,7 +417,7 @@ def main():
         model.train()
         synchronize()
         if device.startswith("cuda"):
-            torch.cuda.reset_peak_host_memory_stats()
+            torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
@@ -509,7 +512,7 @@ def main():
         'param_counts': param_counts,
         'training_hyperparameters': training_hyperparameters,
         'final_bpb_eval': bpb_eval_data,
-        # 'final_core_metric': core_metric_data,  # todo: replace with chatCORE
+        'final_chatcore_metric': chatcore_metric_data,
         'final_train_log': train_log_dict,
     })
 

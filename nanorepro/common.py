@@ -1,9 +1,14 @@
 import os
+import sys
 import json
 import datetime
 import torch
 import wandb
 import requests
+import tempfile
+import subprocess
+import platform
+
 
 def get_base_path():
     """Returns the base path for storing logs and checkpoints."""
@@ -34,7 +39,63 @@ def ddp_init():
         print(f"Init: {ddp=} {ddp_rank=}, {ddp_local_rank=}, {ddp_world_size=}, {ddp_master=}, {device=}")
     return device, ddp_master, ddp_world_size
 
-def wandb_init(run_name, user_config, ddp_master):
+def save_git_diff(run_path):
+    """Saves git diff to run path. Empty file = no diff. No file = error. Rank 0 only."""
+    ddp_rank = int(os.environ.get('RANK', 0))
+    if ddp_rank != 0:
+        return None
+
+    try:
+        diff = subprocess.check_output(["git", "diff", "HEAD"], text=True)  # empty string if no diff; HEAD to get both staged/unstaged changes
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"git_diff_{timestamp}.patch"
+    with open(os.path.join(run_path, filename), "w") as f:
+        f.write(diff)
+    return filename  # return the filename for logging
+    
+
+def collect_provenance(run_path):
+    """Collect git state, torch info, CPU details, etc. into JSON dict"""
+    # Git info
+    
+    try:
+        git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        git_dirty = subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()
+        git_patch = save_git_diff(run_path)
+    except (OSError, subprocess.SubprocessError):
+        git_commit = None
+        git_dirty = None
+        git_patch = None
+
+    info = {
+        "argv": sys.argv,
+        "cwd": os.getcwd(),
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "git_patch": git_patch,
+        "python": sys.version,
+        "platform": platform.platform(),
+        "torch": str(torch.__version__),
+        "cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+    }
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device)
+        info["gpu"] = {
+            "device": device,
+            "name": props.name,
+            "uuid": str(props.uuid),
+            "compute_capability": f"{props.major}.{props.minor}",
+            "total_memory": props.total_memory,
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", None),
+        }
+    return info
+
+def wandb_init(project, run_name, user_config, ddp_master):
     """Initializes WandB if applicable, returns the logger."""
 
     # Dummy WandB Logger to simplify calls in the training loop
@@ -48,7 +109,7 @@ def wandb_init(run_name, user_config, ddp_master):
 
     # WandB Init
     if run_name is not None and ddp_master:
-        wandb_logger = wandb.init(project="nanochat", name=run_name, config=user_config, dir=get_base_path())
+        wandb_logger = wandb.init(project=project, name=run_name, config=user_config, dir=get_base_path())
     else:
         wandb_logger = WandBDummy()
     return wandb_logger
@@ -69,18 +130,39 @@ def download_file_rank0(filepath, url):
         torch.distributed.barrier()  # wait for rank 0
 
 class FileLogger:
-    def __init__(self, run_path):
+    def __init__(self, run_path, resume_from_step=None):
         self.rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         self.log_filepath = os.path.join(run_path, f"train_log_rank{self.rank}.jsonl")
-        os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
+        if resume_from_step is None:
+            os.makedirs(os.path.dirname(self.log_filepath), exist_ok=True)
+            open(self.log_filepath, "w").close()  # clear the file if not resuming
+        else:
+            # Rewrite the log file to remove entries with step >= resume_from_step
+            # Otherwise resume just writes more into old log, which may have more steps, imagine:
+            # run 0..345 steps crashes, then resume from checkpoint at 250 appends: 0..345,250.. and so on
+            with tempfile.NamedTemporaryFile('w', dir=run_path, delete=False) as tmp:
+                tmp_path = tmp.name
+                try:
+                    with open(self.log_filepath, 'r') as src:
+                        for line in src:
+                            obj = json.loads(line)
+                            keep = (
+                                obj["event"] != "run_summary"
+                                and (obj["step"] is None or obj["step"] < resume_from_step)
+                            )
+                            if keep:
+                                tmp.write(line)  # preserve original formatting
+                except Exception:
+                    os.remove(tmp_path)
+                    raise
+            os.replace(tmp_path, self.log_filepath)
 
-    def log0(self, event, step, data, override=False):
+    def log0(self, event, step, data):
         if self.rank == 0:
-            self.log(event, step, data, override=override)
+            self.log(event, step, data)
 
-    def log(self, event, step, data, override=False):
+    def log(self, event, step, data):
         datetime_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        with open(self.log_filepath, 'a' if not override else 'w') as f:
-            json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': rank, **data}, f)
+        with open(self.log_filepath, 'a') as f:
+            json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': self.rank, **data}, f)
             f.write('\n')

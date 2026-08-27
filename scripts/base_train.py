@@ -14,9 +14,9 @@ from nanorepro.gpt import GPTConfig
 from nanorepro.dataloader import DataLoader
 from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, load_model
+from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
-from nanorepro.common import get_base_path, ddp_init, wandb_init, FileLogger
+from nanorepro.common import get_base_path, ddp_init, save_git_diff, collect_provenance, wandb_init, FileLogger
 BASE_DIR = get_base_path()
 
 @torch.inference_mode()
@@ -54,7 +54,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
     # Logging
-    parser.add_argument('--run', type=str, default=None, help='WandB run name (optional).')
+    parser.add_argument('--run', type=str, default="default", help="Current run name (default: 'default').")
+    parser.add_argument('--wandb', action='store_true', help="Enable logging to Weights & Biases, uses name from --run.")
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
@@ -108,10 +109,17 @@ def main():
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
-    wandb_logger = wandb_init(args.run, user_config, ddp_master)
-    run_path = os.path.join(BASE_DIR, "runs", args.run if args.run is not None else "default")
-    file_logger = FileLogger(run_path)  # dummy on non-master processes
-    file_logger.log('user_config', step=None, data=user_config, override=True)  # override=True to initialize empty on all ranks
+    wandb_logger = wandb_init("nanochat", args.run if args.wandb else None, user_config, ddp_master)
+    run_path = os.path.join(BASE_DIR, "runs", args.run)
+    stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
+    resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
+    file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
+    file_logger.log('user_config', step=None, data=user_config)
+    file_logger.log('provenance', step=None, data=collect_provenance(run_path))
+
+    # Remove STOP file
+    if ddp_master and os.path.exists(stop_filepath):
+        os.remove(stop_filepath)
 
     # Warnings
     warnings = []
@@ -382,7 +390,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device)
+        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device, step=resume_from_step)
         if not args.deterministic:
             model = torch.compile(orig_model, dynamic=False)
         step = loaded_vars["step"]
@@ -398,8 +406,16 @@ def main():
     do_gc = True
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
+    stop_tensor = torch.tensor(0, device=device)
     while True:
         total_flops = step * total_batch_size * flops_per_token
+
+        # Stop File Check
+        if ddp_master:
+            stop_tensor.fill_(int(os.path.exists(stop_filepath)))
+        if torch.distributed.is_initialized():
+            torch.distributed.broadcast(stop_tensor, src=0)
+        stop_requested = bool(stop_tensor.item())
 
         # BPB Evaluation
         # Always eval on step 0 to get a initial baseline
@@ -428,7 +444,7 @@ def main():
             file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model
-        if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps):
+        if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps or stop_requested):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
             checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
@@ -436,7 +452,7 @@ def main():
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
         # Exit Condition
-        if step == max_steps:
+        if step == max_steps or stop_requested:
             break
 
         # Training
