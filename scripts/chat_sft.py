@@ -417,7 +417,7 @@ def main():
         model.train()
         synchronize()
         if device.startswith("cuda"):
-            torch.cuda.reset_peak_host_memory_stats()
+            torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
