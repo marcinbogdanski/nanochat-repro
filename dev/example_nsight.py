@@ -1,6 +1,8 @@
-"""Example script demonstrating a small model with DDP and manual optimization.
+"""Part 1 of two-part script to demonstrate gpu-side profiling with Nsight Systems.
 
-Run like this:
+Part 1 records a multi-rank trace with events, NVTX ranges, and NCCL activity in single file: `example_nsight.nsys-rep`
+
+Run both parts:
 uv run dev/example_nsight.sh
 """
 import os
@@ -42,6 +44,12 @@ model.train()
 lr = 0.01
 capture_step = 4
 
+def record_event(name):
+    event = torch.cuda.Event(enable_timing=True)
+    # NVTX records range on CPU side, then in Nsight one needs to correlate CPU-side API call with GPU-side events
+    with torch.cuda.nvtx.range(f"custom_event rank={rank} {name}"):
+        event.record()
+
 x = torch.randn(1024, 4096, device=device)
 for step in range(5):
 
@@ -51,20 +59,24 @@ for step in range(5):
         torch.cuda.profiler.start()
 
     # Forward
+    record_event("profiler_start")
     with torch.cuda.nvtx.range("forward"):
         out = compiled(x)
         loss = out.square().mean()
 
     # Backward
+    record_event("fwd_to_bwd")
     with torch.cuda.nvtx.range("backward"):
         loss.backward()
 
     # Comms
+    record_event("bwd_to_comms")
     with torch.cuda.nvtx.range("comms"):
         for p in model.parameters():
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
     # Optimizer Step
+    record_event("comms_to_optimizer_step")
     with torch.cuda.nvtx.range("optimizer_step"):
         with torch.no_grad():
             for p in model.parameters():
@@ -72,6 +84,7 @@ for step in range(5):
         model.zero_grad()
 
     # Profiler: stop
+    record_event("optimizer_step_to_profiler_stop")
     torch.cuda.synchronize()
     if step == capture_step:
         torch.cuda.profiler.stop()
