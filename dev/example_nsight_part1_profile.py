@@ -5,6 +5,9 @@ Part 1 records a multi-rank trace with events, NVTX ranges, and NCCL activity in
 Run both parts:
 uv run dev/example_nsight.sh
 """
+print("--------------------------------------------------------------------------------")
+print("                   Part 1: Profiling with Nsight Systems")
+print("--------------------------------------------------------------------------------")
 import os
 import torch
 import torch.nn as nn
@@ -59,32 +62,35 @@ for step in range(5):
         torch.cuda.profiler.start()
 
     # Forward
-    record_event("profiler_start")
+    record_event("forward.begin")
     with torch.cuda.nvtx.range("forward"):
         out = compiled(x)
         loss = out.square().mean()
+    record_event("forward.end")
 
     # Backward
-    record_event("fwd_to_bwd")
+    record_event("backward.begin")
     with torch.cuda.nvtx.range("backward"):
         loss.backward()
+    record_event("backward.end")
 
     # Comms
-    record_event("bwd_to_comms")
+    record_event("comms.begin")
     with torch.cuda.nvtx.range("comms"):
         for p in model.parameters():
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+    record_event("comms.end")
 
     # Optimizer Step
-    record_event("comms_to_optimizer_step")
+    record_event("optimizer.begin")
     with torch.cuda.nvtx.range("optimizer_step"):
         with torch.no_grad():
             for p in model.parameters():
                 p -= lr * p.grad
         model.zero_grad()
+    record_event("optimizer.end")
 
     # Profiler: stop
-    record_event("optimizer_step_to_profiler_stop")
     torch.cuda.synchronize()
     if step == capture_step:
         torch.cuda.profiler.stop()

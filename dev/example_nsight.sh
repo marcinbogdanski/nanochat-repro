@@ -19,4 +19,4 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 nsys profile \
     torchrun --standalone --nproc_per_node=2 -m dev.example_nsight_part1_profile
 
 # Part 2: post-process 'example_nsight.nsys-rep' to inject GPU-side phase spans
-# uv run python3 dev/example_nsight_part2_postprocess.py example_nsight.nsys-rep example_nsight_gpu_spans.nsys-rep
+uv run python3 dev/example_nsight_part2_postprocess.py example_nsight.nsys-rep example_nsight_gpu_spans.nsys-rep

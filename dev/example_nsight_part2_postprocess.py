@@ -11,9 +11,15 @@ The steps are as follows:
 Run both parts:
 uv run dev/example_nsight.sh
 """
+print("--------------------------------------------------------------------------------")
+print("                  Part 2: Post-processing Nsight Systems Trace")
+print("--------------------------------------------------------------------------------")
 import os
 import sys
 import shutil
+import sqlite3
+import tempfile
+import subprocess
 from pathlib import Path
 
 def setup_nsys_writer():
@@ -42,4 +48,105 @@ setup_nsys_writer()
 
 from nsys_writer import Session, TimeBase
 
-print("WOOT!")
+
+source_filename = sys.argv[1]  # e.g. example_nsight.nsys-rep
+output_filename = sys.argv[2]  # e.g. example_nsight_gpu_spans.nsys-rep
+assert source_filename.endswith(".nsys-rep"), "Source file must be an Nsight Systems report (.nsys-rep)"
+assert output_filename.endswith(".nsys-rep"), "Output file must be an Nsight Systems report (.nsys-rep)"
+
+# Convert the Nsight Systems trace to a SQLite database for post-processing
+with tempfile.TemporaryDirectory() as temp_dir:
+    temp_filepath = Path(temp_dir) / "example_nsight.sqlite"
+    print(f"Exporting SQLite database to: {temp_filepath}")
+    subprocess.run(["nsys", "export", "--type=sqlite", "--force-overwrite=true", "--quiet=true", f"--output={temp_filepath}", source_filename], check=True)
+
+    # Agent supplied query to extract custom NVTX events and their corresponding CUDA event timestamps
+    query = """
+        WITH markers AS (
+            SELECT
+                n.start,
+                n.end,
+                n.globalTid,
+                ((n.globalTid >> 24) << 24) AS globalPid,
+                coalesce(n.text, marker_string.value) AS label
+            FROM NVTX_EVENTS AS n
+            LEFT JOIN StringIds AS marker_string ON marker_string.id = n.textId
+            WHERE coalesce(n.text, marker_string.value) LIKE 'custom_event rank=%'
+        )
+        SELECT
+            markers.label,
+            cuda_event.timestamp
+        FROM markers
+        JOIN CUPTI_ACTIVITY_KIND_RUNTIME AS runtime
+            ON runtime.globalTid = markers.globalTid
+            AND runtime.start >= markers.start
+            AND runtime.end <= markers.end
+        JOIN StringIds AS runtime_string
+            ON runtime_string.id = runtime.nameId
+            AND runtime_string.value LIKE 'cudaEventRecord%'
+        JOIN CUPTI_ACTIVITY_KIND_CUDA_EVENT AS cuda_event
+            ON cuda_event.correlationId = runtime.correlationId
+            AND cuda_event.globalPid = markers.globalPid
+        ORDER BY cuda_event.timestamp
+    """
+    with sqlite3.connect(temp_filepath) as conn:
+        rows = conn.execute(query).fetchall()
+
+print("Rows extracted from SQLite database:")
+for row in rows:
+    print(row)
+# ('custom_event rank=0 forward.begin', 17439452)
+# ('custom_event rank=1 forward.begin', 17898137)
+# ('custom_event rank=0 forward.end', 25270603)
+# ('custom_event rank=0 backward.begin', 25274507)
+# ('custom_event rank=1 forward.end', 25768294)
+# ('custom_event rank=1 backward.begin', 25771494)
+# ('custom_event rank=0 backward.end', 34541122)
+# ('custom_event rank=0 comms.begin', 34544386)
+# ('custom_event rank=1 backward.end', 35051548)
+# ('custom_event rank=1 comms.begin', 35054716)
+# ('custom_event rank=1 comms.end', 100817205)
+# ('custom_event rank=1 optimizer.begin', 100820373)
+# ('custom_event rank=0 comms.end', 101217837)
+# ('custom_event rank=0 optimizer.begin', 101221133)
+# ('custom_event rank=1 optimizer.end', 102420286)
+# ('custom_event rank=0 optimizer.end', 102815255)
+# ...
+
+# Color Dispenser
+def get_next_color():
+    colors = ["#4CAF50", "#41C4D5", "#FFC165", "#E7608D"]
+    while True:
+        for color in colors:
+            yield color
+
+# Extract start and end events from the rows
+timestamps = {}  # (rank, name) -> [start_timestamp, end_timestamp]
+for label, timestamp in rows:
+    _, rank_str, name_and_phase = label.split()
+    rank = int(rank_str.split('=')[1])
+    name, phase = name_and_phase.split('.')
+    if phase == "begin":
+        timestamps[(rank, name)] = [timestamp, None]
+    elif phase == "end":
+        timestamps[(rank, name)][1] = timestamp
+    else:
+        raise ValueError(f"Unexpected phase: {phase}")
+max_rank = max(rank for rank, _ in timestamps.keys())
+assert all(start_ts is not None and end_ts is not None for start_ts, end_ts in timestamps.values())
+
+# Write Output Session
+with Session(
+    name=output_filename.replace(".nsys-rep", ""),
+    report_merge=source_filename,
+    time_base=TimeBase.RELATIVE,
+) as session:
+    domain = session.get_domain("Derived GPU spans")
+    for rank in range(max_rank + 1):
+        scope = domain.get_scope(f"rank {rank}")
+        color_dispenser = get_next_color()
+        with session.create_stream("phases", domain=domain, scope=scope) as stream:
+            for (r, name), (start_ts, end_ts) in timestamps.items():
+                if r != rank:
+                    continue
+                stream.write_startend(start_ts, end_ts, message=name, color=next(color_dispenser))
