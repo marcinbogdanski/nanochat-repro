@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import tempfile
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 
 def setup_nsys_writer():
@@ -128,19 +129,21 @@ def get_color(name):
     return "#747474"  # default color if no match is found
 
 # Extract start and end events from the rows
-timestamps = {}  # (rank, name) -> [start_timestamp, end_timestamp]
+timestamps = defaultdict(list)  # (rank, name) -> [[start_ts, end_ts], [start_ts, end_ts], ...]
 for label, timestamp in rows:
     _, rank_str, name_and_phase = label.split()
     rank = int(rank_str.split('=')[1])
     name, phase = name_and_phase.split('.')
     if phase == "begin":
-        timestamps[(rank, name)] = [timestamp, None]
+        assert len(timestamps[(rank, name)]) == 0 or timestamps[(rank, name)][-1][1] is not None, "Previous event has not ended"
+        timestamps[(rank, name)].append([timestamp, None])
     elif phase == "end":
-        timestamps[(rank, name)][1] = timestamp
+        assert len(timestamps[(rank, name)]) > 0 and timestamps[(rank, name)][-1][1] is None, "No matching start event for this end event"
+        timestamps[(rank, name)][-1][1] = timestamp
     else:
         raise ValueError(f"Unexpected phase: {phase}")
 max_rank = max(rank for rank, _ in timestamps.keys())
-assert all(start_ts is not None and end_ts is not None for start_ts, end_ts in timestamps.values())
+assert all(start_ts is not None and end_ts is not None for intervals in timestamps.values() for start_ts, end_ts in intervals)
 
 # Write Output Session
 with Session(
@@ -152,7 +155,8 @@ with Session(
     for rank in range(max_rank + 1):
         scope = domain.get_scope(f"rank {rank}")
         with session.create_stream("phases", domain=domain, scope=scope) as stream:
-            for (r, name), (start_ts, end_ts) in timestamps.items():
+            for (r, name), intervals in timestamps.items():
                 if r != rank:
                     continue
-                stream.write_startend(start_ts, end_ts, message=name, color=get_color(name))
+                for start_ts, end_ts in intervals:
+                    stream.write_startend(start_ts, end_ts, message=name, color=get_color(name))

@@ -6,6 +6,7 @@ from nanorepro.moe import MoE
 from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
+from nanorepro.nsight_trace import is_trace_enabled, record_event, clone_boundary
 
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_experts, moe_top_k):
@@ -614,10 +615,18 @@ class GPTModel(nn.Module):
         x_backout = None
         if self.enable_metrics:
             metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
+
+        x = clone_boundary(x, left=None, right="block_0")     # mark start of block_0
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
             x, sq_sum_t, num_el = block(x, ve, cos, sin, self.window_sizes[i], kv_cache)
+
+            # Mark end of block_{i} and start of block_{i+1} (apart from last)
+            is_last_block = (i == len(self.transformer.h) - 1)
+            right = f"block_{i+1}" if is_last_block is False else None
+            x = clone_boundary(x, left=f"block_{i}", right=right)
+
             if i == backout_layer:
                 x_backout = x
             if self.enable_metrics:

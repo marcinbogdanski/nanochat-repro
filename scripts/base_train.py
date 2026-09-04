@@ -17,7 +17,7 @@ from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
 from nanorepro.common import get_base_path, ddp_init, save_git_diff, collect_provenance, wandb_init, FileLogger
-from nanorepro.nsight_trace import is_trace_enabled, record_event, clone_boundary  # registers custom ops for profiling
+from nanorepro.nsight_trace import is_trace_enabled, record_event  # registers custom ops for profiling
 BASE_DIR = get_base_path()
 
 @torch.inference_mode()
