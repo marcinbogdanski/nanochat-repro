@@ -8,11 +8,11 @@ The steps are as follows:
 - generate new "virtual" GPU-side phase spans, based on GPU-side events
 - write the augmented trace to new file: `example_nsight_gpu_spans.nsys-rep`
 
-Run both parts:
+See complete example:
 uv run dev/example_nsight.sh
 """
 print("--------------------------------------------------------------------------------")
-print("                  Part 2: Post-processing Nsight Systems Trace")
+print("                     Post-processing Nsight Systems Trace")
 print("--------------------------------------------------------------------------------")
 import os
 import sys
