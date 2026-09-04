@@ -5,7 +5,7 @@ set -euo pipefail
 # nsys --version
 
 # Part 1: profile the model and save the trace to 'example_nsight.nsys-rep'
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 nsys profile \
+NANOREPRO_TRACE=1 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 nsys profile \
   --trace=cuda,nvtx,nccl \
   --cuda-trace-scope=process-tree \
   --capture-range=cudaProfilerApi \

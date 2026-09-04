@@ -46,7 +46,7 @@ def setup_nsys_writer():
     os.environ["NSYS_WRITER_BACKEND"] = str(writer_backend)
 setup_nsys_writer()
 
-from nsys_writer import Session, TimeBase
+from nsys_writer import Session, TimeBase  # pyright: ignore[reportMissingImports]
 
 
 source_filename = sys.argv[1]  # e.g. example_nsight.nsys-rep
@@ -114,11 +114,18 @@ for row in rows:
 # ...
 
 # Color Dispenser
-def get_next_color():
-    colors = ["#4CAF50", "#41C4D5", "#FFC165", "#E7608D"]
-    while True:
-        for color in colors:
-            yield color
+def get_color(name):
+    colors = {
+        "forward": "#4CAF50",
+        "backward": "#41C4D5",
+        "optimizer": "#F4A261",
+        "adamw": "#F4A261",
+        "muon": "#D16767",
+    }
+    for k, v in colors.items():
+        if k in name:
+            return v
+    return "#747474"  # default color if no match is found
 
 # Extract start and end events from the rows
 timestamps = {}  # (rank, name) -> [start_timestamp, end_timestamp]
@@ -144,9 +151,8 @@ with Session(
     domain = session.get_domain("Derived GPU spans")
     for rank in range(max_rank + 1):
         scope = domain.get_scope(f"rank {rank}")
-        color_dispenser = get_next_color()
         with session.create_stream("phases", domain=domain, scope=scope) as stream:
             for (r, name), (start_ts, end_ts) in timestamps.items():
                 if r != rank:
                     continue
-                stream.write_startend(start_ts, end_ts, message=name, color=next(color_dispenser))
+                stream.write_startend(start_ts, end_ts, message=name, color=get_color(name))

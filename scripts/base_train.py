@@ -17,6 +17,7 @@ from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
 from nanorepro.common import get_base_path, ddp_init, save_git_diff, collect_provenance, wandb_init, FileLogger
+from nanorepro.nsight_trace import is_trace_enabled, record_event, clone_boundary  # registers custom ops for profiling
 BASE_DIR = get_base_path()
 
 @torch.inference_mode()
@@ -407,6 +408,7 @@ def main():
     start_step = step
     bpb_eval_data, core_metric_data, train_log_dict = None, None, None
     stop_tensor = torch.tensor(0, device=device)
+    nsight_capture_step = 4  # hard coded, requires NANOREPRO_TRACE=1
     while True:
         total_flops = step * total_batch_size * flops_per_token
 
@@ -460,18 +462,24 @@ def main():
         synchronize()
         if device.startswith("cuda"):
             torch.cuda.reset_peak_memory_stats()
+        if is_trace_enabled() and step == nsight_capture_step:
+            torch.cuda.profiler.start()
         ts = time.time()
         loss_accum = 0.0
         for opt in optimizers:
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
-        for _ in range(grad_accum):
+        for ga_idx in range(grad_accum):
+            record_event(f"forward_ga{ga_idx}.begin")
             _, loss, metrics = model(x, y, return_logits=False)
+            record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
+            record_event(f"backward_ga{ga_idx}.begin")
             loss.backward()
+            record_event(f"backward_ga{ga_idx}.end")
             x, y = train_loader.get_batch_bos()
 
         if torch.distributed.is_initialized():
@@ -493,11 +501,17 @@ def main():
         model.zero_moe_counters()
 
         # Optimizer Step
-        for opt in optimizers:
-            opt.step()
+        record_event("adamw.begin")
+        optimizers[0].step()
+        record_event("adamw.end")
+        record_event("muon.begin")
+        optimizers[1].step()
+        record_event("muon.end")
 
         # Sync & Time
         synchronize()
+        if is_trace_enabled() and step == nsight_capture_step:
+            torch.cuda.profiler.stop()
         max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3) if device.startswith("cuda") else 0.0
         dt = (time.time() - ts)
         total_time += dt
