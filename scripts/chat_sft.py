@@ -96,6 +96,8 @@ def main():
     parser.add_argument("--mmlu-epochs", type=int, default=3, help="Num MMLU epochs to use (multiple choice questions, default=3)")
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
     parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
+    # Optimizations
+    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass.')
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -120,6 +122,8 @@ def main():
         warnings.append("FP8 training disabled, which may reduce training speed. To enable, set --fp8=true or --fp8=auto on supported hardware.")
     if enable_fp8 and args.compute_dtype == 'fp32':
         warnings.append("Using FP8 training with FP32 compute. This is a valid but may lead to worse performance.")
+    if args.backward_overlap and ddp_world_size == 1:
+        warnings.append("Backward overlap requires multi-GPU run to have an effect.")
     if args.log_metrics:
         warnings.append("Detailed tensor metrics logging is enabled, which may slow down training.")
     if args.deterministic:
@@ -164,6 +168,7 @@ def main():
         compute_dtype=compute_dtype,
         enable_fa3=not args.no_fa3,
         fp8_training=enable_fp8,
+        backward_overlap=args.backward_overlap,
         enable_metrics=args.log_metrics,
         device=device,
         step=None)

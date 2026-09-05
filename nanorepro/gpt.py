@@ -177,7 +177,7 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, enable_metrics=False):
+    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, backward_overlap, enable_metrics=False):
         """Initialize to default device/dtype here, cast to compute_dtype in init_weights.
         
         Type handling:
@@ -195,6 +195,7 @@ class GPTModel(nn.Module):
         self.config = config
         self.compute_dtype = compute_dtype
         self.fp8_training = fp8_training
+        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
 
         self.transformer = nn.ModuleDict(dict(
@@ -419,6 +420,7 @@ class GPTModel(nn.Module):
     def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
+        world_size = torch.distributed.get_world_size() if ddp else 1
 
         # Separate parameters into groups for different optimizers and learning rates
         params_matrix = list(self.transformer.h.parameters())
@@ -453,10 +455,25 @@ class GPTModel(nn.Module):
         adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
-        muon_groups = []
-        for shape in sorted({p.shape for p in params_matrix}):
-            group_params = [p for p in params_matrix if p.shape == shape]
-            muon_groups.append({'params': group_params})
+        if ddp and self.backward_overlap:
+            # We rely on a fact that params_matrix is constructed roughly "in order". This is not perfect but close enough for us
+            backward_priority = {id(p): i for i, p in enumerate(reversed(params_matrix))}
+            # For each shape, create world_size buckets, noting their priority (last bucket may have less than world_size elements)
+            muon_buckets = []
+            for shape in sorted({p.shape for p in params_matrix}):
+                shape_params = [p for p in params_matrix if p.shape == shape]
+                for i in range(0, len(shape_params), world_size):
+                    bucket_params = shape_params[i:i + world_size]
+                    group_priority = max(backward_priority[id(p)] for p in bucket_params)
+                    muon_buckets.append((bucket_params, group_priority))
+            # Sort by priority, first element has highest backward priority, i.e. is processed first during backward pass
+            muon_buckets.sort(key=lambda x: x[1])
+            muon_groups = [{'params': group_params} for group_params, _ in muon_buckets]
+        else:
+            muon_groups = []
+            for shape in sorted({p.shape for p in params_matrix}):
+                group_params = [p for p in params_matrix if p.shape == shape]
+                muon_groups.append({'params': group_params})
         muon_factory = DistMuon if ddp else Muon
         muon_optimizer = muon_factory(
             muon_groups,

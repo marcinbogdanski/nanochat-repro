@@ -100,6 +100,8 @@ def main():
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
+    # Optimizations
+    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass.')
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -130,6 +132,8 @@ def main():
         warnings.append("FP8 training disabled, which may reduce training speed. To enable, set --fp8=true or --fp8=auto on supported hardware.")
     if enable_fp8 and args.compute_dtype == 'fp32':
         warnings.append("Using FP8 training with FP32 compute. This is a valid but may lead to worse performance.")
+    if args.backward_overlap and ddp_world_size == 1:
+        warnings.append("Backward overlap requires multi-GPU run to have an effect.")
     if args.log_metrics:
         warnings.append("Detailed tensor metrics logging is enabled, which may slow down training.")
     if args.deterministic:
@@ -193,6 +197,7 @@ def main():
         compute_dtype=compute_dtype,
         enable_fa3=not args.no_fa3,
         fp8_training=enable_fp8,
+        backward_overlap=args.backward_overlap,
         enable_metrics=args.log_metrics,
         device=device
     )
@@ -246,6 +251,7 @@ def main():
         compute_dtype=compute_dtype,        # not relevant here
         enable_fa3=not args.no_fa3,         # not relevant here
         fp8_training=enable_fp8,            # not relevant here
+        backward_overlap=args.backward_overlap,  # not relevant here
         enable_metrics=args.log_metrics,    # not relevant here
         device="meta",
     )
