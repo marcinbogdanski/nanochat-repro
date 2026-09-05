@@ -613,41 +613,18 @@ class GPTModel(nn.Module):
         assert self.cos.dtype == self.compute_dtype, "Model buffers are not in compute_dtype."
         assert kv_cache is None or not torch.is_grad_enabled()   # if kv_cache, then ensure no_grad
 
-        # Embeddings
-        x = self.transformer.wte(idx)             # B,T,E <- B,T
-        x = F.rms_norm(x, (x.size(-1),))
-
-        # Smear
-        x = self._apply_smear(x, kv_cache)
-
         # Offset sin/cos
-        offset = 0
-        if kv_cache is not None:
-            # For now we assume seqlens are equal across the batch
-            offset = kv_cache.cache_seqlens[0].item()  # scalar
+        offset = 0 if kv_cache is None else kv_cache.cache_seqlens[0].item()  # assume seqlens are equal across the batch
         cos = self.cos[:, offset:offset+T, :, :]
         sin = self.sin[:, offset:offset+T, :, :]
 
+        # Setup
+        x = x0 = x_backout = None
+        metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
+
         # Transformer
-        x0 = x
-        backout_layer = self.config.n_layer // 2  # backout in middle of network
-        x_backout = None
-        if self.enable_metrics:
-            metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
-
-        x = clone_boundary(x, left=None, right="block_0")     # mark start of block_0
         for i, block in enumerate(self.transformer.h):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
-            x, sq_sum_t, num_el = block(x, ve, cos, sin, self.window_sizes[i], kv_cache)
-
-            # Mark end of block_{i} and start of block_{i+1} (apart from last)
-            is_last_block = (i == len(self.transformer.h) - 1)
-            right = f"block_{i+1}" if is_last_block is False else "output"
-            x = clone_boundary(x, left=f"block_{i}", right=right)
-
-            if i == backout_layer:
-                x_backout = x
+            x, x0, x_backout, sq_sum_t, num_el = self._compiled_region(idx, i, x, x0, x_backout, block, cos, sin, kv_cache)
             if self.enable_metrics:
                 metrics_resid_post_sq_sum.append(sq_sum_t)
                 metrics_resid_post_num_el.append(num_el)
@@ -655,6 +632,38 @@ class GPTModel(nn.Module):
         # Advance kv_cache seqlens
         if kv_cache is not None:
             kv_cache.cache_seqlens.add_(T)
+
+        return self._output_region(x, x_backout, targets=targets, reduction=reduction, return_logits=return_logits, metrics_resid_post_sq_sum=metrics_resid_post_sq_sum, metrics_resid_post_num_el=metrics_resid_post_num_el)
+
+    def _compiled_region(self, idx, i, x, x0, x_backout, block, cos, sin, kv_cache):
+
+        # Embeddings, Smear
+        if i == 0:
+            x = self.transformer.wte(idx)             # B,T,E <- B,T
+            x = F.rms_norm(x, (x.size(-1),))
+            x = self._apply_smear(x, kv_cache)  # smear
+            x = clone_boundary(x, left=None, right="block_0")     # mark start of block_0
+            x0 = x
+
+        # Residuals and value embeddings
+        x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+        ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
+
+        # Transformer Block
+        x, sq_sum_t, num_el = block(x, ve, cos, sin, self.window_sizes[i], kv_cache)
+
+        # Mark end of block_{i} and start of block_{i+1} (apart from last)
+        is_last_block = (i == len(self.transformer.h) - 1)
+        right = f"block_{i+1}" if is_last_block is False else "output"
+        x = clone_boundary(x, left=f"block_{i}", right=right)
+
+        # Backout in the middle of the network:
+        if i == self.config.n_layer // 2:
+            x_backout = x
+
+        return x, x0, x_backout, sq_sum_t, num_el
+
+    def _output_region(self, x, x_backout, targets, reduction, return_logits, metrics_resid_post_sq_sum, metrics_resid_post_num_el):
 
         # Final backout blending
         if x_backout is not None:
