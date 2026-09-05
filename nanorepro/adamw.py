@@ -1,4 +1,5 @@
 import torch
+from nanorepro.nsight_trace import record_event
 
 @torch.compile(dynamic=False, fullgraph=True)
 def fused_adamw_step(
@@ -189,6 +190,10 @@ class DistAdamW(torch.optim.Optimizer):
 
                 # Sync point 1
                 grad_slice = torch.empty_like(params.grad[:slice_width])
+                shape_str = "x".join(map(str, params.shape))
+                event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
+                event_name = f"adamw_g{i}_p{j}_{shape_str}"   # g=group, p=param
+                record_event(event_name + event_suffix + ".begin")  # spans launch-to-completion, includes waiting, not just NCCL comms
                 if group['is_small']:
                     # Don't slice
                     future = torch.distributed.all_reduce(
@@ -205,7 +210,8 @@ class DistAdamW(torch.optim.Optimizer):
                 temp_buffers[(i,j)] = {
                     'future': future,
                     'grad_slice': grad_slice,
-                    'params_slice': params_slice
+                    'params_slice': params_slice,
+                    'event_name': event_name,
                 }
 
         for i, group in enumerate(self.param_groups):
@@ -213,6 +219,9 @@ class DistAdamW(torch.optim.Optimizer):
                 temp_buffers[(i,j)].pop('future').wait()
                 grad_slice = temp_buffers[(i,j)].pop('grad_slice')
                 params_slice = temp_buffers[(i,j)].pop('params_slice')
+                event_name = temp_buffers[(i,j)]['event_name']
+                event_suffix = "_rs" if not group['is_small'] else "_ar"
+                record_event(event_name + event_suffix + ".end")
 
                 exp_avg = self.state[params]['exp_avg']
                 exp_avg_sq = self.state[params]['exp_avg_sq']
@@ -224,6 +233,8 @@ class DistAdamW(torch.optim.Optimizer):
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
+                if not group['is_small']:
+                    record_event(event_name + "_fused.begin")
                 grad_sum_squares, update_sum_squares, params_sum_squares = fused_adamw_step(
                     params=params_slice,
                     grad=grad_slice,
@@ -254,9 +265,12 @@ class DistAdamW(torch.optim.Optimizer):
                         'params_sq_sum': params_sum_squares,
                         'params_num_el': params_num_el,
                     }
+                if not group['is_small']:
+                    record_event(event_name + "_fused.end")
 
                 # Sync point 2
                 if not group['is_small']:
+                    record_event(event_name + "_ag.begin")
                     future2 = torch.distributed.all_gather_into_tensor(
                         params, params_slice, async_op=True
                     ).get_future()
@@ -266,6 +280,5 @@ class DistAdamW(torch.optim.Optimizer):
             for j, params in enumerate(group['params']):
                 if not group['is_small']:
                     temp_buffers[(i,j)].pop('future2').wait()
-        
-
-
+                    event_name = temp_buffers[(i,j)].pop('event_name')
+                    record_event(event_name + "_ag.end")
