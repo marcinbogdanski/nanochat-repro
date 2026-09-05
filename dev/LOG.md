@@ -1,5 +1,35 @@
 # Assorted Development Notes
 
+## 2026.09.05 - Nsight Instrumentation
+
+I like to be able to easily see custom GPU-side spans. Something reliable in compiled regions and less granular than `torch.profiler`/Nsight. 
+
+For example:
+
+```
+RANK 0: [      forward     ][     backward     ][                      adamw                      ]
+        [ layer1 ][ layer2 ][ layer2 ][ layer1 ][ reduce_scatters ][ fused_kernels ][ all_gathers ]
+RANK 1: [      forward     ][     backward     ][                      adamw                      ]
+        [ layer1 ][ layer2 ][ layer2 ][ layer1 ][ reduce_scatters ][ fused_kernels ][ all_gathers ]
+```
+
+Let's take inventory of popular tools:
+
+- `torch.profiler` and `record_function()`
+  + CPU spans work ok, but GPU spans around/inside compiled regions are not super reliable (may wrap only subset of intended region)
+- nsight `nvtx.range`
+  + covers both CPU/GPU sides, but only tracks GPU work launched from the annotated CPU thread (excludes backward which uses different thread)
+  + also not reliable inside compiled regions
+- CUDA events
+  + cover CPU/GPU, good for timing, stream-ordered so bracket backwards correctly, have no names (can be worked around)
+  + unfortunately not reliable in compiled regions
+
+The issue is, all above tools depend on ops side-effects. When Dynamo optimizers the graph, it may fuse/remove ops. So trace markers end up shifted around and resulting spans are not reliable.
+
+The solution is to create custom opaque op, which includes `.clone()` (so Dynamo can't remove/shift it), and injects CUDA event inside the same custom op. This effectively "glues" the CUDA event to un-movable `.clone()`. This has cost, and may alter the graph (one could avoid `.clone()` by creating custom op which replaces existing op). For details see `dev/example_nsight.sh` and downstream scripts.
+
+Testing on 4x3090, depth=20, grad_accum=16, the `.clone()` overhead is ~0.6% and ~0.04 GB extra peak memory.
+
 ## 2026.08.19 - Assorted Fixes
 
 Operational housekeeping (`551d4362`):

@@ -62,7 +62,7 @@ def clone_boundary(x, left, right):
     return _clone_boundary(x, left, right)
 
 
-@torch.library.custom_op("example_nsight::clone_boundary", mutates_args=())
+@torch.library.custom_op("nanorepro::clone_boundary", mutates_args=())
 def _clone_boundary(x: torch.Tensor, left: str | None, right: str | None) -> torch.Tensor:
     """Custom forward pass, opaque to torch.compile. The clone() call ensures proper graph placement and ordering."""
     if left is not None:
@@ -72,7 +72,7 @@ def _clone_boundary(x: torch.Tensor, left: str | None, right: str | None) -> tor
         record_event(f"{right}_forward.begin")
     return out
 
-@torch.library.custom_op("example_nsight::clone_boundary_backward", mutates_args=())
+@torch.library.custom_op("nanorepro::clone_boundary_backward", mutates_args=())
 def _clone_boundary_backward(x: torch.Tensor, left: str | None, right: str | None) -> torch.Tensor:
     """Custom backward pass, same concept as the forward op, but reversed."""
     if right is not None:

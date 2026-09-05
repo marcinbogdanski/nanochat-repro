@@ -647,7 +647,6 @@ class GPTModel(nn.Module):
         logits = self.lm_head(x)   # B,T,V <- B,T,E
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
-        logits = clone_boundary(logits, left="output", right=None)
 
         metrics = None
         if self.enable_metrics:
@@ -679,6 +678,7 @@ class GPTModel(nn.Module):
             logits_ = logits.view(B*T, C)  # B*T, C
             targets_ = targets.view(B*T)   # B*T
             loss = F.cross_entropy(logits_, targets_, ignore_index=-1, reduction=reduction)
+            loss = clone_boundary(loss, left="output", right=None)  # only used in training, so it's ok not to cover 'targets is None' case
             if return_logits:
                 return logits, loss, metrics
             else:
