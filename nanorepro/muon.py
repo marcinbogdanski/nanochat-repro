@@ -1,4 +1,5 @@
 import torch
+from nanorepro.nsight_trace import record_event
 
 # From https://arxiv.org/pdf/2505.16932
 polar_express_coeffs = [
@@ -265,11 +266,16 @@ class DistMuon(torch.optim.Optimizer):
 
         # Loop 1: Launch reduce-scatter
         reduce_works = []
+        event_names = []
         for i, group in enumerate(self.param_groups):
             buffers = self.group_buffers[i]
             for jj, param in enumerate(group["params"]):
                 # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
                 assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][jj].data_ptr()
+            shape_str = "x".join(map(str, group["params"][0].shape))
+            event_name = f"muon_g{i}_{shape_str}"
+            record_event(event_name + "_rs.begin")
+            event_names.append(event_name)
             reduce_works.append(torch.distributed.reduce_scatter_tensor(
                 output=buffers['grads_shard'],
                 input=buffers['grads'],
@@ -285,6 +291,7 @@ class DistMuon(torch.optim.Optimizer):
 
             # Wait for reduce-scatter
             reduce_works[i].wait()
+            record_event(event_names[i] + "_rs.end")
 
             # Guard empty rank
             num_params_this_rank = buffers['num_local']
@@ -301,6 +308,7 @@ class DistMuon(torch.optim.Optimizer):
                 beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
 
                 # Fused Kernel
+                record_event(event_names[i] + "_fused.begin")
                 grad_sum_squares, update_sum_squares, params_sum_squares = fused_muon_step(
                     params=buffers['params_shard'][:num_params_this_rank],
                     grad=buffers['grads_shard'][:num_params_this_rank],
@@ -314,6 +322,7 @@ class DistMuon(torch.optim.Optimizer):
                     compute_dtype=self.compute_dtype,
                     metrics=self.enable_metrics,
                 )
+                record_event(event_names[i] + "_fused.end")
 
                 # Collect Metrics
                 if self.enable_metrics:
@@ -344,6 +353,7 @@ class DistMuon(torch.optim.Optimizer):
 
 
             # Do all-gather directly to static buffer
+            record_event(event_names[i] + "_ag.begin")
             work = torch.distributed.all_gather_into_tensor(
                 output_tensor=buffers["params"],
                 input_tensor=buffers['params_shard'],
@@ -352,5 +362,6 @@ class DistMuon(torch.optim.Optimizer):
             gather_works.append(work)
 
         # Loop 3: Wait for all-gather
-        for work in gather_works:
+        for event_name, work in zip(event_names, gather_works):
             work.wait()
+            record_event(event_name + "_ag.end")
