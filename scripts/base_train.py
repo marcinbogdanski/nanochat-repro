@@ -101,7 +101,9 @@ def main():
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
     # Optimizations
-    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass.')
+    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. Splits fwd/bwd into compiled regions, splits optimizer comms into buckets.')
+    parser.add_argument('--layers-per-compiled-region', type=int, default=2, help='When backward overlap is enabled, this controls the number of layers per compiled region (default 2).')
+    parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='When backward overlap is enabled, this controls the number of Muon optimizer parameters per communication bucket (default world_size; must be divisible by world_size).')
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -301,6 +303,7 @@ def main():
         router_lr=args.router_lr * batch_lr_scale,
         smear_backout_lr=0.2,
         weight_decay=scaled_weight_decay,
+        muon_params_per_bucket=args.muon_params_per_bucket,
         enable_metrics=args.log_metrics,
     )
 

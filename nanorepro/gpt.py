@@ -417,10 +417,12 @@ class GPTModel(nn.Module):
         return metrics
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, enable_metrics=False):
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, muon_params_per_bucket=None, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
         world_size = torch.distributed.get_world_size() if ddp else 1
+        assert muon_params_per_bucket is None or muon_params_per_bucket % world_size == 0  # must be divisible by world_size
+        muon_params_per_bucket = muon_params_per_bucket or world_size  # default to world_size if not specified
 
         # Separate parameters into groups for different optimizers and learning rates
         params_matrix = list(self.transformer.h.parameters())
@@ -462,8 +464,8 @@ class GPTModel(nn.Module):
             muon_buckets = []
             for shape in sorted({p.shape for p in params_matrix}):
                 shape_params = [p for p in params_matrix if p.shape == shape]
-                for i in range(0, len(shape_params), world_size):
-                    bucket_params = shape_params[i:i + world_size]
+                for i in range(0, len(shape_params), muon_params_per_bucket):
+                    bucket_params = shape_params[i:i + muon_params_per_bucket]
                     group_priority = max(backward_priority[id(p)] for p in bucket_params)
                     muon_buckets.append((bucket_params, group_priority))
             # Sort by priority, first element has highest backward priority, i.e. is processed first during backward pass
