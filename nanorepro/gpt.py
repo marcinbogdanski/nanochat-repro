@@ -6,7 +6,7 @@ from nanorepro.moe import MoE
 from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
-from nanorepro.nsight_trace import is_trace_enabled, record_event, clone_boundary
+from nanorepro.nsight_trace import clone_boundary
 
 class GPTConfig:
     def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_experts, moe_top_k):
