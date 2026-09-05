@@ -119,6 +119,7 @@ def get_color(name):
     colors = {
         "forward": "#4CAF50",
         "backward": "#41C4D5",
+        "output": "#2F5DBA",
         "optimizer": "#F4A261",
         "adamw": "#F4A261",
         "muon": "#D16767",

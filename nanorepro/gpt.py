@@ -624,7 +624,7 @@ class GPTModel(nn.Module):
 
             # Mark end of block_{i} and start of block_{i+1} (apart from last)
             is_last_block = (i == len(self.transformer.h) - 1)
-            right = f"block_{i+1}" if is_last_block is False else None
+            right = f"block_{i+1}" if is_last_block is False else "output"
             x = clone_boundary(x, left=f"block_{i}", right=right)
 
             if i == backout_layer:
@@ -647,6 +647,7 @@ class GPTModel(nn.Module):
         logits = self.lm_head(x)   # B,T,V <- B,T,E
         logits = logits.float()
         logits = softcap * torch.tanh(logits / softcap)
+        logits = clone_boundary(logits, left="output", right=None)
 
         metrics = None
         if self.enable_metrics:
