@@ -16,7 +16,7 @@ from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
-from nanorepro.common import get_base_path, ddp_init, save_git_diff, collect_provenance, wandb_init, FileLogger
+from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, FileLogger
 from nanorepro.nsight_trace import is_trace_enabled, record_event  # registers custom ops for profiling
 BASE_DIR = get_base_path()
 
@@ -295,8 +295,8 @@ def main():
     print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
-    # [0] AdamW for embeddings and scalars, [1] Muon for large matrix params
-    optimizers = model.setup_optimizer(
+    # AdamW for embeddings and scalars, Muon for large matrix params
+    adamw_optim, muon_optim = model.setup_optimizer(
         embedding_lr=args.embedding_lr * batch_lr_scale,
         matrix_lr=args.matrix_lr * batch_lr_scale,
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
@@ -401,7 +401,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device, step=resume_from_step)
+        loaded_vars = load_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, device, step=resume_from_step)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
@@ -456,7 +456,7 @@ def main():
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps or stop_requested):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
+            checkpoint_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
@@ -473,7 +473,7 @@ def main():
             torch.cuda.profiler.start()
         ts = time.time()
         loss_accum = 0.0
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for ga_idx in range(grad_accum):
@@ -494,12 +494,12 @@ def main():
 
         # LR Scheduler
         lrm = get_lr(step)
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_wd(step)
-        for group in optimizers[1].param_groups:  # [0] is AdamW, [1] is Muon
+        for group in muon_optim.param_groups:
             group['momentum'] = muon_momentum
             group['weight_decay'] = muon_weight_decay
 
@@ -509,10 +509,10 @@ def main():
 
         # Optimizer Step
         record_event("adamw.begin")
-        optimizers[0].step()
+        adamw_optim.step()
         record_event("adamw.end")
         record_event("muon.begin")
-        optimizers[1].step()
+        muon_optim.step()
         record_event("muon.end")
 
         # Sync & Time
@@ -567,7 +567,7 @@ def main():
             }
             # Metrics - super ugly
             if args.log_metrics:
-                opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
+                opt_metrics = {**adamw_optim.get_metrics(), **muon_optim.get_metrics()}
                 metrics_list = model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
                 train_log_dict['metrics'] = metrics_list
             file_logger.log('train', step, train_log_dict)

@@ -216,7 +216,7 @@ def main():
     print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
-    optimizers = model.setup_optimizer(
+    adamw_optim, muon_optim = model.setup_optimizer(
         embedding_lr=embedding_lr * args.init_lr_frac,
         matrix_lr=matrix_lr * args.init_lr_frac,
         unembedding_lr=unembedding_lr * args.init_lr_frac,
@@ -232,15 +232,15 @@ def main():
     optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
     optim_state = torch.load(optim_path, map_location=device)
     # Load AdamW
-    base_lrs = [group['lr'] for group in optimizers[0].param_groups]
-    optimizers[0].load_state_dict(optim_state['adamw'])
-    for group, lr in zip(optimizers[0].param_groups, base_lrs):
+    base_lrs = [group['lr'] for group in adamw_optim.param_groups]
+    adamw_optim.load_state_dict(optim_state['adamw'])
+    for group, lr in zip(adamw_optim.param_groups, base_lrs):
         group['lr'] = lr
         group['initial_lr'] = lr
     # Load Muon
-    base_lrs = [group['lr'] for group in optimizers[1].param_groups]
-    optimizers[1].load_state_dict(optim_state['muon'])
-    for group, lr in zip(optimizers[1].param_groups, base_lrs):
+    base_lrs = [group['lr'] for group in muon_optim.param_groups]
+    muon_optim.load_state_dict(optim_state['muon'])
+    for group, lr in zip(muon_optim.param_groups, base_lrs):
         group['lr'] = lr
         group['initial_lr'] = lr
 
@@ -413,7 +413,7 @@ def main():
         if last_step:
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
+            checkpoint_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
@@ -429,7 +429,7 @@ def main():
             torch.cuda.reset_peak_memory_stats()
         ts = time.time()
         loss_accum = 0.0
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for _ in range(grad_accum):
@@ -447,11 +447,11 @@ def main():
 
         # LR Scheduler
         lrm = get_lr(trained_progress)
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
-        for group in optimizers[1].param_groups:  # [0] is AdamW, [1] is Muon
+        for group in muon_optim.param_groups:
             group['momentum'] = muon_momentum
 
         # Update MoE balancing
@@ -459,7 +459,7 @@ def main():
         model.zero_moe_counters()
 
         # Optimizer Step
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             opt.step()
 
         # Sync & Time
@@ -507,7 +507,7 @@ def main():
             }
             # Metrics - super ugly
             if args.log_metrics:
-                opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
+                opt_metrics = {**adamw_optim.get_metrics(), **muon_optim.get_metrics()}
                 metrics_list = model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
                 train_log_dict['metrics'] = metrics_list
             file_logger.log('train', step, train_log_dict)

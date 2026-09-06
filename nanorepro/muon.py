@@ -135,6 +135,12 @@ class Muon(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
+    def backward_overlap_begin(self):
+        pass  # API compatibility with Dist version
+
+    def backward_overlap_end(self):
+        pass  # API compatibility with Dist version
+
     def get_metrics(self):
         return self.debug_stats
 
@@ -248,6 +254,12 @@ class DistMuon(torch.optim.Optimizer):
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1])
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
+
+    def backward_overlap_begin(self):
+        pass
+
+    def backward_overlap_end(self):
+        pass
 
     def get_metrics(self):
         return self.debug_stats
