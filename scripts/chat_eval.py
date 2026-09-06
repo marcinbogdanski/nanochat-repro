@@ -92,9 +92,11 @@ def main():
         print0(f"  {k:>16}: {v}")
 
     # Compile
-    orig_model = model
     if not args.deterministic:
-        model = torch.compile(model, dynamic=False)
+        # This by itself does not switch on compiled path yet, just makes it available.
+        # To use pass use_compiled_if_available=True to forward()
+        # For eval only, splits are not useful; -1 compiles all layers together
+        model.compile_layer_regions(layers_per_region=-1)
 
     # Hyperparameter Transfer and Calculation
     step = pretrain_metadata["step"]
@@ -145,7 +147,7 @@ def main():
         raise ValueError(f"Unknown data mixture: {data_mixture}")
     chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
         tasks_dict=tasks_dict,
-        model=orig_model,
+        model=model,
         tokenizer=tokenizer,
         micro_batch=micro_batch,
         max_prompt_len=max_seq_len,

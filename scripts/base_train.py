@@ -101,9 +101,9 @@ def main():
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
     # Optimizations
-    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. Splits fwd/bwd into compiled regions, splits optimizer comms into buckets.')
-    parser.add_argument('--layers-per-compiled-region', type=int, default=2, help='When backward overlap is enabled, this controls the number of layers per compiled region (default 2).')
-    parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='When backward overlap is enabled, this controls the number of Muon optimizer parameters per communication bucket (default world_size; must be divisible by world_size).')
+    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. For best results use compiled regions and muon buckets')
+    parser.add_argument('--layers-per-compiled-region', type=int, default=2, help='Number of layers per compiled region (default 2, -1 to compile all layers together).')
+    parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket (default world_size; -1=all; must be divisible by world_size).')
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -222,9 +222,10 @@ def main():
     print0(f"Layers eligible for FP8: {num_eligible} / {num_linear}")
 
     # Compile
-    orig_model = model
     if not args.deterministic:
-        model = torch.compile(model, dynamic=False)
+        # This by itself does not switch on compiled path yet, just makes it available.
+        # To use pass use_compiled_if_available=True to forward()
+        model.compile_layer_regions(layers_per_region=args.layers_per_compiled_region)
 
     # Hyperparameter Scaling and Training Horizon
     # (1) Scaling laws / transfer recipe
@@ -400,9 +401,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device, step=resume_from_step)
-        if not args.deterministic:
-            model = torch.compile(orig_model, dynamic=False)
+        loaded_vars = load_checkpoint(run_path, model, optimizers, train_loader, device, step=resume_from_step)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
@@ -439,8 +438,7 @@ def main():
 
         # Core Metric
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
-            # Use orig_model because shapes keep changing
-            core_metric, core_results_list, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            core_metric, core_results_list, core_eval_time = evaluate_core_metric(model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             core_accuracies = {result['task_label']: result['centered_accuracy'] for result in core_results_list}
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'core_metric': core_metric, 'centered_results': core_accuracies})
@@ -450,7 +448,7 @@ def main():
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
-            generated_samples = generate_test_samples(orig_model, tokenizer, device)
+            generated_samples = generate_test_samples(model, tokenizer, device)
             print0("\n".join(generated_samples))
             file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
@@ -458,7 +456,7 @@ def main():
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps or stop_requested):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
+            checkpoint_md5sum = save_checkpoint(run_path, model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
@@ -480,7 +478,7 @@ def main():
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for ga_idx in range(grad_accum):
             record_event(f"forward_ga{ga_idx}.begin")
-            _, loss, metrics = model(x, y, return_logits=False)
+            _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True)
             record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
@@ -570,7 +568,7 @@ def main():
             # Metrics - super ugly
             if args.log_metrics:
                 opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
-                metrics_list = orig_model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
+                metrics_list = model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
                 train_log_dict['metrics'] = metrics_list
             file_logger.log('train', step, train_log_dict)
         
@@ -588,7 +586,7 @@ def main():
 
     file_logger.log('run_summary', step=None, data={
         'user_config': user_config,
-        'model_config': orig_model.config.to_dict(),
+        'model_config': model.config.to_dict(),
         'param_counts': param_counts,
         'training_hyperparameters': training_hyperparameters,
         'final_bpb_eval': bpb_eval_data,

@@ -190,7 +190,7 @@ def _evaluate_one_example(idx, data_list, model, tokenizer, device,
     # Forward the model    
     with torch.no_grad():
         B, T = input_ids.shape
-        logits, losses, _ = model(input_ids, target_ids, reduction='none')
+        logits, losses, _ = model(input_ids, target_ids, reduction='none')  # don't enable compiled path, shapes change
         losses = losses.view(B, T)
         losses[:, -1] = float('nan')  # ignore loss on last token (no target)
         preds = logits.argmax(dim=-1)  # (B, T)

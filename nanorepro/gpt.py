@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -231,6 +232,10 @@ class GPTModel(nn.Module):
         # Pre-calculate window size tuples (context_length, 0) for each layer
         self.window_sizes = self._calc_window_sizes(self.config)
 
+        # Compiled regions, if used
+        self._compiled_layer_regions = None
+        self._compiled_output_region = None
+
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
 
@@ -421,7 +426,7 @@ class GPTModel(nn.Module):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
         world_size = torch.distributed.get_world_size() if ddp else 1
-        assert muon_params_per_bucket is None or muon_params_per_bucket % world_size == 0  # must be divisible by world_size
+        assert muon_params_per_bucket is None or muon_params_per_bucket == -1 or (muon_params_per_bucket > 0 and muon_params_per_bucket % world_size == 0)  # must be divisible by world_size
         muon_params_per_bucket = muon_params_per_bucket or world_size  # default to world_size if not specified
 
         # Separate parameters into groups for different optimizers and learning rates
@@ -457,7 +462,7 @@ class GPTModel(nn.Module):
         adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
-        if ddp and self.backward_overlap:
+        if ddp and muon_params_per_bucket != -1:
             # We rely on a fact that params_matrix is constructed roughly "in order". This is not perfect but close enough for us
             backward_priority = {id(p): i for i, p in enumerate(reversed(params_matrix))}
             # For each shape, create world_size buckets, noting their priority (last bucket may have less than world_size elements)
@@ -606,12 +611,35 @@ class GPTModel(nn.Module):
     def get_device(self):
         return next(self.parameters()).device
 
-    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True):
+    def compile_layer_regions(self, layers_per_region):
+        """Compile the transformer layers into regions for optimized execution.
+
+        This by itself does not switch on compiled path, just makes it available. To enable it, pass use_compiled_if_available=True to forward()
+        - enable: training and evaluation with stable input/target shapes, e.g. training froward and BPB
+        - don't enable: variable-shape inference, e.g. CORE, sampling, free-form generation
+        It is completely safe to compile regions and not use them.
+        """
+        assert layers_per_region == -1 or layers_per_region > 0
+
+        if layers_per_region == -1:
+            layers_per_region = len(self.transformer.h)
+
+        self._compiled_layer_regions = []
+        for start_layer in range(0, len(self.transformer.h), layers_per_region):
+            end_layer = min(start_layer + layers_per_region, len(self.transformer.h))
+            region = partial(self._fwd_layer_regions, start_layer, end_layer)
+            compiled_region = torch.compile(region, dynamic=False)
+            self._compiled_layer_regions.append(compiled_region)
+        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False)
+
+    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True, use_compiled_if_available=False):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
         assert idx.device == self.cos.device, "Input device does not match model device."
         assert self.cos.dtype == self.compute_dtype, "Model buffers are not in compute_dtype."
-        assert kv_cache is None or not torch.is_grad_enabled()   # if kv_cache, then ensure no_grad
+        assert kv_cache is None or not torch.is_grad_enabled()     # if kv_cache, then ensure no_grad (training with KV cache not supported)
+        assert kv_cache is None or not use_compiled_if_available   # if kv_cache, then ensure no compiled regions (compiled path doesn't support KV caching)
+        use_compiled_regions = use_compiled_if_available and self._compiled_layer_regions is not None
 
         # Offset sin/cos
         offset = 0 if kv_cache is None else kv_cache.cache_seqlens[0].item()  # assume seqlens are equal across the batch
@@ -622,13 +650,15 @@ class GPTModel(nn.Module):
         x = x0 = x_backout = None
         metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
 
-        # temp:
-        layers_per_region = 2
-
         # Transformer
-        for start_layer in range(0, len(self.transformer.h), layers_per_region):
-            end_layer = min(start_layer + layers_per_region, len(self.transformer.h))
-            x, x0, x_backout, sq_sum_list, num_el_list = self._fwd_layer_regions(start_layer, end_layer, idx, x, x0, x_backout, cos, sin, kv_cache)
+        if use_compiled_regions:
+            for region in self._compiled_layer_regions:
+                x, x0, x_backout, sq_sum_list, num_el_list = region(idx, x, x0, x_backout, cos, sin, kv_cache)
+                if self.enable_metrics:
+                    metrics_resid_post_sq_sum.extend(sq_sum_list)
+                    metrics_resid_post_num_el.extend(num_el_list)
+        else:
+            x, x0, x_backout, sq_sum_list, num_el_list = self._fwd_layer_regions(0, len(self.transformer.h), idx, x, x0, x_backout, cos, sin, kv_cache)
             if self.enable_metrics:
                 metrics_resid_post_sq_sum.extend(sq_sum_list)
                 metrics_resid_post_num_el.extend(num_el_list)
@@ -637,6 +667,8 @@ class GPTModel(nn.Module):
         if kv_cache is not None:
             kv_cache.cache_seqlens.add_(T)
 
+        if use_compiled_regions:
+            return self._compiled_output_region(x, x_backout, targets, reduction, return_logits, metrics_resid_post_sq_sum, metrics_resid_post_num_el)
         return self._fwd_output_region(x, x_backout, targets, reduction, return_logits, metrics_resid_post_sq_sum, metrics_resid_post_num_el)
 
     def _fwd_layer_regions(self, start_layer, end_layer, idx, x, x0, x_backout, cos, sin, kv_cache):
@@ -755,7 +787,7 @@ class GPTModel(nn.Module):
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 idx_tail = idx[:, -block_size:]      # B,T  sliding window
-                logits, _, _ = self(idx_tail)      # B,T,C <- B,T
+                logits, _, _ = self(idx_tail, use_compiled_if_available=False)      # B,T,C <- B,T  don't use compiled, shapes change
                 logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
                 xcol = self.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
                 idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append

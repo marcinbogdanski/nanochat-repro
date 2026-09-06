@@ -89,9 +89,11 @@ def main():
         print0(f"  {k:>16}: {v}")
 
     # Compile
-    orig_model = model
     if not args.deterministic:
-        model = torch.compile(model, dynamic=False)
+        # This by itself does not switch on compiled path yet, just makes it available.
+        # To use pass use_compiled_if_available=True to forward()
+        # For eval only, splits are not useful; -1 compiles all layers together
+        model.compile_layer_regions(layers_per_region=-1)
 
     # Hyperparameter Transfer and Calculation
     step = pretrain_metadata["step"]
@@ -119,7 +121,7 @@ def main():
     print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
     
     # CORE Evaluation
-    core_metric, core_results_list, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+    core_metric, core_results_list, core_eval_time = evaluate_core_metric(model, tokenizer, device, args.core_metric_max_per_task)
     print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
     for res in core_results_list:
         print0(res)

@@ -19,7 +19,7 @@ def evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device):
     try:
         for _ in range(eval_steps):
             x, y = eval_loader.get_batch_bos()
-            _, loss_arr, _ = model(x, y, reduction='none', return_logits=False)
+            _, loss_arr, _ = model(x, y, reduction='none', return_logits=False, use_compiled_if_available=True)  # compiled ok here
             assert (y[y < 0] == -1).all()  # assert if negative value exists, it must be -1
             bytes_arr = token_bytes[y.view(-1)]
             loss_arr = loss_arr * (bytes_arr > 0)   # zero loss for tokens with 0 bytes (<bos> etc.)
