@@ -199,7 +199,6 @@ def main():
         compute_dtype=compute_dtype,
         enable_fa3=not args.no_fa3,
         fp8_training=enable_fp8,
-        backward_overlap=args.backward_overlap,
         enable_metrics=args.log_metrics,
         device=device
     )
@@ -254,7 +253,6 @@ def main():
         compute_dtype=compute_dtype,        # not relevant here
         enable_fa3=not args.no_fa3,         # not relevant here
         fp8_training=enable_fp8,            # not relevant here
-        backward_overlap=args.backward_overlap,  # not relevant here
         enable_metrics=args.log_metrics,    # not relevant here
         device="meta",
     )
@@ -304,6 +302,7 @@ def main():
         router_lr=args.router_lr * batch_lr_scale,
         smear_backout_lr=0.2,
         weight_decay=scaled_weight_decay,
+        backward_overlap=args.backward_overlap,
         muon_params_per_bucket=args.muon_params_per_bucket,
         enable_metrics=args.log_metrics,
     )
@@ -484,13 +483,13 @@ def main():
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
+            if ga_idx == grad_accum - 1:
+                muon_optim.backward_overlap_begin()  # no-op if backward overlap is disabled
             record_event(f"backward_ga{ga_idx}.begin")
             loss.backward()
             record_event(f"backward_ga{ga_idx}.end")
             x, y = train_loader.get_batch_bos()
-
-        if torch.distributed.is_initialized():
-            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
+        muon_optim.backward_overlap_end()  # no-op if backward overlap is disabled
 
         # LR Scheduler
         lrm = get_lr(step)
@@ -514,6 +513,10 @@ def main():
         record_event("muon.begin")
         muon_optim.step()
         record_event("muon.end")
+
+        # Loss sync
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # Sync & Time
         synchronize()

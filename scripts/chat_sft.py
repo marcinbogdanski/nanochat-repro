@@ -170,7 +170,6 @@ def main():
         compute_dtype=compute_dtype,
         enable_fa3=not args.no_fa3,
         fp8_training=enable_fp8,
-        backward_overlap=args.backward_overlap,
         enable_metrics=args.log_metrics,
         device=device,
         step=None)
@@ -224,6 +223,7 @@ def main():
         router_lr=0.005 * args.init_lr_frac,  # not used unless MoE is enabled
         smear_backout_lr=0.2 * args.init_lr_frac,
         weight_decay=0.0,
+        backward_overlap=args.backward_overlap,
         muon_params_per_bucket=args.muon_params_per_bucket,
         enable_metrics=args.log_metrics,
     )

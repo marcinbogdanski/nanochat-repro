@@ -83,7 +83,6 @@ def main():
         compute_dtype=compute_dtype,
         enable_fa3=not args.no_fa3,
         fp8_training=False,    # doesn't matter
-        backward_overlap=False, # useful only in training
         enable_metrics=False,
         device=device,
         step=None)                  # latest checkpoint

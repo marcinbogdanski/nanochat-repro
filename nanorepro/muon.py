@@ -128,10 +128,11 @@ class Muon(torch.optim.Optimizer):
         lr_adj = lr * sqrt(max(1, m/n))  # adjust for aspect ratio
         p = p - lr * U                   # update weights
     """
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, enable_metrics=False):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, backward_overlap=False, enable_metrics=False):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
         super().__init__(params, defaults)
         self.compute_dtype = compute_dtype
+        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
@@ -209,10 +210,11 @@ class Muon(torch.optim.Optimizer):
 
 class DistMuon(torch.optim.Optimizer):
     """ZeRO-2 version of Muon optimizer"""
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, enable_metrics=False):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, backward_overlap=False, enable_metrics=False):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
         super().__init__(params, defaults)
         self.compute_dtype = compute_dtype
+        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
         self.group_buffers = []  # static param/grad buffers, parameter .data/.grad point here
@@ -255,11 +257,18 @@ class DistMuon(torch.optim.Optimizer):
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
 
+        self._backward_active = False
+        self._event_names = [None] * len(self.param_groups)
+        self._reduce_scatter_works = [None] * len(self.param_groups)
+
+
     def backward_overlap_begin(self):
-        pass
+        assert not self._backward_active
+        self._backward_active = True
 
     def backward_overlap_end(self):
-        pass
+        assert self._backward_active
+        self._backward_active = False
 
     def get_metrics(self):
         return self.debug_stats
@@ -270,30 +279,40 @@ class DistMuon(torch.optim.Optimizer):
         # Note calling model.zero_grad(set_to_none=True) will still set .grad = None and break things, hence assert in step()
         for buffer in self.group_buffers:
             buffer['grads'].zero_()
+        self._event_names = [None] * len(self.param_groups)
+        self._reduce_scatter_works = [None] * len(self.param_groups)
+
+    @torch.no_grad()
+    def _launch_reduce_scatter(self, group_idx):
+        assert self._event_names[group_idx] is None
+        assert self._reduce_scatter_works[group_idx] is None
+
+        buffers = self.group_buffers[group_idx]
+        group = self.param_groups[group_idx]
+        for param_idx, param in enumerate(group["params"]):
+            # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
+            assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][param_idx].data_ptr()
+        shape_str = "x".join(map(str, group["params"][0].shape))
+        event_name = f"muon_g{group_idx}_{shape_str}"
+        record_event(event_name + "_rs.begin")
+
+        self._event_names[group_idx] = event_name
+        self._reduce_scatter_works[group_idx] = torch.distributed.reduce_scatter_tensor(
+            output=buffers['grads_shard'],
+            input=buffers['grads'],
+            op=torch.distributed.ReduceOp.AVG,
+            async_op=True
+        )
 
     @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
         self.debug_stats = {}  # clear every step
 
-        # Loop 1: Launch reduce-scatter
-        reduce_works = []
-        event_names = []
-        for i, group in enumerate(self.param_groups):
-            buffers = self.group_buffers[i]
-            for jj, param in enumerate(group["params"]):
-                # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
-                assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][jj].data_ptr()
-            shape_str = "x".join(map(str, group["params"][0].shape))
-            event_name = f"muon_g{i}_{shape_str}"
-            record_event(event_name + "_rs.begin")
-            event_names.append(event_name)
-            reduce_works.append(torch.distributed.reduce_scatter_tensor(
-                output=buffers['grads_shard'],
-                input=buffers['grads'],
-                op=torch.distributed.ReduceOp.AVG,
-                async_op=True
-            ))
+        # Loop 1: Launch any remaining reduce-scatter
+        for group_idx in range(len(self.param_groups)):
+            if self._reduce_scatter_works[group_idx] is None:
+                self._launch_reduce_scatter(group_idx)
 
         # Loop 2: Step and launch all-gather
         gather_works = []
@@ -302,8 +321,8 @@ class DistMuon(torch.optim.Optimizer):
             anchor = group['params'][0]  # shape, dtype, device
 
             # Wait for reduce-scatter
-            reduce_works[i].wait()
-            record_event(event_names[i] + "_rs.end")
+            self._reduce_scatter_works[i].wait()
+            record_event(self._event_names[i] + "_rs.end")
 
             # Guard empty rank
             num_params_this_rank = buffers['num_local']
@@ -320,7 +339,7 @@ class DistMuon(torch.optim.Optimizer):
                 beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
 
                 # Fused Kernel
-                record_event(event_names[i] + "_fused.begin")
+                record_event(self._event_names[i] + "_fused.begin")
                 grad_sum_squares, update_sum_squares, params_sum_squares = fused_muon_step(
                     params=buffers['params_shard'][:num_params_this_rank],
                     grad=buffers['grads_shard'][:num_params_this_rank],
@@ -334,7 +353,7 @@ class DistMuon(torch.optim.Optimizer):
                     compute_dtype=self.compute_dtype,
                     metrics=self.enable_metrics,
                 )
-                record_event(event_names[i] + "_fused.end")
+                record_event(self._event_names[i] + "_fused.end")
 
                 # Collect Metrics
                 if self.enable_metrics:
@@ -365,7 +384,7 @@ class DistMuon(torch.optim.Optimizer):
 
 
             # Do all-gather directly to static buffer
-            record_event(event_names[i] + "_ag.begin")
+            record_event(self._event_names[i] + "_ag.begin")
             work = torch.distributed.all_gather_into_tensor(
                 output_tensor=buffers["params"],
                 input_tensor=buffers['params_shard'],
@@ -374,6 +393,6 @@ class DistMuon(torch.optim.Optimizer):
             gather_works.append(work)
 
         # Loop 3: Wait for all-gather
-        for event_name, work in zip(event_names, gather_works):
+        for event_name, work in zip(self._event_names, gather_works):
             work.wait()
             record_event(event_name + "_ag.end")

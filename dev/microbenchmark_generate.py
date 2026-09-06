@@ -64,7 +64,6 @@ def main():
             compute_dtype=compute_dtype,
             enable_fa3=enable_fa3,
             fp8_training=True,
-            backward_overlap=False,
             enable_metrics=False,
         )
     model.to_empty(device=device)
@@ -174,7 +173,6 @@ def main():
             compute_dtype=compute_dtype,
             enable_fa3=enable_fa3,
             fp8_training=True,
-            backward_overlap=False,
             enable_metrics=False,
         )
     model.to_empty(device=device)

@@ -178,7 +178,7 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, backward_overlap, enable_metrics=False):
+    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, enable_metrics=False):
         """Initialize to default device/dtype here, cast to compute_dtype in init_weights.
         
         Type handling:
@@ -196,7 +196,6 @@ class GPTModel(nn.Module):
         self.config = config
         self.compute_dtype = compute_dtype
         self.fp8_training = fp8_training
-        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
 
         self.transformer = nn.ModuleDict(dict(
@@ -422,7 +421,7 @@ class GPTModel(nn.Module):
         return metrics
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, muon_params_per_bucket=None, enable_metrics=False):
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, backward_overlap=False, muon_params_per_bucket=None, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
         world_size = torch.distributed.get_world_size() if ddp else 1
@@ -490,6 +489,7 @@ class GPTModel(nn.Module):
             beta2=0.9,
             weight_decay=weight_decay,
             compute_dtype=self.compute_dtype,
+            backward_overlap=backward_overlap,
             enable_metrics=enable_metrics,
         )
         
