@@ -296,6 +296,7 @@ class DistMuon(torch.optim.Optimizer):
         if not self.backward_overlap:
             return   # no-op if not enabled
         assert self._backward_active
+        assert self._next_group_to_launch == len(self.param_groups)
         self._backward_active = False
 
     def get_metrics(self):
