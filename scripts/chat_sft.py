@@ -220,7 +220,7 @@ def main():
     print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
-    adamw_optim, muon_optim = model.setup_optimizer(
+    adamw_optim, muon_optim, backward_scheduler = model.setup_optimizer(
         embedding_lr=embedding_lr * args.init_lr_frac,
         matrix_lr=matrix_lr * args.init_lr_frac,
         unembedding_lr=unembedding_lr * args.init_lr_frac,
@@ -437,18 +437,18 @@ def main():
         for opt in [adamw_optim, muon_optim]:
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
-        for _ in range(grad_accum):
+        for ga_idx in range(grad_accum):
             _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True)
             fwd_metrics.append(metrics)
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
+            if ga_idx == grad_accum - 1:
+                backward_scheduler.backward_overlap_begin()  # no-op if backward overlap is disabled
             loss.backward()
             trained_consumed = train_loader.consumed  # cache to reflect training reality
             x, y = train_loader.get_batch_bos()    # fetch the next batch
-
-        if torch.distributed.is_initialized():
-            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
+        backward_scheduler.backward_overlap_end()  # no-op if backward overlap is disabled
 
         # LR Scheduler
         lrm = get_lr(trained_progress)
@@ -466,6 +466,9 @@ def main():
         # Optimizer Step
         for opt in [adamw_optim, muon_optim]:
             opt.step()
+
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # Sync & Time
         synchronize()

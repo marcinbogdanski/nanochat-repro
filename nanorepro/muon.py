@@ -1,4 +1,3 @@
-import threading
 import torch
 from nanorepro.nsight_trace import record_event
 
@@ -258,46 +257,8 @@ class DistMuon(torch.optim.Optimizer):
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
 
-        self._backward_active = False
         self._event_names = [None] * len(self.param_groups)
         self._reduce_scatter_works = [None] * len(self.param_groups)
-        self._param_group_bucket_ready = [[False] * len(group["params"]) for group in self.param_groups]
-        self._next_group_to_launch = 0    # groups need to be launched in exactly same order across ranks to avoid deadlock
-        self._backward_lock = threading.Lock()  # param hooks may run from different thread and are not guaranteed to run serially
-        if self.backward_overlap:
-            for group_idx, group in enumerate(self.param_groups):
-                for param_idx, param in enumerate(group["params"]):
-                    param.register_post_accumulate_grad_hook(self._make_backward_hook(group_idx, param_idx))
-
-    def _make_backward_hook(self, group_idx, param_idx):
-        def backward_hook(_):
-            if self._backward_active:  # only active in final grad_accum step
-                with self._backward_lock:
-                    assert not self._param_group_bucket_ready[group_idx][param_idx]
-                    self._param_group_bucket_ready[group_idx][param_idx] = True  # mark this param is ready
-                    while self._next_group_to_launch < len(self.param_groups):
-                        if all(self._param_group_bucket_ready[self._next_group_to_launch]):  # when all params in group are ready...
-                            self._launch_reduce_scatter(self._next_group_to_launch)          # ...launch the reduce-scatter...
-                            self._next_group_to_launch += 1                                  # ...and advance to the next group
-                        else:
-                            break
-
-        return backward_hook
-
-    def backward_overlap_begin(self):
-        if not self.backward_overlap:
-            return   # no-op if not enabled
-        assert not self._backward_active
-        self._backward_active = True
-        self._next_group_to_launch = 0
-        self._param_group_bucket_ready = [[False] * len(group["params"]) for group in self.param_groups]
-
-    def backward_overlap_end(self):
-        if not self.backward_overlap:
-            return   # no-op if not enabled
-        assert self._backward_active
-        assert self._next_group_to_launch == len(self.param_groups)
-        self._backward_active = False
 
     def get_metrics(self):
         return self.debug_stats
@@ -312,7 +273,7 @@ class DistMuon(torch.optim.Optimizer):
         self._reduce_scatter_works = [None] * len(self.param_groups)
 
     @torch.no_grad()
-    def _launch_reduce_scatter(self, group_idx):
+    def launch_reduce_scatter(self, group_idx):
         assert self._event_names[group_idx] is None
         assert self._reduce_scatter_works[group_idx] is None
 
@@ -336,16 +297,13 @@ class DistMuon(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
-        assert not self._backward_active
         self.debug_stats = {}  # clear every step
 
-        # Loop 1: Handle reduce-scatter
-        for group_idx in range(len(self.param_groups)):
-            if self.backward_overlap:
-                assert self._reduce_scatter_works[group_idx] is not None  # assert all reduce-scatter works have been launched in the backward pass
-            else:
-                assert self._reduce_scatter_works[group_idx] is None  # conversely, assert reduce-scatter has not been launched
-                self._launch_reduce_scatter(group_idx)
+        # Loop 1: Launch reduce-scatter
+        if not self.backward_overlap:  # if backward overlap is enabled, RS is launched in param hooks during backward
+            for group_idx in range(len(self.param_groups)):
+                assert self._reduce_scatter_works[group_idx] is None  # assert reduce-scatter has not been launched
+                self.launch_reduce_scatter(group_idx)
 
         # Loop 2: Step and launch all-gather
         gather_works = []

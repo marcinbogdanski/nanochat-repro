@@ -7,6 +7,7 @@ from nanorepro.moe import MoE
 from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
+from nanorepro.backward_scheduler import BackwardScheduler
 from nanorepro.nsight_trace import clone_boundary
 
 class GPTConfig:
@@ -481,6 +482,8 @@ class GPTModel(nn.Module):
             for shape in sorted({p.shape for p in params_matrix}):
                 group_params = [p for p in params_matrix if p.shape == shape]
                 muon_groups.append({'params': group_params})
+
+        # Muon Optimizer
         muon_factory = DistMuon if ddp else Muon
         muon_optimizer = muon_factory(
             muon_groups,
@@ -493,15 +496,26 @@ class GPTModel(nn.Module):
             backward_overlap=backward_overlap,
             enable_metrics=enable_metrics,
         )
+
+        comm_launchers = []
+        if ddp:
+            comm_launchers = [
+                partial(muon_optimizer.launch_reduce_scatter, group_idx)
+                for group_idx in range(len(muon_groups))
+            ]
+
+        backward_scheduler = BackwardScheduler(
+            muon_groups=muon_groups,
+            comm_launchers=comm_launchers,
+            backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
+        )
         
         # Set initial_lr in param groups for proper LR scaling
-        optimizers = [adamw_optimizer, muon_optimizer]
-        for opt in optimizers:
+        for opt in [adamw_optimizer, muon_optimizer]:
                 for group in opt.param_groups:
                     group["initial_lr"] = group["lr"]
-        
-        # [0] is AdamW, [1] is Muon
-        return optimizers
+
+        return adamw_optimizer, muon_optimizer, backward_scheduler
 
 
     def estimate_flops_per_token(self):

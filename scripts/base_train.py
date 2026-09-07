@@ -299,7 +299,7 @@ def main():
 
     # Optimizers
     # AdamW for embeddings and scalars, Muon for large matrix params
-    adamw_optim, muon_optim = model.setup_optimizer(
+    adamw_optim, muon_optim, backward_scheduler = model.setup_optimizer(
         embedding_lr=args.embedding_lr * batch_lr_scale,
         matrix_lr=args.matrix_lr * batch_lr_scale,
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
@@ -489,12 +489,12 @@ def main():
             loss = loss / grad_accum
             loss_accum += loss.detach()
             if ga_idx == grad_accum - 1:
-                muon_optim.backward_overlap_begin()  # no-op if backward overlap is disabled
+                backward_scheduler.backward_overlap_begin()  # no-op if backward overlap is disabled
             record_event(f"backward_ga{ga_idx}.begin")
             loss.backward()
             record_event(f"backward_ga{ga_idx}.end")
             x, y = train_loader.get_batch_bos()
-        muon_optim.backward_overlap_end()  # no-op if backward overlap is disabled
+        backward_scheduler.backward_overlap_end()  # no-op if backward overlap is disabled
 
         # LR Scheduler
         lrm = get_lr(step)
