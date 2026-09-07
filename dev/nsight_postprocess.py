@@ -116,17 +116,28 @@ for row in rows:
 
 # Color Dispenser
 def get_color(name):
-    colors = {
-        "forward": "#4CAF50",
-        "backward": "#41C4D5",
-        "output": "#2F5DBA",
-        "optimizer": "#F4A261",
-        "adamw": "#F4A261",
-        "muon": "#D16767",
-    }
-    for k, v in colors.items():
-        if k in name:
-            return v
+    if "forward" in name:
+        return "#4CAF50"
+    elif "backward" in name:
+        return "#41C4D5"
+    elif "optimizer" in name:
+        return "#EDF461"
+    elif "adamw" in name:
+        if "_rs" in name or "_ar" in name:  # initial reduce-scatter or all-reduce
+            return "#F4B989"
+        elif "_fused" in name:      # compute
+            return "#E97311"
+        elif "_ag" in name:         # final all-gather
+            return "#EF964D"
+        return "#EF964D"         # default
+    elif "muon" in name:
+        if "_rs" in name:          # initial reduce-scatter or all-reduce
+            return "#E4AFAF"
+        elif "_fused" in name:      # compute
+            return "#E62323"
+        elif "_ag" in name:         # final all-gather
+            return "#E35E5E"
+        return "#E35E5E"         # default
     return "#747474"  # default color if no match is found
 
 # Extract start and end events from the rows

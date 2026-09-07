@@ -426,7 +426,8 @@ class GPTModel(nn.Module):
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
         world_size = torch.distributed.get_world_size() if ddp else 1
         assert muon_params_per_bucket is None or muon_params_per_bucket == -1 or (muon_params_per_bucket > 0 and muon_params_per_bucket % world_size == 0)  # must be divisible by world_size
-        muon_params_per_bucket = muon_params_per_bucket or world_size  # default to world_size if not specified
+        if muon_params_per_bucket is None:
+            muon_params_per_bucket = world_size if backward_overlap else -1  # world_size if overlap enabled, otherwise group all params per shape
 
         # Separate parameters into groups for different optimizers and learning rates
         params_matrix = list(self.transformer.h.parameters())

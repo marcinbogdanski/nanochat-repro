@@ -97,9 +97,11 @@ def main():
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
     parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
     # Optimizations
-    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. For best results use compiled regions and muon buckets')
-    parser.add_argument('--layers-per-compiled-region', type=int, default=2, help='Number of layers per compiled region (default 2, -1 to compile all layers together).')
-    parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket (default world_size; -1=all; must be divisible by world_size).')
+    # default: backward overlap disabled, all transformer layers form a single compiled region, all muon params of particular shape form single communication bucket
+    # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (2 and world_size respectively)
+    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. When enabling, use --layers-per-compiled-region to control compiled regions split.')
+    parser.add_argument('--layers-per-compiled-region', type=int, default=None, help='Number of layers per compiled region. Valid values: -1 (all transformer layers) or positive int (default -1 if backward overlap disabled, 2 otherwise)')
+    parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket. Valid values: -1 (one bucket per param shape) or positive value divisible by world_size. (defaults: -1 if backward overlap disabled, world_size otherwise).')
 
     args = parser.parse_args()
     user_config = vars(args).copy()
@@ -195,7 +197,10 @@ def main():
     if not args.deterministic:
         # This by itself does not switch on compiled path yet, just makes it available.
         # To use pass use_compiled_if_available=True to forward()
-        model.compile_layer_regions(layers_per_region=args.layers_per_compiled_region)
+        layers_per_compiled_region = args.layers_per_compiled_region
+        if layers_per_compiled_region is None:
+            layers_per_compiled_region = 2 if args.backward_overlap else -1  # 2 is optimal on my 4x3090 d20, -1 fuse all layers
+        model.compile_layer_regions(layers_per_region=layers_per_compiled_region)
 
     # Hyperparameter Transfer and Calculation
     pretrain_user_cfg = pretrain_metadata["user_config"]
