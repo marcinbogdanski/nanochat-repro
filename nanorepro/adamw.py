@@ -82,9 +82,10 @@ class AdamW(torch.optim.Optimizer):
         p = p - lr * v_corrected / (sqrt(s_corrected) + eps)
         p = p - lr * wd * p                # AdamW: decoupled weight decay
     """
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, enable_metrics=False):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, backward_overlap=False, enable_metrics=False):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
+        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
@@ -147,9 +148,10 @@ class AdamW(torch.optim.Optimizer):
 
 class DistAdamW(torch.optim.Optimizer):
     """ZeRO-2 version of AdamW optimizer"""
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, enable_metrics=False):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, backward_overlap=False, enable_metrics=False):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
+        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
         self.param_buffers = {}  # (group_idx, param_idx) -> grad_slice for large params, etc
@@ -199,6 +201,28 @@ class DistAdamW(torch.optim.Optimizer):
             self._reduce_works[key] = None
 
     @torch.no_grad()
+    def launch_reduce(self, group_idx, param_idx):
+        assert self._reduce_works[(group_idx, param_idx)] is None
+
+        group = self.param_groups[group_idx]
+        param = group['params'][param_idx]
+
+        # Sync point 1
+        event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
+        event_name = self.param_buffers[(group_idx,param_idx)]['param_name'] + event_suffix + ".begin"
+        record_event(event_name)  # spans launch-to-completion, includes waiting, not just NCCL comms
+        if group['is_small']:
+            self._reduce_works[(group_idx, param_idx)] = torch.distributed.all_reduce(                      # don't slice small params
+                param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+            )
+        else:
+            grad_slice = self.param_buffers[(group_idx, param_idx)]['grad_slice']
+            self._reduce_works[(group_idx, param_idx)] = torch.distributed.reduce_scatter_tensor(
+                grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+            )
+
+
+    @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
         rank = torch.distributed.get_rank()
@@ -207,21 +231,12 @@ class DistAdamW(torch.optim.Optimizer):
         # Loop 1: Launch reduce-scatter
         for i, group in enumerate(self.param_groups):
             for j, param in enumerate(group['params']):
-                assert self._reduce_works[(i, j)] is None  # assert reduce-scatter has not been launched
-
-                # Sync point 1
-                event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
-                event_name = self.param_buffers[(i,j)]['param_name'] + event_suffix + ".begin"
-                record_event(event_name)  # spans launch-to-completion, includes waiting, not just NCCL comms
-                if group['is_small']:
-                    self._reduce_works[(i, j)] = torch.distributed.all_reduce(                      # don't slice small params
-                        param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-                    )
+                if self.backward_overlap and not group['is_small']:
+                    assert self._reduce_works[(i, j)] is None
+                    self.launch_reduce(i, j)
                 else:
-                    grad_slice = self.param_buffers[(i, j)]['grad_slice']
-                    self._reduce_works[(i, j)] = torch.distributed.reduce_scatter_tensor(
-                        grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-                    )
+                    assert self._reduce_works[(i, j)] is None  # assert reduce-scatter has not been launched
+                    self.launch_reduce(i, j)
 
         # Loop 2: Step and launch all-gather
         gather_works = {}

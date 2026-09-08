@@ -256,7 +256,7 @@ class DistMuon(torch.optim.Optimizer):
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
 
-        self._reduce_scatter_works = [None] * len(self.param_groups)
+        self._reduce_works = [None] * len(self.param_groups)
 
     def get_metrics(self):
         return self.debug_stats
@@ -267,11 +267,11 @@ class DistMuon(torch.optim.Optimizer):
         # Note calling model.zero_grad(set_to_none=True) will still set .grad = None and break things, hence assert in step()
         for buffer in self.group_buffers:
             buffer['grads'].zero_()
-        self._reduce_scatter_works = [None] * len(self.param_groups)
+        self._reduce_works = [None] * len(self.param_groups)
 
     @torch.no_grad()
-    def launch_reduce_scatter(self, group_idx):
-        assert self._reduce_scatter_works[group_idx] is None
+    def launch_reduce(self, group_idx):
+        assert self._reduce_works[group_idx] is None
 
         buffers = self.group_buffers[group_idx]
         group = self.param_groups[group_idx]
@@ -280,7 +280,7 @@ class DistMuon(torch.optim.Optimizer):
             assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][param_idx].data_ptr()
 
         record_event(buffers['group_name'] + "_rs.begin")
-        self._reduce_scatter_works[group_idx] = torch.distributed.reduce_scatter_tensor(
+        self._reduce_works[group_idx] = torch.distributed.reduce_scatter_tensor(
             output=buffers['grads_shard'],
             input=buffers['grads'],
             op=torch.distributed.ReduceOp.AVG,
@@ -295,8 +295,8 @@ class DistMuon(torch.optim.Optimizer):
         # Loop 1: Launch reduce-scatter
         if not self.backward_overlap:  # if backward overlap is enabled, RS is launched in param hooks during backward
             for group_idx in range(len(self.param_groups)):
-                assert self._reduce_scatter_works[group_idx] is None  # assert reduce-scatter has not been launched
-                self.launch_reduce_scatter(group_idx)
+                assert self._reduce_works[group_idx] is None  # assert reduce-scatter has not been launched
+                self.launch_reduce(group_idx)
 
         # Loop 2: Step and launch all-gather
         gather_works = []
@@ -305,7 +305,7 @@ class DistMuon(torch.optim.Optimizer):
             anchor = group['params'][0]  # shape, dtype, device
 
             # Wait for reduce-scatter
-            self._reduce_scatter_works[i].wait()
+            self._reduce_works[i].wait()
             record_event(buffers['group_name'] + "_rs.end")
 
             # Guard empty rank

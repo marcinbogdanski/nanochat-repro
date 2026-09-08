@@ -422,6 +422,60 @@ class GPTModel(nn.Module):
         return metrics
 
 
+    def _build_backward_collectives(self, params_matrix, muon_params_per_bucket):
+        """Manually build comms buckets in backward pass order."""
+
+        # Construct the list of non-small params in backward order.
+        # I omit small params because as they are.. well, small and i expect not much to gain from backward overlapping them. Did not test.
+        backward_params = [self.lm_head.weight]
+        for layer_idx in reversed(range(self.config.n_layer)):
+            block = self.transformer.h[layer_idx]
+            if isinstance(block.mlp, MLP):
+                backward_params.extend([block.mlp.c_proj.weight, block.mlp.c_fc.weight])
+            elif isinstance(block.mlp, MoE):
+                backward_params.extend([
+                    block.mlp.shared_expert.w_down.weight,
+                    block.mlp.experts.w_down,
+                    block.mlp.shared_expert.w_up.weight,
+                    block.mlp.experts.w_up,
+                    block.mlp.router.gate.weight,
+                ])
+            else:
+                raise ValueError(f"Unknown MLP type: {type(block.mlp)}")
+            backward_params.extend([
+                block.attn.c_proj.weight,
+                block.attn.c_v.weight,
+                block.attn.c_k.weight,
+                block.attn.c_q.weight,
+            ])
+            if block.attn.ve_gate is not None:
+                backward_params.append(block.attn.ve_gate.weight)
+            if str(layer_idx) in self.value_embeds:
+                backward_params.append(self.value_embeds[str(layer_idx)].weight)
+        backward_params.append(self.transformer.wte.weight)
+
+        params_matrix = set(params_matrix)
+        muon_params_in_bwd_order = [p for p in backward_params if p in params_matrix]
+        muon_buckets_by_last_param = {}
+        for shape in sorted({p.shape for p in muon_params_in_bwd_order}):
+            shape_params = [p for p in muon_params_in_bwd_order if p.shape == shape]
+            if muon_params_per_bucket != -1:
+                for i in range(0, len(shape_params), muon_params_per_bucket):
+                    bucket_params = shape_params[i:i + muon_params_per_bucket]
+                    muon_buckets_by_last_param[bucket_params[-1]] = bucket_params
+            else:
+                muon_buckets_by_last_param[shape_params[-1]] = shape_params
+
+        collectives = []
+        for param in backward_params:
+            if param not in params_matrix:
+                collectives.append(('adamw', [param]))
+            elif param in muon_buckets_by_last_param:
+                collectives.append(('muon', muon_buckets_by_last_param[param]))
+
+        return collectives
+
+
     def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, backward_overlap=False, muon_params_per_bucket=None, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
@@ -460,28 +514,12 @@ class GPTModel(nn.Module):
             # No weight decay for MoE to prevent drift towards sigmoid(0.0)=0.5
             adam_groups.append(dict(params=params_router, lr=router_lr * dmodel_lr_scale, betas=(0.8, 0.96), weight_decay=0.0, is_small=False))
         adamw_factory = DistAdamW if ddp else AdamW
-        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
+        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, backward_overlap=backward_overlap, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
-        if ddp and muon_params_per_bucket != -1:
-            # We rely on a fact that params_matrix is constructed roughly "in order". This is not perfect but close enough for us
-            backward_priority = {id(p): i for i, p in enumerate(reversed(params_matrix))}
-            # For each shape, create world_size buckets, noting their priority (last bucket may have less than world_size elements)
-            muon_buckets = []
-            for shape in sorted({p.shape for p in params_matrix}):
-                shape_params = [p for p in params_matrix if p.shape == shape]
-                for i in range(0, len(shape_params), muon_params_per_bucket):
-                    bucket_params = shape_params[i:i + muon_params_per_bucket]
-                    group_priority = max(backward_priority[id(p)] for p in bucket_params)
-                    muon_buckets.append((bucket_params, group_priority))
-            # Sort by priority, first element has highest backward priority, i.e. is processed first during backward pass
-            muon_buckets.sort(key=lambda x: x[1])
-            muon_groups = [{'params': group_params} for group_params, _ in muon_buckets]
-        else:
-            muon_groups = []
-            for shape in sorted({p.shape for p in params_matrix}):
-                group_params = [p for p in params_matrix if p.shape == shape]
-                muon_groups.append({'params': group_params})
+        # backward_collectives = [('adamw', [param]), ('muon', [param, param], ...]
+        backward_collectives = self._build_backward_collectives(params_matrix, muon_params_per_bucket)
+        muon_groups = [{'params': group_params} for optim_type, group_params in backward_collectives if optim_type == 'muon']
 
         # Muon Optimizer
         muon_factory = DistMuon if ddp else Muon
@@ -500,7 +538,7 @@ class GPTModel(nn.Module):
         comm_launchers = []
         if ddp:
             comm_launchers = [
-                partial(muon_optimizer.launch_reduce_scatter, group_idx)
+                partial(muon_optimizer.launch_reduce, group_idx)
                 for group_idx in range(len(muon_groups))
             ]
 
