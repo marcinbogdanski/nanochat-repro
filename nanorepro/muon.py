@@ -216,7 +216,7 @@ class DistMuon(torch.optim.Optimizer):
         # Initialize Static Buffers
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
-        for group in self.param_groups:
+        for group_idx, group in enumerate(self.param_groups):
             # Size and Pointer Accounting
             anchor = group['params'][0]  # shape, dtype, device
             num_params = len(group['params'])  # param objects in this group
@@ -235,6 +235,10 @@ class DistMuon(torch.optim.Optimizer):
             grads_shard = grads_buffer[param_start:param_start+num_params_per_rank]  # just a view
             params_shard = params_buffer[param_start:param_start+num_params_per_rank]  # just a view
             num_params_this_rank = min(num_params_per_rank, max(0, num_params-param_start))  # last rank may be padded
+            # Group Name for Events
+            shape_str = "x".join(map(str, group["params"][0].shape))
+            group_name = f"muon_g{group_idx}_{shape_str}"
+
             self.group_buffers.append({
                 'params': params_buffer,
                 'grads': grads_buffer,
@@ -242,6 +246,7 @@ class DistMuon(torch.optim.Optimizer):
                 'params_shard': params_shard,
                 'param_start': param_start,
                 'num_local': num_params_this_rank,
+                'group_name': group_name,
             })
 
             # Create Momentum Buffers
@@ -251,7 +256,6 @@ class DistMuon(torch.optim.Optimizer):
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
 
-        self._event_names = [None] * len(self.param_groups)
         self._reduce_scatter_works = [None] * len(self.param_groups)
 
     def get_metrics(self):
@@ -263,12 +267,10 @@ class DistMuon(torch.optim.Optimizer):
         # Note calling model.zero_grad(set_to_none=True) will still set .grad = None and break things, hence assert in step()
         for buffer in self.group_buffers:
             buffer['grads'].zero_()
-        self._event_names = [None] * len(self.param_groups)
         self._reduce_scatter_works = [None] * len(self.param_groups)
 
     @torch.no_grad()
     def launch_reduce_scatter(self, group_idx):
-        assert self._event_names[group_idx] is None
         assert self._reduce_scatter_works[group_idx] is None
 
         buffers = self.group_buffers[group_idx]
@@ -276,11 +278,8 @@ class DistMuon(torch.optim.Optimizer):
         for param_idx, param in enumerate(group["params"]):
             # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
             assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][param_idx].data_ptr()
-        shape_str = "x".join(map(str, group["params"][0].shape))
-        event_name = f"muon_g{group_idx}_{shape_str}"
-        record_event(event_name + "_rs.begin")
 
-        self._event_names[group_idx] = event_name
+        record_event(buffers['group_name'] + "_rs.begin")
         self._reduce_scatter_works[group_idx] = torch.distributed.reduce_scatter_tensor(
             output=buffers['grads_shard'],
             input=buffers['grads'],
@@ -307,7 +306,7 @@ class DistMuon(torch.optim.Optimizer):
 
             # Wait for reduce-scatter
             self._reduce_scatter_works[i].wait()
-            record_event(self._event_names[i] + "_rs.end")
+            record_event(buffers['group_name'] + "_rs.end")
 
             # Guard empty rank
             num_params_this_rank = buffers['num_local']
@@ -324,7 +323,7 @@ class DistMuon(torch.optim.Optimizer):
                 beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
 
                 # Fused Kernel
-                record_event(self._event_names[i] + "_fused.begin")
+                record_event(buffers['group_name'] + "_fused.begin")
                 grad_sum_squares, update_sum_squares, params_sum_squares = fused_muon_step(
                     params=buffers['params_shard'][:num_params_this_rank],
                     grad=buffers['grads_shard'][:num_params_this_rank],
@@ -338,7 +337,7 @@ class DistMuon(torch.optim.Optimizer):
                     compute_dtype=self.compute_dtype,
                     metrics=self.enable_metrics,
                 )
-                record_event(self._event_names[i] + "_fused.end")
+                record_event(buffers['group_name'] + "_fused.end")
 
                 # Collect Metrics
                 if self.enable_metrics:
@@ -369,7 +368,7 @@ class DistMuon(torch.optim.Optimizer):
 
 
             # Do all-gather directly to static buffer
-            record_event(self._event_names[i] + "_ag.begin")
+            record_event(buffers['group_name'] + "_ag.begin")
             work = torch.distributed.all_gather_into_tensor(
                 output_tensor=buffers["params"],
                 input_tensor=buffers['params_shard'],
@@ -378,6 +377,6 @@ class DistMuon(torch.optim.Optimizer):
             gather_works.append(work)
 
         # Loop 3: Wait for all-gather
-        for event_name, work in zip(self._event_names, gather_works):
+        for i, work in enumerate(gather_works):
             work.wait()
-            record_event(event_name + "_ag.end")
+            record_event(self.group_buffers[i]['group_name'] + "_ag.end")

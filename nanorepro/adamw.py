@@ -152,79 +152,96 @@ class DistAdamW(torch.optim.Optimizer):
         super().__init__(params, defaults)
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
+        self.param_buffers = {}  # (group_idx, param_idx) -> grad_slice for large params, etc
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+
+        # Init Momentum Buffers
+        for group_idx, group in enumerate(self.param_groups):
+            for param_idx, param in enumerate(group['params']):
+                if group['is_small']:
+                    slice_width = param.size(0)  # don't slice small params
+                    grad_slice = None            # not needed for small param all-reduce
+                    param_slice = param
+                else:
+                    assert param.size(0) % world_size == 0
+                    slice_width = param.size(0) // world_size
+                    grad_slice = torch.empty_like(param[:slice_width])     # .grad is None here, but param has same shape
+                    slice_start = rank * slice_width
+                    slice_end = slice_start + slice_width
+                    param_slice = param[slice_start:slice_end]
+                shape_str = "x".join(map(str, param.shape))
+                param_name = f"adamw_g{group_idx}_p{param_idx}_{shape_str}"   # g=group, p=param
+                self.param_buffers[(group_idx, param_idx)] = {
+                    'grad_slice': grad_slice,
+                    'param_name': param_name,
+                    'param_slice': param_slice,
+                }
+                self.state[param] = {
+                    'step': 0,
+                    'exp_avg': torch.zeros_like(param[:slice_width]),
+                    'exp_avg_sq': torch.zeros_like(param[:slice_width]),
+                }
+
+        self._reduce_works = {}
+        for group_idx, group in enumerate(self.param_groups):
+            for param_idx, param in enumerate(group['params']):
+                self._reduce_works[group_idx, param_idx] = None
+
 
     def get_metrics(self):
         return self.debug_stats
 
     @torch.no_grad()
+    def zero_grad(self, set_to_none=True):
+        super().zero_grad(set_to_none=set_to_none)
+        for key in self._reduce_works:
+            self._reduce_works[key] = None
+
+    @torch.no_grad()
     def step(self):
+        assert all(p.grad is not None for group in self.param_groups for p in group["params"])
         rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
         self.debug_stats = {}  # clear every step
 
-        temp_buffers = {}
-
+        # Loop 1: Launch reduce-scatter
         for i, group in enumerate(self.param_groups):
             for j, param in enumerate(group['params']):
-                if param.grad is None:
-                    continue
-                # Lazy Init
-                if group['is_small']:
-                    # Don't slice
-                    slice_width = param.size(0)
-                    slice_start = 0
-                    slice_end = param.size(0)
-                else:
-                    assert param.size(0) % world_size == 0
-                    slice_width = param.size(0) // world_size
-                    slice_start = rank * slice_width
-                    slice_end = slice_start + slice_width
-
-                if param not in self.state:
-                    self.state[param] = {
-                        'step': 0,
-                        'exp_avg': torch.zeros_like(param[:slice_width]),
-                        'exp_avg_sq': torch.zeros_like(param[:slice_width]),
-                    }
-                self.state[param]['step'] += 1
+                assert self._reduce_works[(i, j)] is None  # assert reduce-scatter has not been launched
 
                 # Sync point 1
-                grad_slice = torch.empty_like(param.grad[:slice_width])
-                shape_str = "x".join(map(str, param.shape))
                 event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
-                event_name = f"adamw_g{i}_p{j}_{shape_str}"   # g=group, p=param
-                record_event(event_name + event_suffix + ".begin")  # spans launch-to-completion, includes waiting, not just NCCL comms
+                event_name = self.param_buffers[(i,j)]['param_name'] + event_suffix + ".begin"
+                record_event(event_name)  # spans launch-to-completion, includes waiting, not just NCCL comms
                 if group['is_small']:
-                    # Don't slice
-                    future = torch.distributed.all_reduce(
+                    self._reduce_works[(i, j)] = torch.distributed.all_reduce(                      # don't slice small params
                         param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-                    ).get_future()
-                    grad_slice = param.grad
-                    param_slice = param
+                    )
                 else:
-                    future = torch.distributed.reduce_scatter_tensor(
+                    grad_slice = self.param_buffers[(i, j)]['grad_slice']
+                    self._reduce_works[(i, j)] = torch.distributed.reduce_scatter_tensor(
                         grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-                    ).get_future()
-                    param_slice = param[slice_start:slice_end]
+                    )
 
-                temp_buffers[(i,j)] = {
-                    'future': future,
-                    'grad_slice': grad_slice,
-                    'param_slice': param_slice,
-                    'event_name': event_name,
-                }
-
+        # Loop 2: Step and launch all-gather
+        gather_works = {}
         for i, group in enumerate(self.param_groups):
             for j, param in enumerate(group['params']):
-                temp_buffers[(i,j)].pop('future').wait()
-                grad_slice = temp_buffers[(i,j)].pop('grad_slice')
-                param_slice = temp_buffers[(i,j)].pop('param_slice')
-                event_name = temp_buffers[(i,j)]['event_name']
+                grad_slice = self.param_buffers[(i, j)]['grad_slice']
+                grad_slice = grad_slice if grad_slice is not None else param.grad
+                param_slice = self.param_buffers[(i,j)]['param_slice']
+
+                # Wait for reduce scatter
+                self._reduce_works[(i, j)].wait()
+
+                # Record event for tracing
+                event_name = self.param_buffers[(i,j)]['param_name']
                 event_suffix = "_rs" if not group['is_small'] else "_ar"
                 record_event(event_name + event_suffix + ".end")
 
                 exp_avg = self.state[param]['exp_avg']
                 exp_avg_sq = self.state[param]['exp_avg_sq']
+                self.state[param]['step'] += 1
 
                 step = torch.tensor(self.state[param]['step'], device='cpu', dtype=torch.float32)
                 lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
@@ -271,14 +288,15 @@ class DistAdamW(torch.optim.Optimizer):
                 # Sync point 2
                 if not group['is_small']:
                     record_event(event_name + "_ag.begin")
-                    future2 = torch.distributed.all_gather_into_tensor(
+                    work = torch.distributed.all_gather_into_tensor(
                         param, param_slice, async_op=True
                     ).get_future()
-                    temp_buffers[(i,j)]['future2'] = future2
-        
+                    gather_works[(i, j)] = work
+
+        # Loop 3: Wait for all-gather
         for i, group in enumerate(self.param_groups):
             for j, param in enumerate(group['params']):
                 if not group['is_small']:
-                    temp_buffers[(i,j)].pop('future2').wait()
-                    event_name = temp_buffers[(i,j)].pop('event_name')
+                    gather_works[(i, j)].wait()
+                    event_name = self.param_buffers[(i,j)]['param_name']
                     record_event(event_name + "_ag.end")
