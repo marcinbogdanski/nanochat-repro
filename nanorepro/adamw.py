@@ -232,8 +232,7 @@ class DistAdamW(torch.optim.Optimizer):
         for i, group in enumerate(self.param_groups):
             for j, param in enumerate(group['params']):
                 if self.backward_overlap and not group['is_small']:
-                    assert self._reduce_works[(i, j)] is None
-                    self.launch_reduce(i, j)
+                    assert self._reduce_works[(i, j)] is not None
                 else:
                     assert self._reduce_works[(i, j)] is None  # assert reduce-scatter has not been launched
                     self.launch_reduce(i, j)

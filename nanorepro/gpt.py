@@ -519,9 +519,12 @@ class GPTModel(nn.Module):
         # Muon for large matrix params
         # backward_collectives = [('adamw', [param]), ('muon', [param, param], ...]
         backward_collectives = self._build_backward_collectives(params_matrix, muon_params_per_bucket)
-        muon_groups = [{'params': group_params} for optim_type, group_params in backward_collectives if optim_type == 'muon']
+        scheduled_params = [param for _, bucket_params in backward_collectives for param in bucket_params]
+        expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router
+        assert len(scheduled_params) == len(expected_params) and set(scheduled_params) == set(expected_params)
 
         # Muon Optimizer
+        muon_groups = [{'params': group_params} for optim_type, group_params in backward_collectives if optim_type == 'muon']
         muon_factory = DistMuon if ddp else Muon
         muon_optimizer = muon_factory(
             muon_groups,
@@ -535,15 +538,25 @@ class GPTModel(nn.Module):
             enable_metrics=enable_metrics,
         )
 
+        adamw_param_to_idx = {param: (i, j) for i, group in enumerate(adamw_optimizer.param_groups) for j, param in enumerate(group['params'])}
+        muon_param_to_idx = {group['params'][0]: i for i, group in enumerate(muon_optimizer.param_groups)}
         comm_launchers = []
         if ddp:
-            comm_launchers = [
-                partial(muon_optimizer.launch_reduce, group_idx)
-                for group_idx in range(len(muon_groups))
-            ]
+            for param_bucket in backward_collectives:
+                optim_type, bucket_params = param_bucket
+                if optim_type == 'adamw':
+                    param = bucket_params[0]  # single param per adamw bucket
+                    group_idx, param_idx = adamw_param_to_idx[param]
+                    launcher = partial(adamw_optimizer.launch_reduce, group_idx, param_idx)
+                    comm_launchers.append(launcher)
+                elif optim_type == 'muon':
+                    group_idx = muon_param_to_idx[bucket_params[0]]
+                    launcher = partial(muon_optimizer.launch_reduce, group_idx)
+                    comm_launchers.append(launcher)
 
+        param_buckets = [bucket_params for _, bucket_params in backward_collectives]
         backward_scheduler = BackwardScheduler(
-            muon_groups=muon_groups,
+            param_buckets=param_buckets,
             comm_launchers=comm_launchers,
             backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
         )
