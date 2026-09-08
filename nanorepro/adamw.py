@@ -88,12 +88,6 @@ class AdamW(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
-    def backward_overlap_begin(self):
-        pass  # API compatibility with Dist version
-
-    def backward_overlap_end(self):
-        pass  # API compatibility with Dist version
-
     def get_metrics(self):
         return self.debug_stats
     
@@ -101,31 +95,31 @@ class AdamW(torch.optim.Optimizer):
     def step(self):
         self.debug_stats = {}  # clear every step
         for group in self.param_groups:
-            for params in group['params']:
-                if params.grad is None:
+            for param in group['params']:
+                if param.grad is None:
                     continue
                 # Lazy Init
-                if params not in self.state:
-                    self.state[params] = {
+                if param not in self.state:
+                    self.state[param] = {
                         'step': 0,
-                        'exp_avg': torch.zeros_like(params),
-                        'exp_avg_sq': torch.zeros_like(params),
+                        'exp_avg': torch.zeros_like(param),
+                        'exp_avg_sq': torch.zeros_like(param),
                     }
-                self.state[params]['step'] += 1
+                self.state[param]['step'] += 1
 
-                grad = params.grad
-                exp_avg = self.state[params]['exp_avg']
-                exp_avg_sq = self.state[params]['exp_avg_sq']
+                grad = param.grad
+                exp_avg = self.state[param]['exp_avg']
+                exp_avg_sq = self.state[param]['exp_avg_sq']
 
-                step = torch.tensor(self.state[params]['step'], device='cpu', dtype=torch.float32)
+                step = torch.tensor(self.state[param]['step'], device='cpu', dtype=torch.float32)
                 lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
                 beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
                 beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
-                grad_sum_squares, update_sum_squares, params_sum_squares = fused_adamw_step(
-                    params=params,
+                grad_sum_squares, update_sum_squares, param_sum_squares = fused_adamw_step(
+                    params=param,
                     grad=grad,
                     exp_avg=exp_avg,
                     exp_avg_sq=exp_avg_sq,
@@ -140,11 +134,11 @@ class AdamW(torch.optim.Optimizer):
                 if self.enable_metrics:
                     grad_sum_squares = grad_sum_squares.item() if grad_sum_squares is not None else None
                     update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
-                    params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
-                    self.debug_stats[params] = {
+                    param_sum_squares = param_sum_squares.item() if param_sum_squares is not None else None
+                    self.debug_stats[param] = {
                         'grad_sq_sum': grad_sum_squares,
                         'update_sq_sum': update_sum_squares,
-                        'params_sq_sum': params_sum_squares,
+                        'params_sq_sum': param_sum_squares,
                         'params_num_el': grad.numel(),
                     }
 
@@ -159,12 +153,6 @@ class DistAdamW(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
-    def backward_overlap_begin(self):
-        pass  # API compatibility with DistMuon
-
-    def backward_overlap_end(self):
-        pass  # API compatibility with DistMuon
-
     def get_metrics(self):
         return self.debug_stats
 
@@ -177,68 +165,68 @@ class DistAdamW(torch.optim.Optimizer):
         temp_buffers = {}
 
         for i, group in enumerate(self.param_groups):
-            for j, params in enumerate(group['params']):
-                if params.grad is None:
+            for j, param in enumerate(group['params']):
+                if param.grad is None:
                     continue
                 # Lazy Init
                 if group['is_small']:
                     # Don't slice
-                    slice_width = params.size(0)
+                    slice_width = param.size(0)
                     slice_start = 0
-                    slice_end = params.size(0)
+                    slice_end = param.size(0)
                 else:
-                    assert params.size(0) % world_size == 0
-                    slice_width = params.size(0) // world_size
+                    assert param.size(0) % world_size == 0
+                    slice_width = param.size(0) // world_size
                     slice_start = rank * slice_width
                     slice_end = slice_start + slice_width
 
-                if params not in self.state:
-                    self.state[params] = {
+                if param not in self.state:
+                    self.state[param] = {
                         'step': 0,
-                        'exp_avg': torch.zeros_like(params[:slice_width]),
-                        'exp_avg_sq': torch.zeros_like(params[:slice_width]),
+                        'exp_avg': torch.zeros_like(param[:slice_width]),
+                        'exp_avg_sq': torch.zeros_like(param[:slice_width]),
                     }
-                self.state[params]['step'] += 1
+                self.state[param]['step'] += 1
 
                 # Sync point 1
-                grad_slice = torch.empty_like(params.grad[:slice_width])
-                shape_str = "x".join(map(str, params.shape))
+                grad_slice = torch.empty_like(param.grad[:slice_width])
+                shape_str = "x".join(map(str, param.shape))
                 event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
                 event_name = f"adamw_g{i}_p{j}_{shape_str}"   # g=group, p=param
                 record_event(event_name + event_suffix + ".begin")  # spans launch-to-completion, includes waiting, not just NCCL comms
                 if group['is_small']:
                     # Don't slice
                     future = torch.distributed.all_reduce(
-                        params.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                        param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
                     ).get_future()
-                    grad_slice = params.grad
-                    params_slice = params
+                    grad_slice = param.grad
+                    param_slice = param
                 else:
                     future = torch.distributed.reduce_scatter_tensor(
-                        grad_slice, params.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                        grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
                     ).get_future()
-                    params_slice = params[slice_start:slice_end]
+                    param_slice = param[slice_start:slice_end]
 
                 temp_buffers[(i,j)] = {
                     'future': future,
                     'grad_slice': grad_slice,
-                    'params_slice': params_slice,
+                    'param_slice': param_slice,
                     'event_name': event_name,
                 }
 
         for i, group in enumerate(self.param_groups):
-            for j, params in enumerate(group['params']):
+            for j, param in enumerate(group['params']):
                 temp_buffers[(i,j)].pop('future').wait()
                 grad_slice = temp_buffers[(i,j)].pop('grad_slice')
-                params_slice = temp_buffers[(i,j)].pop('params_slice')
+                param_slice = temp_buffers[(i,j)].pop('param_slice')
                 event_name = temp_buffers[(i,j)]['event_name']
                 event_suffix = "_rs" if not group['is_small'] else "_ar"
                 record_event(event_name + event_suffix + ".end")
 
-                exp_avg = self.state[params]['exp_avg']
-                exp_avg_sq = self.state[params]['exp_avg_sq']
+                exp_avg = self.state[param]['exp_avg']
+                exp_avg_sq = self.state[param]['exp_avg_sq']
 
-                step = torch.tensor(self.state[params]['step'], device='cpu', dtype=torch.float32)
+                step = torch.tensor(self.state[param]['step'], device='cpu', dtype=torch.float32)
                 lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
                 beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
                 beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
@@ -247,8 +235,8 @@ class DistAdamW(torch.optim.Optimizer):
 
                 if not group['is_small']:
                     record_event(event_name + "_fused.begin")
-                grad_sum_squares, update_sum_squares, params_sum_squares = fused_adamw_step(
-                    params=params_slice,
+                grad_sum_squares, update_sum_squares, param_sum_squares = fused_adamw_step(
+                    params=param_slice,
                     grad=grad_slice,
                     exp_avg=exp_avg,
                     exp_avg_sq=exp_avg_sq,
@@ -263,19 +251,19 @@ class DistAdamW(torch.optim.Optimizer):
                 if self.enable_metrics:
                     grad_sum_squares = grad_sum_squares.item() if grad_sum_squares is not None else None
                     update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
-                    params_sum_squares = params_sum_squares.item() if params_sum_squares is not None else None
-                    params_num_el = grad_slice.numel()
+                    param_sum_squares = param_sum_squares.item() if param_sum_squares is not None else None
+                    param_num_el = grad_slice.numel()
                     if rank != 0 and group['is_small']:
-                        # For small params, rank 0 has the full param and grad, zero other ranks to avoid duplication
+                        # For small param, rank 0 has the full param and grad, zero other ranks to avoid duplication
                         grad_sum_squares = 0.0
                         update_sum_squares = 0.0
-                        params_sum_squares = 0.0
-                        params_num_el = 0
-                    self.debug_stats[params] = {
+                        param_sum_squares = 0.0
+                        param_num_el = 0
+                    self.debug_stats[param] = {
                         'grad_sq_sum': grad_sum_squares,
                         'update_sq_sum': update_sum_squares,
-                        'params_sq_sum': params_sum_squares,
-                        'params_num_el': params_num_el,
+                        'params_sq_sum': param_sum_squares,
+                        'params_num_el': param_num_el,
                     }
                 if not group['is_small']:
                     record_event(event_name + "_fused.end")
@@ -284,12 +272,12 @@ class DistAdamW(torch.optim.Optimizer):
                 if not group['is_small']:
                     record_event(event_name + "_ag.begin")
                     future2 = torch.distributed.all_gather_into_tensor(
-                        params, params_slice, async_op=True
+                        param, param_slice, async_op=True
                     ).get_future()
                     temp_buffers[(i,j)]['future2'] = future2
         
         for i, group in enumerate(self.param_groups):
-            for j, params in enumerate(group['params']):
+            for j, param in enumerate(group['params']):
                 if not group['is_small']:
                     temp_buffers[(i,j)].pop('future2').wait()
                     event_name = temp_buffers[(i,j)].pop('event_name')

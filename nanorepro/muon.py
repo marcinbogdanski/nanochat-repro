@@ -136,12 +136,6 @@ class Muon(torch.optim.Optimizer):
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
-    def backward_overlap_begin(self):
-        pass  # API compatibility with Dist version
-
-    def backward_overlap_end(self):
-        pass  # API compatibility with Dist version
-
     def get_metrics(self):
         return self.debug_stats
 
