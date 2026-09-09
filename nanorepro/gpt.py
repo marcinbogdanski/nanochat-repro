@@ -524,8 +524,16 @@ class GPTModel(nn.Module):
         expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router
         assert len(scheduled_params) == len(expected_params) and set(scheduled_params) == set(expected_params)
 
+        # Muon Groups
+        if muon_params_per_bucket == -1:
+            muon_groups = []
+            for shape in sorted({p.shape for p in params_matrix}):
+                group_params = [p for p in params_matrix if p.shape == shape]
+                muon_groups.append({'params': group_params})
+        else:
+            muon_groups = [{'params': group_params} for optim_type, group_params in backward_collectives if optim_type == 'muon']  # new way
+
         # Muon Optimizer
-        muon_groups = [{'params': group_params} for optim_type, group_params in backward_collectives if optim_type == 'muon']
         muon_factory = DistMuon if ddp else Muon
         muon_optimizer = muon_factory(
             muon_groups,
@@ -540,7 +548,7 @@ class GPTModel(nn.Module):
         )
 
         adamw_param_to_idx = {param: (i, j) for i, group in enumerate(adamw_optimizer.param_groups) for j, param in enumerate(group['params'])}
-        muon_param_to_idx = {group['params'][0]: i for i, group in enumerate(muon_optimizer.param_groups)}
+        muon_param_to_idx = {param: group_idx for group_idx, group in enumerate(muon_optimizer.param_groups) for param in group['params']}
         comm_launchers = []
         if ddp:
             for param_bucket in backward_collectives:
