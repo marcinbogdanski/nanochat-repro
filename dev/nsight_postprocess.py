@@ -7,9 +7,13 @@ The steps are as follows:
 - track CPU-side CUDA event API call and correlate with GPU-side events
 - generate new "virtual" GPU-side phase spans, based on GPU-side events
 - write the augmented trace to new file: `example_nsight_gpu_spans.nsys-rep`
+- if `_ref` file exists (e.g. `nsight_trace_ref.nsys-rep`), reference phase spans will be constructed and merged to final file as well
 
 See complete example:
 uv run dev/example_nsight.sh
+
+Run this script like:
+uv run python3 dev/nsight_postprocess.py nsight_trace.nsys-rep nsight_trace_gpu_spans.nsys-rep
 """
 print("--------------------------------------------------------------------------------")
 print("                     Post-processing Nsight Systems Trace")
@@ -51,47 +55,61 @@ from nsys_writer import Session, TimeBase  # pyright: ignore[reportMissingImport
 
 
 source_filename = sys.argv[1]  # e.g. example_nsight.nsys-rep
+source_ref_filename = source_filename.replace(".nsys-rep", "_ref.nsys-rep")
 output_filename = sys.argv[2]  # e.g. example_nsight_gpu_spans.nsys-rep
 assert source_filename.endswith(".nsys-rep"), "Source file must be an Nsight Systems report (.nsys-rep)"
 assert output_filename.endswith(".nsys-rep"), "Output file must be an Nsight Systems report (.nsys-rep)"
 
-# Convert the Nsight Systems trace to a SQLite database for post-processing
-with tempfile.TemporaryDirectory() as temp_dir:
-    temp_filepath = Path(temp_dir) / "example_nsight.sqlite"
-    print(f"Exporting SQLite database to: {temp_filepath}")
-    subprocess.run(["nsys", "export", "--type=sqlite", "--force-overwrite=true", "--quiet=true", f"--output={temp_filepath}", source_filename], check=True)
-
-    # Agent supplied query to extract custom NVTX events and their corresponding CUDA event timestamps
-    query = """
-        WITH markers AS (
-            SELECT
-                n.start,
-                n.end,
-                n.globalTid,
-                ((n.globalTid >> 24) << 24) AS globalPid,
-                coalesce(n.text, marker_string.value) AS label
-            FROM NVTX_EVENTS AS n
-            LEFT JOIN StringIds AS marker_string ON marker_string.id = n.textId
-            WHERE coalesce(n.text, marker_string.value) LIKE 'custom_event rank=%'
-        )
+# Agent supplied query to extract custom NVTX events and their corresponding CUDA event timestamps
+query = """
+    WITH markers AS (
         SELECT
-            markers.label,
-            cuda_event.timestamp
-        FROM markers
-        JOIN CUPTI_ACTIVITY_KIND_RUNTIME AS runtime
-            ON runtime.globalTid = markers.globalTid
-            AND runtime.start >= markers.start
-            AND runtime.end <= markers.end
-        JOIN StringIds AS runtime_string
-            ON runtime_string.id = runtime.nameId
-            AND runtime_string.value LIKE 'cudaEventRecord%'
-        JOIN CUPTI_ACTIVITY_KIND_CUDA_EVENT AS cuda_event
-            ON cuda_event.correlationId = runtime.correlationId
-            AND cuda_event.globalPid = markers.globalPid
-        ORDER BY cuda_event.timestamp
-    """
-    with sqlite3.connect(temp_filepath) as conn:
-        rows = conn.execute(query).fetchall()
+            n.start,
+            n.end,
+            n.globalTid,
+            ((n.globalTid >> 24) << 24) AS globalPid,
+            coalesce(n.text, marker_string.value) AS label
+        FROM NVTX_EVENTS AS n
+        LEFT JOIN StringIds AS marker_string ON marker_string.id = n.textId
+        WHERE coalesce(n.text, marker_string.value) LIKE 'custom_event rank=%'
+    )
+    SELECT
+        markers.label,
+        cuda_event.timestamp
+    FROM markers
+    JOIN CUPTI_ACTIVITY_KIND_RUNTIME AS runtime
+        ON runtime.globalTid = markers.globalTid
+        AND runtime.start >= markers.start
+        AND runtime.end <= markers.end
+    JOIN StringIds AS runtime_string
+        ON runtime_string.id = runtime.nameId
+        AND runtime_string.value LIKE 'cudaEventRecord%'
+    JOIN CUPTI_ACTIVITY_KIND_CUDA_EVENT AS cuda_event
+        ON cuda_event.correlationId = runtime.correlationId
+        AND cuda_event.globalPid = markers.globalPid
+    ORDER BY cuda_event.timestamp
+"""
+
+
+def extract_rows(filename):
+    """Extract rows from the given Nsight Systems report"""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Convert the Nsight Systems trace to a temp SQLite database
+        temp_filepath = Path(temp_dir) / "example_nsight.sqlite"
+        print(f"Exporting SQLite database to: {temp_filepath}")
+        args = [
+            "nsys", "export", "--type=sqlite", "--force-overwrite=true", "--quiet=true",
+            f"--output={temp_filepath}", filename
+        ]
+        subprocess.run(args, check=True)
+        with sqlite3.connect(temp_filepath) as conn:
+            rows = conn.execute(query).fetchall()
+            return rows
+
+
+
+rows = extract_rows(source_filename)
+ref_rows = extract_rows(source_ref_filename) if Path(source_ref_filename).exists() else []
 
 print("Rows extracted from SQLite database:")
 for row in rows:
@@ -113,6 +131,14 @@ for row in rows:
 # ('custom_event rank=1 optimizer.end', 102420286)
 # ('custom_event rank=0 optimizer.end', 102815255)
 # ...
+
+# Rewrite timestamps in the reference rows to align with source
+if ref_rows:
+    source_anchor_label, source_anchor_ts = next(row for row in rows if row[0].startswith("custom_event rank=0 "))
+    ref_anchor_label, ref_anchor_ts = next(row for row in ref_rows if row[0].startswith("custom_event rank=0 "))
+    assert source_anchor_label == ref_anchor_label
+    ref_offset = source_anchor_ts - ref_anchor_ts
+    ref_rows = [(label, timestamp + ref_offset) for label, timestamp in ref_rows]
 
 # Color Dispenser
 def get_color(name):
@@ -140,35 +166,50 @@ def get_color(name):
         return "#E35E5E"         # default
     return "#747474"  # default color if no match is found
 
-# Extract start and end events from the rows
-timestamps = defaultdict(list)  # (rank, name) -> [[start_ts, end_ts], [start_ts, end_ts], ...]
-for label, timestamp in rows:
-    _, rank_str, name_and_phase = label.split()
-    rank = int(rank_str.split('=')[1])
-    name, phase = name_and_phase.split('.')
-    if phase == "begin":
-        assert len(timestamps[(rank, name)]) == 0 or timestamps[(rank, name)][-1][1] is not None, "Previous event has not ended"
-        timestamps[(rank, name)].append([timestamp, None])
-    elif phase == "end":
-        assert len(timestamps[(rank, name)]) > 0 and timestamps[(rank, name)][-1][1] is None, "No matching start event for this end event"
-        timestamps[(rank, name)][-1][1] = timestamp
-    else:
-        raise ValueError(f"Unexpected phase: {phase}")
-max_rank = max(rank for rank, _ in timestamps.keys())
-assert all(start_ts is not None and end_ts is not None for intervals in timestamps.values() for start_ts, end_ts in intervals)
+def pair_events_into_spans(rows):
+    # Extract start and end events from the rows
+    timestamps = defaultdict(list)  # (rank, name) -> [[start_ts, end_ts], [start_ts, end_ts], ...]
+    for label, timestamp in rows:
+        _, rank_str, name_and_phase = label.split()
+        rank = int(rank_str.split('=')[1])
+        name, phase = name_and_phase.split('.')
+        if phase == "begin":
+            assert len(timestamps[(rank, name)]) == 0 or timestamps[(rank, name)][-1][1] is not None, "Previous event has not ended"
+            timestamps[(rank, name)].append([timestamp, None])
+        elif phase == "end":
+            assert len(timestamps[(rank, name)]) > 0 and timestamps[(rank, name)][-1][1] is None, "No matching start event for this end event"
+            timestamps[(rank, name)][-1][1] = timestamp
+        else:
+            raise ValueError(f"Unexpected phase: {phase}")
+    assert all(start_ts is not None and end_ts is not None for intervals in timestamps.values() for start_ts, end_ts in intervals)
+    return timestamps
+
+def write_scope(scope_name, session, domain, rank, timestamps):
+    scope = domain.get_scope(scope_name)
+    with session.create_stream("phases", domain=domain, scope=scope) as stream:
+        for (r, name), intervals in timestamps.items():
+            if r != rank:
+                continue
+            for start_ts, end_ts in intervals:
+                stream.write_startend(start_ts, end_ts, message=name, color=get_color(name))
+
+
+timestamps = pair_events_into_spans(rows)
+ref_timestamps = pair_events_into_spans(ref_rows)
 
 # Write Output Session
+max_rank = max(rank for rank, _ in timestamps.keys())
 with Session(
     name=output_filename.replace(".nsys-rep", ""),
     report_merge=source_filename,
     time_base=TimeBase.RELATIVE,
 ) as session:
     domain = session.get_domain("Derived GPU spans")
+    row_idx = 0  # Nsight orders alphabetically, so we need to force order with prefix
     for rank in range(max_rank + 1):
-        scope = domain.get_scope(f"rank {rank}")
-        with session.create_stream("phases", domain=domain, scope=scope) as stream:
-            for (r, name), intervals in timestamps.items():
-                if r != rank:
-                    continue
-                for start_ts, end_ts in intervals:
-                    stream.write_startend(start_ts, end_ts, message=name, color=get_color(name))
+        if ref_rows:
+            write_scope(f"id{row_idx:02d} rank{rank} (ref)", session, domain, rank, ref_timestamps)
+            row_idx += 1
+        write_scope(f"id{row_idx:02d} rank{rank}", session, domain, rank, timestamps)
+        row_idx += 1
+        
