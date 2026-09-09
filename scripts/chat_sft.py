@@ -438,7 +438,8 @@ def main():
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for ga_idx in range(grad_accum):
-            _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True)
+            split_compiled_regions = args.backward_overlap and ga_idx == grad_accum - 1
+            _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             fwd_metrics.append(metrics)
             rank_tloss = loss.detach()
             loss = loss / grad_accum

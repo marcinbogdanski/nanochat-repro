@@ -233,8 +233,9 @@ class GPTModel(nn.Module):
         self.window_sizes = self._calc_window_sizes(self.config)
 
         # Compiled regions, if used
-        self._compiled_layer_regions = None
+        self._compiled_layer_regions = None  # split regions, use on last grad_accum only (no point splitting if no comms to overlap)
         self._compiled_output_region = None
+        self._compiled_whole_transformer_region = None
 
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
@@ -690,15 +691,33 @@ class GPTModel(nn.Module):
         if layers_per_region == -1:
             layers_per_region = len(self.transformer.h)
 
+        num_region_variants = 0
+
+        # Split transformer into compiled regions
         self._compiled_layer_regions = []
         for start_layer in range(0, len(self.transformer.h), layers_per_region):
             end_layer = min(start_layer + layers_per_region, len(self.transformer.h))
             region = partial(self._fwd_layer_regions, start_layer, end_layer)
             compiled_region = torch.compile(region, dynamic=False)
             self._compiled_layer_regions.append(compiled_region)
-        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False)
+            num_region_variants += 1
 
-    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True, use_compiled_if_available=False):
+        # Compile the whole transformer as one region
+        if len(self._compiled_layer_regions) == 1:
+            self._compiled_whole_transformer_region = self._compiled_layer_regions[0]
+        else:
+            transformer_region = partial(self._fwd_layer_regions, 0, len(self.transformer.h))
+            self._compiled_whole_transformer_region = torch.compile(transformer_region, dynamic=False)
+            num_region_variants += 1
+
+        # Compile the output region
+        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False)
+        num_region_variants += 1
+
+        # Raise dynamo limit, required on PyTorch 2.9
+        torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, num_region_variants)
+
+    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True, use_compiled_if_available=False, split_compiled_regions=False):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
         assert idx.device == self.cos.device, "Input device does not match model device."
@@ -718,7 +737,8 @@ class GPTModel(nn.Module):
 
         # Transformer
         if use_compiled_regions:
-            for region in self._compiled_layer_regions:
+            compiled_regions = self._compiled_layer_regions if split_compiled_regions else [self._compiled_whole_transformer_region]
+            for region in compiled_regions:
                 x, x0, x_backout, sq_sum_list, num_el_list = region(idx, x, x0, x_backout, cos, sin, kv_cache)
                 if self.enable_metrics:
                     metrics_resid_post_sq_sum.extend(sq_sum_list)

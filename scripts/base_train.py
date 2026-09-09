@@ -104,7 +104,7 @@ def main():
     # default: backward overlap disabled, all transformer layers form a single compiled region, all muon params of particular shape form single communication bucket
     # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (2 and world_size respectively)
     parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. When enabling, use --layers-per-compiled-region to control compiled regions split.')
-    parser.add_argument('--layers-per-compiled-region', type=int, default=None, help='Number of layers per compiled region. Valid values: -1 (all transformer layers) or positive int (default -1 if backward overlap disabled, 2 otherwise)')
+    parser.add_argument('--layers-per-compiled-region', type=int, default=None, help='Number of layers per compiled region. Affects last grad_accum only. Valid values: -1 (all transformer layers) or positive int (default -1 if backward overlap disabled, 2 otherwise)')
     parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket. Valid values: -1 (one bucket per param shape) or positive value divisible by world_size. (defaults: -1 if backward overlap disabled, world_size otherwise).')
 
     args = parser.parse_args()
@@ -482,7 +482,8 @@ def main():
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for ga_idx in range(grad_accum):
             record_event(f"forward_ga{ga_idx}.begin")
-            _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True)
+            split_compiled_regions = args.backward_overlap and ga_idx == grad_accum - 1
+            _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
