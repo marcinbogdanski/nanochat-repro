@@ -98,16 +98,23 @@ def main():
     parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
     # Optimizations
     # default: backward overlap disabled, all transformer layers form a single compiled region, all muon params of particular shape form single communication bucket
-    # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (2 and world_size respectively)
+    # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (1 and world_size respectively)
     parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. When enabling, use --layers-per-compiled-region to control compiled regions split.')
-    parser.add_argument('--layers-per-compiled-region', type=int, default=None, help='Number of layers per compiled region. Valid values: -1 (all transformer layers) or positive int (default -1 if backward overlap disabled, 2 otherwise)')
+    parser.add_argument('--layers-per-compiled-region', type=int, default=None, help='Number of layers per compiled region. Valid values: -1 (all transformer layers) or positive int (default -1 if backward overlap disabled, 1 otherwise)')
     parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket. Valid values: -1 (one bucket per param shape) or positive value divisible by world_size. (defaults: -1 if backward overlap disabled, world_size otherwise).')
-
     args = parser.parse_args()
+
+    # DDP Init
+    device, ddp_master, ddp_world_size = ddp_init()
+
+    # Resolve user config
+    if args.layers_per_compiled_region is None:
+        args.layers_per_compiled_region = 1 if args.backward_overlap else -1  # 1 is optimal on my 4x3090 d20; if overlap disabled then -1 to fuse all layers
+    if args.muon_params_per_bucket is None:
+        args.muon_params_per_bucket = ddp_world_size if args.backward_overlap else -1  # world_size if overlap enabled, otherwise group all params per shape
     user_config = vars(args).copy()
 
     # Compute setup and helpers
-    device, ddp_master, ddp_world_size = ddp_init()
     enable_fp8 = (args.fp8 == "true" or (args.fp8 == "auto" and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9))
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
@@ -196,11 +203,8 @@ def main():
     # Compile
     if not args.deterministic:
         # This by itself does not switch on compiled path yet, just makes it available.
-        # To use pass use_compiled_if_available=True to forward()
-        layers_per_compiled_region = args.layers_per_compiled_region
-        if layers_per_compiled_region is None:
-            layers_per_compiled_region = 2 if args.backward_overlap else -1  # 2 is optimal on my 4x3090 d20, -1 fuse all layers
-        model.compile_layer_regions(layers_per_region=layers_per_compiled_region)
+        # To use, pass use_compiled_if_available=True to forward()
+        model.compile_layer_regions(layers_per_region=args.layers_per_compiled_region)
 
     # Hyperparameter Transfer and Calculation
     pretrain_user_cfg = pretrain_metadata["user_config"]

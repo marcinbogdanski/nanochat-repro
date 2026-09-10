@@ -477,13 +477,11 @@ class GPTModel(nn.Module):
         return collectives
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, backward_overlap=False, muon_params_per_bucket=None, enable_metrics=False):
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, backward_overlap=False, muon_params_per_bucket=-1, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
         world_size = torch.distributed.get_world_size() if ddp else 1
-        assert muon_params_per_bucket is None or muon_params_per_bucket == -1 or (muon_params_per_bucket > 0 and muon_params_per_bucket % world_size == 0)  # must be divisible by world_size
-        if muon_params_per_bucket is None:
-            muon_params_per_bucket = world_size if backward_overlap else -1  # world_size if overlap enabled, otherwise group all params per shape
+        assert muon_params_per_bucket == -1 or (muon_params_per_bucket > 0 and muon_params_per_bucket % world_size == 0)  # must be divisible by world_size
 
         # Separate parameters into groups for different optimizers and learning rates
         params_matrix = list(self.transformer.h.parameters())
