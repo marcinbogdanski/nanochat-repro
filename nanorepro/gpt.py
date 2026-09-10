@@ -513,7 +513,7 @@ class GPTModel(nn.Module):
             # No weight decay for MoE to prevent drift towards sigmoid(0.0)=0.5
             adam_groups.append(dict(params=params_router, lr=router_lr * dmodel_lr_scale, betas=(0.8, 0.96), weight_decay=0.0, is_small=False))
         adamw_factory = DistAdamW if ddp else AdamW
-        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, backward_overlap=backward_overlap, enable_metrics=enable_metrics)
+        adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
         # backward_collectives = [('adamw', [param]), ('muon', [param, param], ...]
@@ -541,7 +541,6 @@ class GPTModel(nn.Module):
             beta2=0.9,
             weight_decay=weight_decay,
             compute_dtype=self.compute_dtype,
-            backward_overlap=backward_overlap,
             enable_metrics=enable_metrics,
         )
 

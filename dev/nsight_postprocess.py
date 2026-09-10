@@ -212,4 +212,3 @@ with Session(
             row_idx += 1
         write_scope(f"id{row_idx:02d} rank{rank}", session, domain, rank, timestamps)
         row_idx += 1
-        

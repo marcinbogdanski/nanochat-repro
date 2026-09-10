@@ -128,11 +128,10 @@ class Muon(torch.optim.Optimizer):
         lr_adj = lr * sqrt(max(1, m/n))  # adjust for aspect ratio
         p = p - lr * U                   # update weights
     """
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, backward_overlap=False, enable_metrics=False):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, enable_metrics=False):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
         super().__init__(params, defaults)
         self.compute_dtype = compute_dtype
-        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
@@ -204,11 +203,10 @@ class Muon(torch.optim.Optimizer):
 
 class DistMuon(torch.optim.Optimizer):
     """ZeRO-2 version of Muon optimizer"""
-    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, backward_overlap=False, enable_metrics=False):
+    def __init__(self, params, lr=0.01, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.1, compute_dtype=torch.bfloat16, enable_metrics=False):
         defaults = dict(lr=lr, momentum=momentum, ns_steps=ns_steps, beta2=beta2, weight_decay=weight_decay)
         super().__init__(params, defaults)
         self.compute_dtype = compute_dtype
-        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
         self.group_buffers = []  # static param/grad buffers, parameter .data/.grad point here
@@ -293,9 +291,10 @@ class DistMuon(torch.optim.Optimizer):
         self.debug_stats = {}  # clear every step
 
         # Loop 1: Launch reduce-scatter
-        if not self.backward_overlap:  # if backward overlap is enabled, RS is launched in param hooks during backward
-            for group_idx in range(len(self.param_groups)):
-                assert self._reduce_works[group_idx] is None  # assert reduce-scatter has not been launched
+        # - backward overlap enabled: RS is launched from param hooks during backward and loop 1 is no-op
+        # - backward overlap disabled: loop 1 is launching comms as usual
+        for group_idx in range(len(self.param_groups)):
+            if self._reduce_works[group_idx] is None:
                 self.launch_reduce(group_idx)
 
         # Loop 2: Step and launch all-gather

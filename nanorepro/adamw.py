@@ -82,10 +82,9 @@ class AdamW(torch.optim.Optimizer):
         p = p - lr * v_corrected / (sqrt(s_corrected) + eps)
         p = p - lr * wd * p                # AdamW: decoupled weight decay
     """
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, backward_overlap=False, enable_metrics=False):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, enable_metrics=False):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
-        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
 
@@ -148,10 +147,9 @@ class AdamW(torch.optim.Optimizer):
 
 class DistAdamW(torch.optim.Optimizer):
     """ZeRO-2 version of AdamW optimizer"""
-    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, backward_overlap=False, enable_metrics=False):
+    def __init__(self, params, lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, enable_metrics=False):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
-        self.backward_overlap = backward_overlap
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
         self.param_buffers = {}  # (group_idx, param_idx) -> grad_slice for large params, etc
@@ -229,12 +227,11 @@ class DistAdamW(torch.optim.Optimizer):
         self.debug_stats = {}  # clear every step
 
         # Loop 1: Launch reduce-scatter
+        # - backward overlap enabled: launch all-reduce for small params only. reduce-scatters are launched from param hooks during backward
+        # - backward overlap disabled: loop 1 is launching all the comms as usual
         for i, group in enumerate(self.param_groups):
             for j, param in enumerate(group['params']):
-                if self.backward_overlap and not group['is_small']:
-                    assert self._reduce_works[(i, j)] is not None
-                else:
-                    assert self._reduce_works[(i, j)] is None  # assert reduce-scatter has not been launched
+                if self._reduce_works[(i, j)] is None:
                     self.launch_reduce(i, j)
 
         # Loop 2: Step and launch all-gather

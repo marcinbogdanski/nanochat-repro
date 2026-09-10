@@ -486,7 +486,7 @@ def main():
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for ga_idx in range(grad_accum):
             record_event(f"forward_ga{ga_idx}.begin")
-            split_compiled_regions = args.backward_overlap and ga_idx == grad_accum - 1
+            split_compiled_regions = args.backward_overlap and ddp_world_size > 1 and ga_idx == grad_accum - 1
             _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
