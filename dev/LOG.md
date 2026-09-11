@@ -1,5 +1,47 @@
 # Assorted Development Notes
 
+
+## 2026.09.10 - Backward Overlap
+
+Implemented most of the DDP-like backward overlap. This was a bit more tricky than anticipated.
+
+Items (`14ac37da`):
+- split muon param groups into comms buckets and sort by backward readiness (order specified manually)
+- partition forward pass into compiled regions, allowing comms to dispatch every few layers during backward pass
+- use post-accum hooks to track gradient readiness; dispatch comms when all tensors in a bucket are done
+- introduce shared adamw/muon backward scheduler, so adamw buckets are despatched between muon buckets as needed
+- only activate the overlap (partitioned fwd pass, grad hooks) for the final grad_accum pass; earlier passes compile all transformer layers together
+
+| Configuration (4x3090)             |  Compiled regions  | Muon bucket |   Step time | Step change |  Tok/s | Tok/s change |
+|------------------------------------|--------------------|-------------|------------:|------------:|-------:|-------------:|
+| Main baseline (`088b8845`)         | full forward()     | per shape   | 16.079933 s |     +0.000% | 65,210 |      -0.000% |
+| New code, overlap off (`77fe9cf4`) | all layers, output | per shape   | 16.079860 s |    baseline | 65,211 |     baseline |
+| Overlap (`77fe9cf4`)               | 1 layer, output    | 4           | 15.588510 s |     -3.056% | 67,266 |      +3.152% |
+| Overlap (`77fe9cf4`)               | 2 layers, output   | 4           | 15.608530 s |     -2.931% | 67,180 |      +3.020% |
+
+_table: depth=20, 4x3090 @1500MHz PCIe 3.0 x16x8x16x8, BF16, device batch 8, GA16, measured steps 3-9, FA3 via kernels-community, vocab 32K_
+
+| Configuration (8xH200)             |  Compiled regions  | Muon bucket |  Step time | Step change |     Tok/s | Tok/s change |
+|------------------------------------|--------------------|-------------|-----------:|------------:|----------:|-------------:|
+| Main baseline (`088b8845`)         | full forward()     | per shape   | 1.022670 s |     +0.062% | 1,025,332 |      -0.062% |
+| New code, overlap off (`77fe9cf4`) | all layers, output | per shape   | 1.022040 s |    baseline | 1,025,964 |     baseline |
+| Best tested overlap (`77fe9cf4`)   | 4 layers, output   | 16          | 1.024084 s |     +0.200% | 1,023,916 |      -0.200% |
+
+_table: depth=24, 8xH200 SXM, FP8, device batch 16, GA4, measured steps 3-49, FA3 via varunneal/flash-attention-3, vocab 32K_
+
+Overall new implementation, with overlap disabled (default), matches pre-change implementation, so at least we are not worse off. On 4x3090 the overlap is beneficial with best case being 1-layer compiled regions and 4-param muon buckets (-3.056% step time, +3.152% tok/s). On 8xH200 a selective sweep of compiled regions (1,2,4) and muon buckets (8,16) was worse in all cases. Best case in included in the table above: 4-layer regions and 16-param muon buckets (+0.200% step, -0.200%).
+
+The overlap is not free. On 4x3090 last GA backward pass increased from ~344ms to ~382ms, but whole step finished earlier nonetheless. Looking at the 8xH200 Nsight traces suggest that the benefit of hiding already short comms (NVlink) was not enough compared to increased backward pass time.
+
+One footgun: Dynamo in PyTorch 2.9 has default specialization budget of 8 per code object. In D20 runs, only first 8 compiled regions were actually compiled, rest fell back to eager. Both me and agent initially missed this, I noticed something fishy is going on by inspecting custom Nsight spans (yay human), then agent found the cause. This required 1-line fix to raise the Dynamo specialization limit.
+
+Current impl always splits output region (lm_head, loss, etc) even in default case. Comparing with compile-whole-forward-together showed virtually no difference.
+
+Potential future work:
+- currently after backward completes, adamw/muon compute is not interleaved. AdamW goes first, Muon goes after
+  + this means AdamW can wait for late reduction (e.g. WTE), while some Muon buckets are ready to go.
+  + according to Nsight traces, my guess is that on d12 4x3090 at step time 4.29s this could recover additional ~8-14ms or ~0.2% or so
+
 ## 2026.09.05 - Nsight Instrumentation
 
 I like to be able to easily see custom GPU-side spans. Something reliable in compiled regions and less granular than `torch.profiler`/Nsight. 
