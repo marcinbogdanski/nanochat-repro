@@ -16,7 +16,7 @@ from nanorepro.core_eval import evaluate_core_metric
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_checkpoint, create_model, get_latest_checkpoint_step
 from nanorepro.fp8 import LinearFP8
-from nanorepro.common import get_base_path, ddp_init, save_git_diff, collect_provenance, wandb_init, FileLogger
+from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, FileLogger
 from nanorepro.nsight_trace import is_trace_enabled, record_event  # registers custom ops for profiling
 BASE_DIR = get_base_path()
 
@@ -100,12 +100,25 @@ def main():
     parser.add_argument('--log-every', type=int, default=1, help='Log training metrics every N steps.')
     parser.add_argument('--log-metrics', action='store_true', help='Collect and log detailed tensor metrics. Slows down training.')
     parser.add_argument('--log-wandb-every', type=int, default=10, help='Log selected training metrics to WandB every N steps.')
-
+    # Optimizations
+    # default: backward overlap disabled, all transformer layers form a single compiled region, all muon params of particular shape form single communication bucket
+    # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (1 and world_size respectively)
+    parser.add_argument('--backward-overlap', action='store_true', help='Overlap distributed optimizer comms with backward pass. When enabling, use --layers-per-compiled-region to control compiled regions split.')
+    parser.add_argument('--layers-per-compiled-region', type=int, default=None, help='Number of layers per compiled region. Affects last grad_accum only. Valid values: -1 (all transformer layers) or positive int (default -1 if backward overlap disabled, 1 otherwise)')
+    parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket. Valid values: -1 (one bucket per param shape) or positive value divisible by world_size. (defaults: -1 if backward overlap disabled, world_size otherwise).')
     args = parser.parse_args()
-    user_config = vars(args).copy()
-   
-    # Compute setup and helpers
+
+    # DDP Init
     device, ddp_master, ddp_world_size = ddp_init()
+
+    # Resolve user config
+    if args.layers_per_compiled_region is None:
+        args.layers_per_compiled_region = 1 if args.backward_overlap else -1  # 1 is optimal on my 4x3090 d20; if overlap disabled then -1 to fuse all layers
+    if args.muon_params_per_bucket is None:
+        args.muon_params_per_bucket = ddp_world_size if args.backward_overlap else -1  # world_size if overlap enabled, otherwise group all params per shape
+    user_config = vars(args).copy()
+
+    # Compute setup and helpers
     enable_fp8 = (args.fp8 == "true" or (args.fp8 == "auto" and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9))
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
@@ -130,6 +143,8 @@ def main():
         warnings.append("FP8 training disabled, which may reduce training speed. To enable, set --fp8=true or --fp8=auto on supported hardware.")
     if enable_fp8 and args.compute_dtype == 'fp32':
         warnings.append("Using FP8 training with FP32 compute. This is a valid but may lead to worse performance.")
+    if args.backward_overlap and ddp_world_size == 1:
+        warnings.append("Backward overlap requires multi-GPU run to have an effect.")
     if args.log_metrics:
         warnings.append("Detailed tensor metrics logging is enabled, which may slow down training.")
     if args.deterministic:
@@ -215,9 +230,10 @@ def main():
     print0(f"Layers eligible for FP8: {num_eligible} / {num_linear}")
 
     # Compile
-    orig_model = model
     if not args.deterministic:
-        model = torch.compile(model, dynamic=False)
+        # This by itself does not switch on compiled path yet, just makes it available.
+        # To use, pass use_compiled_if_available=True to forward()
+        model.compile_layer_regions(layers_per_region=args.layers_per_compiled_region)
 
     # Hyperparameter Scaling and Training Horizon
     # (1) Scaling laws / transfer recipe
@@ -286,8 +302,8 @@ def main():
     print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
-    # [0] AdamW for embeddings and scalars, [1] Muon for large matrix params
-    optimizers = model.setup_optimizer(
+    # AdamW for embeddings and scalars, Muon for large matrix params
+    adamw_optim, muon_optim, backward_scheduler = model.setup_optimizer(
         embedding_lr=args.embedding_lr * batch_lr_scale,
         matrix_lr=args.matrix_lr * batch_lr_scale,
         unembedding_lr=args.unembedding_lr * batch_lr_scale,
@@ -295,6 +311,8 @@ def main():
         router_lr=args.router_lr * batch_lr_scale,
         smear_backout_lr=0.2,
         weight_decay=scaled_weight_decay,
+        backward_overlap=args.backward_overlap,
+        muon_params_per_bucket=args.muon_params_per_bucket,
         enable_metrics=args.log_metrics,
     )
 
@@ -391,9 +409,7 @@ def main():
     # Checkpoint Resume
     if args.resume:
         print0("Resuming from latest checkpoint...")
-        loaded_vars = load_checkpoint(run_path, orig_model, optimizers, train_loader, device, step=resume_from_step)
-        if not args.deterministic:
-            model = torch.compile(orig_model, dynamic=False)
+        loaded_vars = load_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, device, step=resume_from_step)
         step = loaded_vars["step"]
         total_time = loaded_vars["total_time"]        
         smooth_tloss = loaded_vars["smooth_tloss"]
@@ -430,8 +446,7 @@ def main():
 
         # Core Metric
         if args.core_metric_every > 0 and step > start_step and (step % args.core_metric_every == 0 or step == max_steps):
-            # Use orig_model because shapes keep changing
-            core_metric, core_results_list, core_eval_time = evaluate_core_metric(orig_model, tokenizer, device, args.core_metric_max_per_task)
+            core_metric, core_results_list, core_eval_time = evaluate_core_metric(model, tokenizer, device, args.core_metric_max_per_task)
             print0(f"CORE {step} | core metric {core_metric:.14f} | dt {core_eval_time:.2f}s")
             core_accuracies = {result['task_label']: result['centered_accuracy'] for result in core_results_list}
             wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'core_metric': core_metric, 'centered_results': core_accuracies})
@@ -441,7 +456,7 @@ def main():
         # Generate
         if ddp_master and args.sample_every > 0 and step > start_step and (step % args.sample_every == 0 or step == max_steps):
             print0("Generating test samples...")
-            generated_samples = generate_test_samples(orig_model, tokenizer, device)
+            generated_samples = generate_test_samples(model, tokenizer, device)
             print0("\n".join(generated_samples))
             file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
@@ -449,7 +464,7 @@ def main():
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps or stop_requested):
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, orig_model, optimizers, train_loader, loop_vars, user_config, training_hyperparameters)
+            checkpoint_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
             print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
 
@@ -466,33 +481,34 @@ def main():
             torch.cuda.profiler.start()
         ts = time.time()
         loss_accum = 0.0
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             opt.zero_grad()
         fwd_metrics = []  # nested list: n_grad_accum, dict(...)
         for ga_idx in range(grad_accum):
             record_event(f"forward_ga{ga_idx}.begin")
-            _, loss, metrics = model(x, y, return_logits=False)
+            split_compiled_regions = args.backward_overlap and ddp_world_size > 1 and ga_idx == grad_accum - 1
+            _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
             rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
+            if ga_idx == grad_accum - 1:
+                backward_scheduler.backward_overlap_begin()  # no-op if backward overlap is disabled
             record_event(f"backward_ga{ga_idx}.begin")
             loss.backward()
             record_event(f"backward_ga{ga_idx}.end")
             x, y = train_loader.get_batch_bos()
-
-        if torch.distributed.is_initialized():
-            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
+        backward_scheduler.backward_overlap_end()  # no-op if backward overlap is disabled
 
         # LR Scheduler
         lrm = get_lr(step)
-        for opt in optimizers:
+        for opt in [adamw_optim, muon_optim]:
             for group in opt.param_groups:
                 group['lr'] = group['initial_lr'] * lrm
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_wd(step)
-        for group in optimizers[1].param_groups:  # [0] is AdamW, [1] is Muon
+        for group in muon_optim.param_groups:
             group['momentum'] = muon_momentum
             group['weight_decay'] = muon_weight_decay
 
@@ -502,11 +518,15 @@ def main():
 
         # Optimizer Step
         record_event("adamw.begin")
-        optimizers[0].step()
+        adamw_optim.step()
         record_event("adamw.end")
         record_event("muon.begin")
-        optimizers[1].step()
+        muon_optim.step()
         record_event("muon.end")
+
+        # Loss sync
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
         # Sync & Time
         synchronize()
@@ -560,8 +580,8 @@ def main():
             }
             # Metrics - super ugly
             if args.log_metrics:
-                opt_metrics = {**optimizers[0].get_metrics(), **optimizers[1].get_metrics()}
-                metrics_list = orig_model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
+                opt_metrics = {**adamw_optim.get_metrics(), **muon_optim.get_metrics()}
+                metrics_list = model.collect_metrics(fwd_metrics, opt_metrics)  # requires grads to still be attached
                 train_log_dict['metrics'] = metrics_list
             file_logger.log('train', step, train_log_dict)
         
@@ -579,7 +599,7 @@ def main():
 
     file_logger.log('run_summary', step=None, data={
         'user_config': user_config,
-        'model_config': orig_model.config.to_dict(),
+        'model_config': model.config.to_dict(),
         'param_counts': param_counts,
         'training_hyperparameters': training_hyperparameters,
         'final_bpb_eval': bpb_eval_data,

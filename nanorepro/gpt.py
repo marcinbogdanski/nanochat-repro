@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,6 +7,7 @@ from nanorepro.moe import MoE
 from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
+from nanorepro.backward_scheduler import BackwardScheduler
 from nanorepro.nsight_trace import clone_boundary
 
 class GPTConfig:
@@ -230,6 +232,11 @@ class GPTModel(nn.Module):
         # Pre-calculate window size tuples (context_length, 0) for each layer
         self.window_sizes = self._calc_window_sizes(self.config)
 
+        # Compiled regions, if used
+        self._compiled_layer_regions = None  # split regions, use on last grad_accum only (no point splitting if no comms to overlap)
+        self._compiled_output_region = None
+        self._compiled_whole_transformer_region = None
+
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
 
@@ -416,9 +423,65 @@ class GPTModel(nn.Module):
         return metrics
 
 
-    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, enable_metrics=False):
+    def _build_backward_collectives(self, params_matrix, muon_params_per_bucket):
+        """Manually build comms buckets in backward pass order."""
+
+        # Construct the list of non-small params in backward order.
+        # I omit small params because as they are.. well, small and i expect not much to gain from backward overlapping them. Did not test.
+        backward_params = [self.lm_head.weight]
+        for layer_idx in reversed(range(self.config.n_layer)):
+            block = self.transformer.h[layer_idx]
+            if isinstance(block.mlp, MLP):
+                backward_params.extend([block.mlp.c_proj.weight, block.mlp.c_fc.weight])
+            elif isinstance(block.mlp, MoE):
+                backward_params.extend([
+                    block.mlp.shared_expert.w_down.weight,
+                    block.mlp.experts.w_down,
+                    block.mlp.shared_expert.w_up.weight,
+                    block.mlp.experts.w_up,
+                    block.mlp.router.gate.weight,
+                ])
+            else:
+                raise ValueError(f"Unknown MLP type: {type(block.mlp)}")
+            backward_params.extend([
+                block.attn.c_proj.weight,
+                block.attn.c_v.weight,
+                block.attn.c_k.weight,
+                block.attn.c_q.weight,
+            ])
+            if block.attn.ve_gate is not None:
+                backward_params.append(block.attn.ve_gate.weight)
+            if str(layer_idx) in self.value_embeds:
+                backward_params.append(self.value_embeds[str(layer_idx)].weight)
+        backward_params.append(self.transformer.wte.weight)
+
+        params_matrix = set(params_matrix)
+        muon_params_in_bwd_order = [p for p in backward_params if p in params_matrix]
+        muon_buckets_by_last_param = {}
+        for shape in sorted({p.shape for p in muon_params_in_bwd_order}):
+            shape_params = [p for p in muon_params_in_bwd_order if p.shape == shape]
+            if muon_params_per_bucket != -1:
+                for i in range(0, len(shape_params), muon_params_per_bucket):
+                    bucket_params = shape_params[i:i + muon_params_per_bucket]
+                    muon_buckets_by_last_param[bucket_params[-1]] = bucket_params
+            else:
+                muon_buckets_by_last_param[shape_params[-1]] = shape_params
+
+        collectives = []
+        for param in backward_params:
+            if param not in params_matrix:
+                collectives.append(('adamw', [param]))
+            elif param in muon_buckets_by_last_param:
+                collectives.append(('muon', muon_buckets_by_last_param[param]))
+
+        return collectives
+
+
+    def setup_optimizer(self, embedding_lr, matrix_lr, unembedding_lr, scalar_lr, router_lr, smear_backout_lr, weight_decay, backward_overlap=False, muon_params_per_bucket=-1, enable_metrics=False):
         """Prepare param groups and setup optimizers. Scale learning rates based on parameter counts"""
         ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
+        world_size = torch.distributed.get_world_size() if ddp else 1
+        assert muon_params_per_bucket == -1 or (muon_params_per_bucket > 0 and muon_params_per_bucket % world_size == 0)  # must be divisible by world_size
 
         # Separate parameters into groups for different optimizers and learning rates
         params_matrix = list(self.transformer.h.parameters())
@@ -453,10 +516,22 @@ class GPTModel(nn.Module):
         adamw_optimizer = adamw_factory(adam_groups, eps=1e-10, weight_decay=0.0, enable_metrics=enable_metrics)
 
         # Muon for large matrix params
-        muon_groups = []
-        for shape in sorted({p.shape for p in params_matrix}):
-            group_params = [p for p in params_matrix if p.shape == shape]
-            muon_groups.append({'params': group_params})
+        # backward_collectives = [('adamw', [param]), ('muon', [param, param], ...]
+        backward_collectives = self._build_backward_collectives(params_matrix, muon_params_per_bucket)
+        scheduled_params = [param for _, bucket_params in backward_collectives for param in bucket_params]
+        expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router
+        assert len(scheduled_params) == len(expected_params) and set(scheduled_params) == set(expected_params)
+
+        # Muon Groups
+        if muon_params_per_bucket == -1:
+            muon_groups = []
+            for shape in sorted({p.shape for p in params_matrix}):
+                group_params = [p for p in params_matrix if p.shape == shape]
+                muon_groups.append({'params': group_params})
+        else:
+            muon_groups = [{'params': group_params} for optim_type, group_params in backward_collectives if optim_type == 'muon']  # new way
+
+        # Muon Optimizer
         muon_factory = DistMuon if ddp else Muon
         muon_optimizer = muon_factory(
             muon_groups,
@@ -468,15 +543,36 @@ class GPTModel(nn.Module):
             compute_dtype=self.compute_dtype,
             enable_metrics=enable_metrics,
         )
+
+        adamw_param_to_idx = {param: (i, j) for i, group in enumerate(adamw_optimizer.param_groups) for j, param in enumerate(group['params'])}
+        muon_param_to_idx = {param: group_idx for group_idx, group in enumerate(muon_optimizer.param_groups) for param in group['params']}
+        comm_launchers = []
+        if ddp:
+            for param_bucket in backward_collectives:
+                optim_type, bucket_params = param_bucket
+                if optim_type == 'adamw':
+                    param = bucket_params[0]  # single param per adamw bucket
+                    group_idx, param_idx = adamw_param_to_idx[param]
+                    launcher = partial(adamw_optimizer.launch_reduce, group_idx, param_idx)
+                    comm_launchers.append(launcher)
+                elif optim_type == 'muon':
+                    group_idx = muon_param_to_idx[bucket_params[0]]
+                    launcher = partial(muon_optimizer.launch_reduce, group_idx)
+                    comm_launchers.append(launcher)
+
+        param_buckets = [bucket_params for _, bucket_params in backward_collectives]
+        backward_scheduler = BackwardScheduler(
+            param_buckets=param_buckets,
+            comm_launchers=comm_launchers,
+            backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
+        )
         
         # Set initial_lr in param groups for proper LR scaling
-        optimizers = [adamw_optimizer, muon_optimizer]
-        for opt in optimizers:
+        for opt in [adamw_optimizer, muon_optimizer]:
                 for group in opt.param_groups:
                     group["initial_lr"] = group["lr"]
-        
-        # [0] is AdamW, [1] is Muon
-        return optimizers
+
+        return adamw_optimizer, muon_optimizer, backward_scheduler
 
 
     def estimate_flops_per_token(self):
@@ -587,55 +683,121 @@ class GPTModel(nn.Module):
     def get_device(self):
         return next(self.parameters()).device
 
-    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True):
+    def compile_layer_regions(self, layers_per_region):
+        """Compile the transformer layers into regions for optimized execution.
+
+        This by itself does not switch on compiled path, just makes it available. To enable it, pass use_compiled_if_available=True to forward()
+        - enable: training and evaluation with stable input/target shapes, e.g. training froward and BPB
+        - don't enable: variable-shape inference, e.g. CORE, sampling, free-form generation
+        It is completely safe to compile regions and not use them.
+        """
+        assert layers_per_region == -1 or layers_per_region > 0
+
+        if layers_per_region == -1:
+            layers_per_region = len(self.transformer.h)
+
+        num_region_variants = 0
+
+        # Split transformer into compiled regions
+        self._compiled_layer_regions = []
+        for start_layer in range(0, len(self.transformer.h), layers_per_region):
+            end_layer = min(start_layer + layers_per_region, len(self.transformer.h))
+            region = partial(self._fwd_layer_regions, start_layer, end_layer)
+            compiled_region = torch.compile(region, dynamic=False)
+            self._compiled_layer_regions.append(compiled_region)
+            num_region_variants += 1
+
+        # Compile the whole transformer as one region
+        if len(self._compiled_layer_regions) == 1:
+            self._compiled_whole_transformer_region = self._compiled_layer_regions[0]
+        else:
+            transformer_region = partial(self._fwd_layer_regions, 0, len(self.transformer.h))
+            self._compiled_whole_transformer_region = torch.compile(transformer_region, dynamic=False)
+            num_region_variants += 1
+
+        # Compile the output region
+        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False)
+        num_region_variants += 1
+
+        # Raise dynamo limit, required on PyTorch 2.9
+        torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, num_region_variants)
+
+    def forward(self, idx, targets=None, kv_cache=None, reduction='mean', return_logits=True, use_compiled_if_available=False, split_compiled_regions=False):
         B, T = idx.shape
         assert T <= self.cos.size(1), "Cannot forward, model block size is exhausted."
         assert idx.device == self.cos.device, "Input device does not match model device."
         assert self.cos.dtype == self.compute_dtype, "Model buffers are not in compute_dtype."
-        assert kv_cache is None or not torch.is_grad_enabled()   # if kv_cache, then ensure no_grad
-
-        # Embeddings
-        x = self.transformer.wte(idx)             # B,T,E <- B,T
-        x = F.rms_norm(x, (x.size(-1),))
-
-        # Smear
-        x = self._apply_smear(x, kv_cache)
+        assert kv_cache is None or not torch.is_grad_enabled()     # if kv_cache, then ensure no_grad (training with KV cache not supported)
+        assert kv_cache is None or not use_compiled_if_available   # if kv_cache, then ensure no compiled regions (compiled path doesn't support KV caching)
+        use_compiled_regions = use_compiled_if_available and self._compiled_layer_regions is not None
 
         # Offset sin/cos
-        offset = 0
-        if kv_cache is not None:
-            # For now we assume seqlens are equal across the batch
-            offset = kv_cache.cache_seqlens[0].item()  # scalar
+        offset = 0 if kv_cache is None else kv_cache.cache_seqlens[0].item()  # assume seqlens are equal across the batch
         cos = self.cos[:, offset:offset+T, :, :]
         sin = self.sin[:, offset:offset+T, :, :]
 
-        # Transformer
-        x0 = x
-        backout_layer = self.config.n_layer // 2  # backout in middle of network
-        x_backout = None
-        if self.enable_metrics:
-            metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
+        # Setup
+        x = x0 = x_backout = None
+        metrics_resid_post_sq_sum, metrics_resid_post_num_el = [], []
 
-        x = clone_boundary(x, left=None, right="block_0")     # mark start of block_0
-        for i, block in enumerate(self.transformer.h):
+        # Transformer
+        if use_compiled_regions:
+            compiled_regions = self._compiled_layer_regions if split_compiled_regions else [self._compiled_whole_transformer_region]
+            for region in compiled_regions:
+                x, x0, x_backout, sq_sum_list, num_el_list = region(idx, x, x0, x_backout, cos, sin, kv_cache)
+                if self.enable_metrics:
+                    metrics_resid_post_sq_sum.extend(sq_sum_list)
+                    metrics_resid_post_num_el.extend(num_el_list)
+        else:
+            x, x0, x_backout, sq_sum_list, num_el_list = self._fwd_layer_regions(0, len(self.transformer.h), idx, x, x0, x_backout, cos, sin, kv_cache)
+            if self.enable_metrics:
+                metrics_resid_post_sq_sum.extend(sq_sum_list)
+                metrics_resid_post_num_el.extend(num_el_list)
+
+        # Advance kv_cache seqlens
+        if kv_cache is not None:
+            kv_cache.cache_seqlens.add_(T)
+
+        if use_compiled_regions:
+            return self._compiled_output_region(x, x_backout, targets, reduction, return_logits, metrics_resid_post_sq_sum, metrics_resid_post_num_el)
+        return self._fwd_output_region(x, x_backout, targets, reduction, return_logits, metrics_resid_post_sq_sum, metrics_resid_post_num_el)
+
+    def _fwd_layer_regions(self, start_layer, end_layer, idx, x, x0, x_backout, cos, sin, kv_cache):
+        """Forward a region of multiple transformer layers, from start_layer to end_layer (exclusive)."""
+
+        # Embeddings, Smear
+        if start_layer == 0:
+            x = self.transformer.wte(idx)             # B,T,E <- B,T
+            x = F.rms_norm(x, (x.size(-1),))
+            x = self._apply_smear(x, kv_cache)  # smear
+            x = clone_boundary(x, left=None, right="block_0")     # mark start of block_0
+            x0 = x
+
+        # Iterate Transformer Layers
+        sq_sum_list, num_el_list = [], []
+        for i in range(start_layer, end_layer):
+            # Residuals and value embeddings
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if self._has_ve(i, self.config.n_layer) else None
-            x, sq_sum_t, num_el = block(x, ve, cos, sin, self.window_sizes[i], kv_cache)
+
+            # Transformer Block
+            x, sq_sum_t, num_el = self.transformer.h[i](x, ve, cos, sin, self.window_sizes[i], kv_cache)
+            sq_sum_list.append(sq_sum_t)
+            num_el_list.append(num_el)
 
             # Mark end of block_{i} and start of block_{i+1} (apart from last)
             is_last_block = (i == len(self.transformer.h) - 1)
             right = f"block_{i+1}" if is_last_block is False else "output"
             x = clone_boundary(x, left=f"block_{i}", right=right)
 
-            if i == backout_layer:
+            # Backout in the middle of the network:
+            if i == self.config.n_layer // 2:
                 x_backout = x
-            if self.enable_metrics:
-                metrics_resid_post_sq_sum.append(sq_sum_t)
-                metrics_resid_post_num_el.append(num_el)
 
-        # Advance kv_cache seqlens
-        if kv_cache is not None:
-            kv_cache.cache_seqlens.add_(T)
+        return x, x0, x_backout, sq_sum_list, num_el_list
+
+    def _fwd_output_region(self, x, x_backout, targets, reduction, return_logits, metrics_resid_post_sq_sum, metrics_resid_post_num_el):
+        """Forward the output region of the transformer, return logits/loss/metrics as requested."""
 
         # Final backout blending
         if x_backout is not None:
@@ -716,7 +878,7 @@ class GPTModel(nn.Module):
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 idx_tail = idx[:, -block_size:]      # B,T  sliding window
-                logits, _, _ = self(idx_tail)      # B,T,C <- B,T
+                logits, _, _ = self(idx_tail, use_compiled_if_available=False)      # B,T,C <- B,T  don't use compiled, shapes change
                 logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
                 xcol = self.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
                 idx = torch.cat((idx, xcol), dim=1)  # B,T+1  append
