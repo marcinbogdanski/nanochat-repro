@@ -33,11 +33,11 @@ def main():
     # Compute setup and helpers
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    enable_fa3 = True if torch.cuda.is_available() else False
+    enable_fa = True if torch.cuda.is_available() else False
 
     # Overrides
     compute_dtype = torch.float32
-    enable_fa3 = False
+    enable_fa = False
     
     # Tokenizer
     tok_base_path = os.path.join(BASE_DIR, "tokenizer")
@@ -62,7 +62,7 @@ def main():
         model = GPTModel(
             model_config,
             compute_dtype=compute_dtype,
-            enable_fa3=enable_fa3,
+            enable_fa=enable_fa,
             fp8_training=True,
             enable_metrics=False,
         )
@@ -166,12 +166,12 @@ def main():
 
     # Model
     compute_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    enable_fa3 = True if torch.cuda.is_available() else False
+    enable_fa = True if torch.cuda.is_available() else False
     with torch.device("meta"):
         model = GPTModel(
             model_config,
             compute_dtype=compute_dtype,
-            enable_fa3=enable_fa3,
+            enable_fa=enable_fa,
             fp8_training=True,
             enable_metrics=False,
         )

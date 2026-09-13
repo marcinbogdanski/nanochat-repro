@@ -37,14 +37,14 @@ class GPTConfig:
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
-    def __init__(self, config, layer_idx, ve_enable, enable_fa3):
+    def __init__(self, config, layer_idx, ve_enable, enable_fa):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        assert isinstance(enable_fa3, bool)
+        assert isinstance(enable_fa, bool)
         self.n_head = config.n_head
         self.block_size = config.block_size
         self.layer_idx = layer_idx
-        self.enable_fa3 = enable_fa3
+        self.enable_fa = enable_fa
 
         self.c_q = LinearFP8(config.n_embd, config.n_embd, bias=False)
         self.c_k = LinearFP8(config.n_embd, config.n_embd, bias=False)
@@ -104,8 +104,8 @@ class CausalSelfAttentionRoPE(nn.Module):
         q_rot = q_rot * 1.2
         k_rot = k_rot * 1.2
 
-        if self.enable_fa3:
-            # Flash Attention 3
+        if self.enable_fa:
+            # Flash Attention
             if kv_cache is None:
                 y = fa3_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
             else:
@@ -155,9 +155,9 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx, ve_enable, enable_fa3, enable_metrics=False):
+    def __init__(self, config, layer_idx, ve_enable, enable_fa, enable_metrics=False):
         super().__init__()
-        self.attn = CausalSelfAttentionRoPE(config, layer_idx, ve_enable, enable_fa3)
+        self.attn = CausalSelfAttentionRoPE(config, layer_idx, ve_enable, enable_fa)
         self.enable_metrics = enable_metrics
         if not config.moe_enable:
             self.mlp = MLP(config)
@@ -179,7 +179,7 @@ class Block(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, config, compute_dtype, enable_fa3, fp8_training, enable_metrics=False):
+    def __init__(self, config, compute_dtype, enable_fa, fp8_training, enable_metrics=False):
         """Initialize to default device/dtype here, cast to compute_dtype in init_weights.
         
         Type handling:
@@ -191,7 +191,7 @@ class GPTModel(nn.Module):
         - at the end we cast logits back to float32 before softmax        
         """
         assert isinstance(compute_dtype, torch.dtype)
-        assert isinstance(enable_fa3, bool)
+        assert isinstance(enable_fa, bool)
         assert isinstance(fp8_training, bool)
         super().__init__()
         self.config = config
@@ -202,7 +202,7 @@ class GPTModel(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             h = nn.ModuleList([
-                Block(config, i, self._has_ve(i, config.n_layer), enable_fa3, enable_metrics) for i in range(config.n_layer)
+                Block(config, i, self._has_ve(i, config.n_layer), enable_fa, enable_metrics) for i in range(config.n_layer)
             ]),
         ))
         self.lm_head = LinearFP8(config.n_embd, config.vocab_size, bias=False)
