@@ -1,5 +1,23 @@
 # Assorted Development Notes
 
+## 2026.09.13 - 2x 5060 Ti Migration
+
+Switching to `kernels-community/flash-attn2` as the new default on consumer cards.
+
+| GPUs           | Attn | Prec | Mean step |   Tok/s | Step vs FA2 | Peak memory |
+|----------------|------|------|----------:|--------:|------------:|------------:|
+| 2x RTX 3090    | FA2  | BF16 | 3.7278 s  | 140,643 |    baseline |    8.831 GB |
+| 2x RTX 3090    | FA3  | BF16 | 3.7452 s  | 139,988 |     +0.468% |    8.831 GB |
+| 2x RTX 5060 Ti | FA2  | FP8  | 4.7066 s  | 111,394 |    baseline |   10.081 GB |
+| 2x RTX 5060 Ti | FA3  | —    |         — |       — |           — |           — |
+| 2x RTX 5060 Ti | FA4  | FP8  | 4.7781 s  | 109,728 |     +1.518% |   10.081 GB |
+
+_table: depth=12, 2x3090/2x5060ti unconstrained, device batch 8, window size SSSL, FA2/FA3 via kernels-community, FA4 via flash-attn-4, vocab 32K_
+
+Notes:
+- on 5060ti FA4 looses to FA2 by ~1.52% in step time; on 3090 FA3 looses to FA2 by approx ~0.47%
+- the `kernels-community/flash-attn3` has no compatible 5060 Ti kernel, test omitted
+- FA4 uses PyPI package `flash-attn-4==4.0.0b30` by Dao-AILab, with custom-op adapter for PyTorch 2.9 compatibility
 
 ## 2026.09.10 - Backward Overlap
 
