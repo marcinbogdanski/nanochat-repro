@@ -91,13 +91,13 @@ def load_checkpoint(checkpoints_path, model, optimizers, dataloader, device, ste
 
     return loop_vars
 
-def create_model(model_config, compute_dtype, enable_fa3, fp8_training, enable_metrics, device):
+def create_model(model_config, compute_dtype, enable_fa, fp8_training, enable_metrics, device):
     """Create a GPT model on device and call init_weights(). Returns ready, non-compiled model."""
     with torch.device("meta"):
         model = GPTModel(
             model_config,
             compute_dtype=compute_dtype,
-            enable_fa3=enable_fa3,
+            enable_fa=enable_fa,
             fp8_training=fp8_training,
             enable_metrics=enable_metrics,
         )
@@ -105,7 +105,7 @@ def create_model(model_config, compute_dtype, enable_fa3, fp8_training, enable_m
     model.init_weights()  # RoPE buffers, random weight init
     return model
 
-def load_model(checkpoints_path, compute_dtype, enable_fa3, fp8_training, enable_metrics, device, step=None):
+def load_model(checkpoints_path, compute_dtype, enable_fa, fp8_training, enable_metrics, device, step=None):
     """Load a GPT model from checkpoint to device. Returns ready, non-compiled model in eval mode and loaded metadata."""
     checkpoint_step = get_latest_checkpoint_step(checkpoints_path) if step is None else step
 
@@ -115,7 +115,7 @@ def load_model(checkpoints_path, compute_dtype, enable_fa3, fp8_training, enable
         model_metadata = json.load(f)
     assert model_metadata["step"] == checkpoint_step
     model_config = GPTConfig(**model_metadata["model_config"])
-    model = create_model(model_config, compute_dtype, enable_fa3, fp8_training, enable_metrics, device)
+    model = create_model(model_config, compute_dtype, enable_fa, fp8_training, enable_metrics, device)
 
     # Load Model State
     model_path = os.path.join(checkpoints_path, f"model_{checkpoint_step:06d}.pt")

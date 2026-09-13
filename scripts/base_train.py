@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--wandb', action='store_true', help="Enable logging to Weights & Biases, uses name from --run.")
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
-    parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
+    parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
     parser.add_argument('--fp8', type=str, default='auto', choices=['auto', 'true', 'false'], help="Enable FP8 training, eval is always in compute dtype.")
     # Model architecture
     parser.add_argument('--depth', type=int, default=20, help='Number of transformer layers.')
@@ -137,8 +137,8 @@ def main():
 
     # Warnings
     warnings = []
-    if args.no_fa3:
-        warnings.append("FA3 disabled, which may reduce training speed. Only set this flag if you need reproducibility.")
+    if args.no_fa:
+        warnings.append("FA disabled, which may reduce training speed. Only set this flag if you need reproducibility.")
     if not enable_fp8:
         warnings.append("FP8 training disabled, which may reduce training speed. To enable, set --fp8=true or --fp8=auto on supported hardware.")
     if enable_fp8 and args.compute_dtype == 'fp32':
@@ -176,7 +176,7 @@ def main():
     # Determinism
     # Also need to disable torch.compile for reproducibility
     if args.deterministic:
-        assert args.no_fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
+        assert args.no_fa, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation, FA2 not tested"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -206,7 +206,7 @@ def main():
     model = create_model(
         model_config=model_config,
         compute_dtype=compute_dtype,
-        enable_fa3=not args.no_fa3,
+        enable_fa=not args.no_fa,
         fp8_training=enable_fp8,
         enable_metrics=args.log_metrics,
         device=device
@@ -260,7 +260,7 @@ def main():
     model_d12_ref = create_model(
         model_config=model_d12_ref_config,
         compute_dtype=compute_dtype,        # not relevant here
-        enable_fa3=not args.no_fa3,         # not relevant here
+        enable_fa=not args.no_fa,           # not relevant here
         fp8_training=enable_fp8,            # not relevant here
         enable_metrics=args.log_metrics,    # not relevant here
         device="meta",

@@ -11,8 +11,8 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability(device=0)[0] =
     # Specifically for Hopper, about 2-3% faster
     _fa3 = get_kernel('varunneal/flash-attention-3').flash_attn_interface
 else:
-    # Flash Attention 3, source wheel with 3090 support
-    _fa3 = get_kernel('kernels-community/flash-attn3').flash_attn_interface
+    # Flash Attention 2; d12 runs: on 2x3090 ~0.47% faster than attn3, on 2x5060ti attn3 is not supported and FA4 ~1.5% slower than FA2
+    _fa3 = get_kernel('kernels-community/flash-attn2').flash_attn_interface
 
 def fa3_attn_func(q, k, v, causal, window_size):
     # q, k, v are [B,T,nh,hs] dims

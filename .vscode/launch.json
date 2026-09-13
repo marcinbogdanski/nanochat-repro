@@ -24,7 +24,7 @@
                 "--depth=4",
                 "--total-batch-size=262144",
                 "--device-batch-size=8",
-                "--no-fa3",
+                "--no-fa",
                 "--eval-every=10",
                 "--eval-tokens=524288",
                 "--core-metric-every=0",

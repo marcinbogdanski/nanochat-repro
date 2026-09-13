@@ -31,7 +31,7 @@ def main():
     parser.add_argument('--run', type=str, default=None, help='Run to load')
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
-    parser.add_argument('--no-fa3', action='store_true', help="Disable Flash Attention 3, for reproducibility.")
+    parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
     # Optimization
     parser.add_argument('--device-batch-size', type=int, default=None, help='Micro batch size per device. (default: None, load from checkpoint)')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic settings for reproducibility.')
@@ -70,7 +70,7 @@ def main():
     # Determinism
     # Also need to disable torch.compile for reproducibility
     if args.deterministic:
-        assert args.no_fa3, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation"
+        assert args.no_fa, "FA3 can't reliably be set to deterministic mode due to bug in upstream implementation, FA2 not tested"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
@@ -81,7 +81,7 @@ def main():
     model, pretrain_metadata = load_model(
         checkpoints_path=checkpoints_path,
         compute_dtype=compute_dtype,
-        enable_fa3=not args.no_fa3,
+        enable_fa=not args.no_fa,
         fp8_training=False,    # doesn't matter
         enable_metrics=False,
         device=device,
