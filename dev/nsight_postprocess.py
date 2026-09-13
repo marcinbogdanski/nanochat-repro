@@ -111,8 +111,8 @@ def extract_rows(filename):
 rows = extract_rows(source_filename)
 ref_rows = extract_rows(source_ref_filename) if Path(source_ref_filename).exists() else []
 
-print("Rows extracted from SQLite database:")
-for row in rows:
+print("Rows extracted from SQLite database [0..7]:")
+for row in rows[0:8]:
     print(row)
 # ('custom_event rank=0 forward.begin', 17439452)
 # ('custom_event rank=1 forward.begin', 17898137)
