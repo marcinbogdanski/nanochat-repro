@@ -133,15 +133,15 @@ class Muon(torch.optim.Optimizer):
         super().__init__(params, defaults)
         self.compute_dtype = compute_dtype
         self.enable_metrics = enable_metrics
-        self._debug_stats = {}    # metrics, if enabled
+        self.debug_stats = {}    # metrics, if enabled
 
     def get_metrics(self):
-        return self._debug_stats
+        return self.debug_stats
 
     @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
-        self._debug_stats = {}  # clear every step
+        self.debug_stats = {}  # clear every step
 
         for group in self.param_groups:
             # First dim is stack size, i.e. num params in group
@@ -189,7 +189,7 @@ class Muon(torch.optim.Optimizer):
                 assert len(update_sum_squares) == len(group['params'])
                 assert len(params_sum_squares) == len(group['params'])
                 for jj, param in enumerate(group['params']):
-                    self._debug_stats[param] = {
+                    self.debug_stats[param] = {
                         'grad_sq_sum': float(grad_sum_squares[jj]),  # np.float32 -> float
                         'update_sq_sum': float(update_sum_squares[jj]),
                         'params_sq_sum': float(params_sum_squares[jj]),
@@ -208,7 +208,7 @@ class DistMuon(torch.optim.Optimizer):
         super().__init__(params, defaults)
         self.compute_dtype = compute_dtype
         self.enable_metrics = enable_metrics
-        self._debug_stats = {}    # metrics, if enabled
+        self.debug_stats = {}    # metrics, if enabled
         self.group_buffers = []  # static param/grad buffers, parameter .data/.grad point here
 
         # Initialize Static Buffers
@@ -255,11 +255,11 @@ class DistMuon(torch.optim.Optimizer):
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
 
-        self._reduce_works = [None] * len(self.param_groups)
-        self._gather_works = [None] * len(self.param_groups)
+        self.reduce_works = [None] * len(self.param_groups)
+        self.gather_works = [None] * len(self.param_groups)
 
     def get_metrics(self):
-        return self._debug_stats
+        return self.debug_stats
 
     @torch.no_grad()
     def zero_grad(self, set_to_none=True):
@@ -267,13 +267,13 @@ class DistMuon(torch.optim.Optimizer):
         # Note calling model.zero_grad(set_to_none=True) will still set .grad = None and break things, hence assert in step()
         for buffer in self.group_buffers:
             buffer['grads'].zero_()
-        self._debug_stats = {}  # clear every step
-        self._reduce_works = [None] * len(self.param_groups)
-        self._gather_works = [None] * len(self.param_groups)
+        self.debug_stats = {}  # clear every step
+        self.reduce_works = [None] * len(self.param_groups)
+        self.gather_works = [None] * len(self.param_groups)
 
     @torch.no_grad()
     def launch_reduce(self, bucket_idx):
-        assert self._reduce_works[bucket_idx] is None
+        assert self.reduce_works[bucket_idx] is None
 
         buffers = self.group_buffers[bucket_idx]
         group = self.param_groups[bucket_idx]
@@ -282,7 +282,7 @@ class DistMuon(torch.optim.Optimizer):
             assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][param_idx].data_ptr()
 
         with collective_range(buffers['group_name'] + "_rs"):    # Name the collective so we can label GPU channels in post processing
-            self._reduce_works[bucket_idx] = torch.distributed.reduce_scatter_tensor(
+            self.reduce_works[bucket_idx] = torch.distributed.reduce_scatter_tensor(
                 output=buffers['grads_shard'],
                 input=buffers['grads'],
                 op=torch.distributed.ReduceOp.AVG,
@@ -291,13 +291,13 @@ class DistMuon(torch.optim.Optimizer):
 
     @torch.no_grad()
     def bucket_step(self, bucket_idx):
-        assert self._gather_works[bucket_idx] is None
+        assert self.gather_works[bucket_idx] is None
         buffers = self.group_buffers[bucket_idx]
         group = self.param_groups[bucket_idx]
         anchor = group['params'][0]  # shape, dtype, device
 
         # Wait for reduce-scatter
-        self._reduce_works[bucket_idx].wait()
+        self.reduce_works[bucket_idx].wait()
 
         # Guard empty rank
         num_params_this_rank = buffers['num_local']
@@ -339,7 +339,7 @@ class DistMuon(torch.optim.Optimizer):
                 idx_start = buffers['param_start']
                 owned_params = group['params'][idx_start:idx_start+num_params_this_rank]
                 for jj, param in enumerate(owned_params):
-                    self._debug_stats[param] = {
+                    self.debug_stats[param] = {
                         'grad_sq_sum': float(grad_sum_squares[jj]),  # np.float32 -> float
                         'update_sq_sum': float(update_sum_squares[jj]),
                         'params_sq_sum': float(params_sum_squares[jj]),
@@ -349,8 +349,8 @@ class DistMuon(torch.optim.Optimizer):
         # All metrics are sum-reduced across ranks, so fill with zeros to be explicit
         if self.enable_metrics:
             for p in group['params']:
-                if p not in self._debug_stats:
-                    self._debug_stats[p] = {
+                if p not in self.debug_stats:
+                    self.debug_stats[p] = {
                         'grad_sq_sum': 0.0,
                         'update_sq_sum': 0.0,
                         'params_sq_sum': 0.0,
@@ -359,7 +359,7 @@ class DistMuon(torch.optim.Optimizer):
 
         # Do all-gather directly to static buffer
         with collective_range(buffers['group_name'] + "_ag"):
-            self._gather_works[bucket_idx] = torch.distributed.all_gather_into_tensor(
+            self.gather_works[bucket_idx] = torch.distributed.all_gather_into_tensor(
                 output_tensor=buffers["params"],
                 input_tensor=buffers['params_shard'],
                 async_op=True
@@ -367,7 +367,7 @@ class DistMuon(torch.optim.Optimizer):
 
     @torch.no_grad()
     def wait_gather(self, bucket_idx):
-        self._gather_works[bucket_idx].wait()
+        self.gather_works[bucket_idx].wait()
 
     @torch.no_grad()
     def step(self):
@@ -375,8 +375,8 @@ class DistMuon(torch.optim.Optimizer):
 
         # Loop 1: Launch reduce-scatter
         for bucket_idx in range(len(self.param_groups)):
-            if self._reduce_works[bucket_idx] is None:
-                self.launch_reduce(bucket_idx)
+            if self.reduce_works[bucket_idx] is None:
+                self.launch_reduce(bucket_idx)  # Launch only if not launched during backward pass
 
         # Loop 2: Step and launch all-gather
         for bucket_idx in range(len(self.param_groups)):

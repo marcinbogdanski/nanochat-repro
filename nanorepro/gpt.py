@@ -544,16 +544,16 @@ class GPTModel(nn.Module):
             enable_metrics=enable_metrics,
         )
 
-        adamw_param_to_idx = {param: (i, j) for i, group in enumerate(adamw_optimizer.param_groups) for j, param in enumerate(group['params'])}
-        muon_param_to_idx = {param: group_idx for group_idx, group in enumerate(muon_optimizer.param_groups) for param in group['params']}
         comm_launchers = []
         if ddp:
+            adamw_param_to_idx = {param: bucket_idx for bucket_idx, (group, param) in enumerate(adamw_optimizer.buckets)}
+            muon_param_to_idx = {param: group_idx for group_idx, group in enumerate(muon_optimizer.param_groups) for param in group['params']}
             for param_bucket in backward_collectives:
                 optim_type, bucket_params = param_bucket
                 if optim_type == 'adamw':
                     param = bucket_params[0]  # single param per adamw bucket
-                    group_idx, param_idx = adamw_param_to_idx[param]
-                    launcher = partial(adamw_optimizer.launch_reduce, group_idx, param_idx)
+                    bucket_idx = adamw_param_to_idx[param]
+                    launcher = partial(adamw_optimizer.launch_reduce, bucket_idx)
                     comm_launchers.append(launcher)
                 elif optim_type == 'muon':
                     group_idx = muon_param_to_idx[bucket_params[0]]
