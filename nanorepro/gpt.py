@@ -7,7 +7,7 @@ from nanorepro.moe import MoE
 from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
-from nanorepro.backward_scheduler import BackwardScheduler
+from nanorepro.backward_scheduler import BackwardScheduler, ScheduledBucket
 from nanorepro.nsight_trace import clone_boundary
 
 class GPTConfig:
@@ -544,29 +544,33 @@ class GPTModel(nn.Module):
             enable_metrics=enable_metrics,
         )
 
-        comm_launchers = []
+        schdeuled_buckets = []
         if ddp:
-            adamw_param_to_idx = {param: bucket_idx for bucket_idx, (group, param) in enumerate(adamw_optimizer.buckets)}
-            muon_param_to_idx = {param: group_idx for group_idx, group in enumerate(muon_optimizer.param_groups) for param in group['params']}
+            adamw_param_to_bucket_idx = adamw_optimizer.get_param_to_bucket_idx()
+            muon_param_to_bucket_idx = muon_optimizer.get_param_to_bucket_idx()
             for param_bucket in backward_collectives:
                 optim_type, bucket_params = param_bucket
                 if optim_type == 'adamw':
                     param = bucket_params[0]  # single param per adamw bucket
-                    bucket_idx = adamw_param_to_idx[param]
-                    launcher = partial(adamw_optimizer.launch_reduce, bucket_idx)
-                    comm_launchers.append(launcher)
+                    adamw_bucket_idx = adamw_param_to_bucket_idx[param]
+                    schdeuled_buckets.append(ScheduledBucket(
+                        optimizer=adamw_optimizer,
+                        bucket_idx=adamw_bucket_idx,
+                        params=bucket_params,         # list of param objects
+                    ))
                 elif optim_type == 'muon':
-                    group_idx = muon_param_to_idx[bucket_params[0]]
-                    launcher = partial(muon_optimizer.launch_reduce, group_idx)
-                    comm_launchers.append(launcher)
+                    muon_bucket_idx = muon_param_to_bucket_idx[bucket_params[0]]
+                    schdeuled_buckets.append(ScheduledBucket(
+                        optimizer=muon_optimizer,
+                        bucket_idx=muon_bucket_idx,
+                        params=bucket_params,         # list of param objects
+                    ))
 
-        param_buckets = [bucket_params for _, bucket_params in backward_collectives]
         backward_scheduler = BackwardScheduler(
-            param_buckets=param_buckets,
-            comm_launchers=comm_launchers,
+            schdeuled_buckets=schdeuled_buckets,
             backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
         )
-        
+
         # Set initial_lr in param groups for proper LR scaling
         for opt in [adamw_optimizer, muon_optimizer]:
                 for group in opt.param_groups:

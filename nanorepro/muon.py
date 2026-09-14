@@ -258,6 +258,9 @@ class DistMuon(torch.optim.Optimizer):
         self.reduce_works = [None] * len(self.param_groups)
         self.gather_works = [None] * len(self.param_groups)
 
+    def get_param_to_bucket_idx(self):
+        return {param: group_idx for group_idx, group in enumerate(self.param_groups) for param in group['params']}
+
     def get_metrics(self):
         return self.debug_stats
 

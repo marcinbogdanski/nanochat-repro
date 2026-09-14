@@ -1,49 +1,66 @@
+import torch
 import threading
 
+class ScheduledBucket:
+    def __init__(self, optimizer, bucket_idx, params):
+        assert isinstance(optimizer, torch.optim.Optimizer)
+        assert isinstance(bucket_idx, int)
+        assert isinstance(params, list) and all(isinstance(p, torch.Tensor) for p in params)
+
+        self.optim = optimizer
+        self.bucket_idx = bucket_idx
+        self.params = params
+        self.ready = [False] * len(params)
+
+    def is_ready(self):
+        return all(self.ready)
+
+    def reset(self):
+        self.ready = [False] * len(self.params)
+
 class BackwardScheduler:
-    def __init__(self, param_buckets, comm_launchers, backward_overlap):
+    def __init__(self, schdeuled_buckets, backward_overlap):
         self._backward_overlap = backward_overlap  # if False, then this class becomes no-op
         if not self._backward_overlap:
             return   # no-op if not enabled
 
-        assert len(param_buckets) == len(comm_launchers)
-        self._param_buckets = param_buckets
-        self._comm_launchers = comm_launchers
+        self._schdeuled_buckets = schdeuled_buckets
+        self._param_to_bucket_and_param_idx = {param: (bucket, p_idx) for bucket in schdeuled_buckets for p_idx, param in enumerate(bucket.params)}
         self._backward_active = False
-        self._param_group_bucket_ready = [[False] * len(bucket) for bucket in param_buckets]
-        self._next_group_to_launch = 0    # groups need to be launched in exactly same order across ranks to avoid deadlock
+        self._next_bucket_to_launch = 0    # buckets need to be launched in exactly same order across ranks to avoid deadlock
         self._backward_lock = threading.Lock()  # param hooks may run from different thread and are not guaranteed to run serially
 
         if self._backward_overlap:
-            for group_idx, bucket in enumerate(param_buckets):
-                for param_idx, param in enumerate(bucket):
-                    param.register_post_accumulate_grad_hook(self._make_backward_hook(group_idx, param_idx))
+            for bucket in self._schdeuled_buckets:
+                for param in bucket.params:
+                    param.register_post_accumulate_grad_hook(self._param_ready)
 
-    def _make_backward_hook(self, group_idx, param_idx):
-        def backward_hook(_):
-            if self._backward_active:  # only active in final grad_accum step
-                with self._backward_lock:
-                    assert not self._param_group_bucket_ready[group_idx][param_idx]
-                    self._param_group_bucket_ready[group_idx][param_idx] = True  # mark this param is ready
-                    while self._next_group_to_launch < len(self._param_buckets):
-                        if all(self._param_group_bucket_ready[self._next_group_to_launch]):  # when all params in group are ready...
-                            self._comm_launchers[self._next_group_to_launch]()                # ...launch the reduce-scatter...
-                            self._next_group_to_launch += 1                                  # ...and advance to the next group
-                        else:
-                            break
-        return backward_hook
+    def _param_ready(self, param):
+        if self._backward_active:  # only active in final grad_accum step
+            with self._backward_lock:
+                bucket, param_idx = self._param_to_bucket_and_param_idx[param]
+                assert not bucket.ready[param_idx]  # really should not be ready twice
+                bucket.ready[param_idx] = True  # mark this param is ready
+                while self._next_bucket_to_launch < len(self._schdeuled_buckets):
+                    bucket = self._schdeuled_buckets[self._next_bucket_to_launch]
+                    if bucket.is_ready():                                  # when all params in group are ready...
+                        bucket.optim.launch_reduce(bucket.bucket_idx)      # ...launch the reduce-scatter...
+                        self._next_bucket_to_launch += 1                   # ...and advance to the next group
+                    else:
+                        break
 
     def backward_overlap_begin(self):
         if not self._backward_overlap:
             return   # no-op if not enabled
         assert not self._backward_active
         self._backward_active = True
-        self._next_group_to_launch = 0
-        self._param_group_bucket_ready = [[False] * len(bucket) for bucket in self._param_buckets]
+        self._next_bucket_to_launch = 0
+        for bucket in self._schdeuled_buckets:
+            bucket.reset()
 
     def backward_overlap_end(self):
         if not self._backward_overlap:
             return   # no-op if not enabled
         assert self._backward_active
-        assert self._next_group_to_launch == len(self._param_buckets)
+        assert self._next_bucket_to_launch == len(self._schdeuled_buckets)
         self._backward_active = False

@@ -191,6 +191,9 @@ class DistAdamW(torch.optim.Optimizer):
         self.reduce_works = [None] * len(self.buckets)
         self.gather_works = [None] * len(self.buckets)
 
+    def get_param_to_bucket_idx(self):
+        return {param: bucket_idx for bucket_idx, (group, param) in enumerate(self.buckets)}
+
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         self.buckets = [(group, param) for group in self.param_groups for param in group['params']]  # rebuild on load
