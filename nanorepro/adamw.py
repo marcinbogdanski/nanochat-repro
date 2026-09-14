@@ -1,5 +1,5 @@
 import torch
-from nanorepro.nsight_trace import record_event
+from nanorepro.nsight_trace import record_event, collective_range
 
 @torch.compile(dynamic=False, fullgraph=True)
 def fused_adamw_step(
@@ -207,17 +207,17 @@ class DistAdamW(torch.optim.Optimizer):
 
         # Sync point 1
         event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
-        event_name = self.param_buffers[(group_idx,param_idx)]['param_name'] + event_suffix + ".begin"
-        record_event(event_name)  # spans launch-to-completion, includes waiting, not just NCCL comms
-        if group['is_small']:
-            self._reduce_works[(group_idx, param_idx)] = torch.distributed.all_reduce(                      # don't slice small params
-                param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-            )
-        else:
-            grad_slice = self.param_buffers[(group_idx, param_idx)]['grad_slice']
-            self._reduce_works[(group_idx, param_idx)] = torch.distributed.reduce_scatter_tensor(
-                grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-            )
+        event_name = self.param_buffers[(group_idx,param_idx)]['param_name'] + event_suffix
+        with collective_range(event_name):  # Name the collective so we can label GPU channels in post processing
+            if group['is_small']:
+                self._reduce_works[(group_idx, param_idx)] = torch.distributed.all_reduce(          # don't slice small params
+                    param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                )
+            else:
+                grad_slice = self.param_buffers[(group_idx, param_idx)]['grad_slice']
+                self._reduce_works[(group_idx, param_idx)] = torch.distributed.reduce_scatter_tensor(
+                    grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                )
 
 
     @torch.no_grad()
@@ -245,11 +245,6 @@ class DistAdamW(torch.optim.Optimizer):
                 # Wait for reduce scatter
                 self._reduce_works[(i, j)].wait()
 
-                # Record event for tracing
-                event_name = self.param_buffers[(i,j)]['param_name']
-                event_suffix = "_rs" if not group['is_small'] else "_ar"
-                record_event(event_name + event_suffix + ".end")
-
                 exp_avg = self.state[param]['exp_avg']
                 exp_avg_sq = self.state[param]['exp_avg_sq']
                 self.state[param]['step'] += 1
@@ -261,6 +256,8 @@ class DistAdamW(torch.optim.Optimizer):
                 eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
                 wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
 
+                # Record event for tracing
+                event_name = self.param_buffers[(i,j)]['param_name']
                 if not group['is_small']:
                     record_event(event_name + "_fused.begin")
                 grad_sum_squares, update_sum_squares, param_sum_squares = fused_adamw_step(
@@ -298,10 +295,10 @@ class DistAdamW(torch.optim.Optimizer):
 
                 # Sync point 2
                 if not group['is_small']:
-                    record_event(event_name + "_ag.begin")
-                    work = torch.distributed.all_gather_into_tensor(
-                        param, param_slice, async_op=True
-                    ).get_future()
+                    with collective_range(event_name + "_ag"):
+                        work = torch.distributed.all_gather_into_tensor(
+                            param, param_slice, async_op=True
+                        ).get_future()
                     gather_works[(i, j)] = work
 
         # Loop 3: Wait for all-gather
@@ -309,5 +306,3 @@ class DistAdamW(torch.optim.Optimizer):
             for j, param in enumerate(group['params']):
                 if not group['is_small']:
                     gather_works[(i, j)].wait()
-                    event_name = self.param_buffers[(i,j)]['param_name']
-                    record_event(event_name + "_ag.end")

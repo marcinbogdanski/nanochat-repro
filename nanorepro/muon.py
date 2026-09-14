@@ -1,5 +1,5 @@
 import torch
-from nanorepro.nsight_trace import record_event
+from nanorepro.nsight_trace import record_event, collective_range
 
 # From https://arxiv.org/pdf/2505.16932
 polar_express_coeffs = [
@@ -277,13 +277,13 @@ class DistMuon(torch.optim.Optimizer):
             # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
             assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][param_idx].data_ptr()
 
-        record_event(buffers['group_name'] + "_rs.begin")
-        self._reduce_works[group_idx] = torch.distributed.reduce_scatter_tensor(
-            output=buffers['grads_shard'],
-            input=buffers['grads'],
-            op=torch.distributed.ReduceOp.AVG,
-            async_op=True
-        )
+        with collective_range(buffers['group_name'] + "_rs"):    # Name the collective so we can label GPU channels in post processing
+            self._reduce_works[group_idx] = torch.distributed.reduce_scatter_tensor(
+                output=buffers['grads_shard'],
+                input=buffers['grads'],
+                op=torch.distributed.ReduceOp.AVG,
+                async_op=True
+            )
 
     @torch.no_grad()
     def step(self):
@@ -305,7 +305,6 @@ class DistMuon(torch.optim.Optimizer):
 
             # Wait for reduce-scatter
             self._reduce_works[i].wait()
-            record_event(buffers['group_name'] + "_rs.end")
 
             # Guard empty rank
             num_params_this_rank = buffers['num_local']
@@ -367,15 +366,14 @@ class DistMuon(torch.optim.Optimizer):
 
 
             # Do all-gather directly to static buffer
-            record_event(buffers['group_name'] + "_ag.begin")
-            work = torch.distributed.all_gather_into_tensor(
-                output_tensor=buffers["params"],
-                input_tensor=buffers['params_shard'],
-                async_op=True
-            )
+            with collective_range(buffers['group_name'] + "_ag"):
+                work = torch.distributed.all_gather_into_tensor(
+                    output_tensor=buffers["params"],
+                    input_tensor=buffers['params_shard'],
+                    async_op=True
+                )
             gather_works.append(work)
 
         # Loop 3: Wait for all-gather
-        for i, work in enumerate(gather_works):
+        for work in gather_works:
             work.wait()
-            record_event(self.group_buffers[i]['group_name'] + "_ag.end")

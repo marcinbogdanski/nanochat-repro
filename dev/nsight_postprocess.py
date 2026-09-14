@@ -8,6 +8,7 @@ The steps are as follows:
 - generate new "virtual" GPU-side phase spans, based on GPU-side events
 - write the augmented trace to new file: `example_nsight_gpu_spans.nsys-rep`
 - if `_ref` file exists (e.g. `nsight_trace_ref.nsys-rep`), reference phase spans will be constructed and merged to final file as well
+All SQL queries in this file are agent provided and not manually verified.
 
 See complete example:
 uv run dev/example_nsight.sh
@@ -20,6 +21,7 @@ print("                     Post-processing Nsight Systems Trace")
 print("--------------------------------------------------------------------------------")
 import os
 import sys
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -54,9 +56,9 @@ setup_nsys_writer()
 from nsys_writer import Session, TimeBase  # pyright: ignore[reportMissingImports]
 
 
-source_filename = sys.argv[1]  # e.g. example_nsight.nsys-rep
+source_filename = "nsight_trace.nsys-rep"  # sys.argv[1]  # e.g. example_nsight.nsys-rep
 source_ref_filename = source_filename.replace(".nsys-rep", "_ref.nsys-rep")
-output_filename = sys.argv[2]  # e.g. example_nsight_gpu_spans.nsys-rep
+output_filename = "nsight_trace_gpu_spans.nsys-rep"  # sys.argv[2]  # e.g. example_nsight_gpu_spans.nsys-rep
 assert source_filename.endswith(".nsys-rep"), "Source file must be an Nsight Systems report (.nsys-rep)"
 assert output_filename.endswith(".nsys-rep"), "Output file must be an Nsight Systems report (.nsys-rep)"
 
@@ -90,6 +92,187 @@ query = """
     ORDER BY cuda_event.timestamp
 """
 
+def extract_collective_rows(conn):
+    """Extract and follow path CPU range -> NCCL gropu CPU side -> GPU channels
+
+    Example usage:
+        from nanorepro.nsight_trace import collective_range 
+        ...
+        # Name the collective so we can label GPU channels in post processing
+        with collective_range("adamw_group0_param2_1024x758_rs"):
+            torch.distributed.reduce_scatter_tensor(...)
+
+    How it works at the high level:
+    - User code wraps collective launch with 'with collective_range():', as shown below
+    - The Python context manager creates NVXT CPU-side range around op launch, named 'custom_collective ...'
+    - this postprocessing function extracts those NVTX ranges and maps them to the corresponding NCCL CPU groups
+    - the NCCL CPU groups are then used to identify the corresponding GPU channels
+    - the GPU channels are then validated and combined to single GPU-side span
+
+    How this function works:
+      1) SQL query to read NVTX CPU ranges that start with 'custom_collective ...'
+      2) SQL query to read NCCL CPU groups and index them by thread_id
+      3) SQL query to read GPU channel events, group them by (process_id, communicator_hash, group_id)
+      For each NVTX range:
+        4) map the NVTX range to exactly one fully enclosed NCCL CPU group (match by thread_id and start/end times)
+           - from the enclosed NCCL CPU group, read process_id, communicator_hash, group_id and form the combined key
+        5) use the combined key (process_id, communicator_hash, group_id) to find corresponding GPU-side channels (in our case exactly two of them)
+        6) confirm that all GPU channels are consistent with the user-supplied NVTX range information
+        7) combine the GPU channels, take earliest `start_ts` and latest `end_ts` and create results begin/end rows in easy to use format
+
+    Returns GPU-side span:
+        [
+            ('custom_event rank=1 adamw_group0_param2_1024x758_rs.begin', 52423879)
+            ('custom_event rank=1 adamw_group0_param2_1024x758_rs.end', 64694354)
+        ]
+    """
+    # 1) Read CPU-side NVTX ranges that start with our marker 'custom_collective ...'.
+    # This is what our 'with collective_range():' context manager provides
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row  # Allow accessing fields by name
+    sql_rows = cursor.execute("""
+        SELECT n.start AS start_ns, n.end AS end_ns, n.globalTid AS thread_id,
+                coalesce(n.text, s.value) AS label
+        FROM NVTX_EVENTS n
+        LEFT JOIN StringIds s ON s.id = n.textId
+        WHERE coalesce(n.text, s.value) LIKE 'custom_collective rank=%'
+        ORDER BY n.start
+    """).fetchall()
+    nvtx_cpu_side_ranges = []
+    for sql_row in sql_rows:
+        nvtx_cpu_side_ranges.append({
+            'start_ns': sql_row['start_ns'],    # CPU-side range around RS/AG/AR launch site, usually very narrow
+            'end_ns': sql_row['end_ns'],
+            'thread_id': sql_row['thread_id'],  # Combined process/thread ID, e.g. 16777217; >> 24 gives process id
+            'label': sql_row['label'],          # e.g. 'custom_collective rank=0 adamw_g2_p5_32768x768_rs'.
+        })
+
+    # 2) Read CPU-side NCCL groups, then index them by CPU thread
+    # This is CPU side of NCCL CPU group, some of thest groups are narrowy wrapped by NVTX ranges above
+    sql_rows = cursor.execute("""
+        SELECT n.start AS start_ns, n.end AS end_ns, n.globalTid AS thread_id,
+               coalesce(n.jsonText, j.value) AS payload_json
+        FROM NVTX_EVENTS n
+        LEFT JOIN StringIds s ON s.id = n.textId
+        LEFT JOIN StringIds j ON j.id = n.jsonTextId
+        WHERE coalesce(n.text, s.value) = 'GroupRuntime'
+        ORDER BY n.start
+    """).fetchall()
+    thread_id_to_nccl_cpu_groups = defaultdict(list)  # dict thread_id -> group info {16777217: [{...}, {...}]}.
+    for sql_row in sql_rows:
+        # group_metadata = {'GroupId': 7}
+        # communicator = {'Hash': 42, 'Rank': 0, 'NumRanks': 2, ...}
+        group_metadata, communicator = json.loads(sql_row['payload_json'])
+        thread_id_to_nccl_cpu_groups[sql_row['thread_id']].append({
+            'start_ns': sql_row['start_ns'],            # CPU side range around collective launch
+            'end_ns': sql_row['end_ns'],
+            'group_id': group_metadata['GroupId'],      # NCCL group_id, e.g. 7.
+            'communicator_hash': communicator['Hash'],  # communication context id, e.g. 42.
+        })
+
+    # 3) Read GPU channel events, group them by (process_id, communicator_hash, group_id) so they can be mapped to CPU-side NCCL groups above
+    # These are GPU side channels, each channel including actual data transfer between ranks (and potential wait if other rank is not ready)
+    # There may be multiple channels for each NCCL group. In our case we observe exactly two.
+    sql_rows = cursor.execute("""
+        SELECT n.start AS start_ns, n.end AS end_ns, n.globalTid AS thread_id,
+               coalesce(n.text, s.value) AS operation,
+               coalesce(n.jsonText, j.value) AS payload_json
+        FROM NVTX_EVENTS n
+        LEFT JOIN StringIds s ON s.id = n.textId
+        LEFT JOIN StringIds j ON j.id = n.jsonTextId
+        WHERE json_type(coalesce(n.jsonText, j.value), '$.SeqNumber') IS NOT NULL
+          AND json_type(coalesce(n.jsonText, j.value), '$.Comm') IS NOT NULL
+        ORDER BY n.start
+    """).fetchall()
+    combined_key_to_gpu_channels = defaultdict(list)  # dict: (process_id, communicator_hash, group_id) -> [{...}, {...}]
+    for sql_row in sql_rows:
+        # Payload example: {'GroupId': 7, 'Comm': {'Hash': 42}, 'SeqNumber': 9, 'Rank': 0, 'ChannelId': 0, 'NChannels': 2, ...}.
+        payload = json.loads(sql_row['payload_json'])
+        process_id = sql_row['thread_id'] >> 24
+        communicator_hash = payload['Comm']['Hash']
+        group_id = payload['GroupId']
+        combined_key = (process_id, communicator_hash, group_id)
+        combined_key_to_gpu_channels[combined_key].append({
+            'start_ns': sql_row['start_ns'],           # actual GPU-side group boundaries
+            'end_ns': sql_row['end_ns'],
+            'operation': sql_row['operation'],         # collective name, e.g. 'ReduceScatter'.
+            'sequence_number': payload['SeqNumber'],   # collective sequence position, e.g. 9.
+            'rank': payload['Rank'],
+            'channel_id': payload['ChannelId'],        # zero-based channel index, e.g. 0.
+            'channel_count': payload['NChannels'],     # expected number of channels, e.g. 2.
+        })
+
+
+
+    # [('custom_event rank=0 adamw_g2_p5_32768x768_rs.begin', 300),
+    #  ('custom_event rank=0 adamw_g2_p5_32768x768_rs.end', 510), ...].
+    result_rows = []
+    seen_combined_keys = set()  # keep track of seen keys, so we don't double assign
+    for nvtx_range in nvtx_cpu_side_ranges:
+        # Example label: 'custom_collective rank=0 adamw_g2_p5_32768x768_rs'
+        # g2 = parameter group; p5 = parameter; 32768x768 = shape; rs = operation
+        nvtx_range_label = nvtx_range['label']
+
+        # 4) Map the NVTX range to exactly one fully enclosed NCCL CPU group (match by thread_id and start/end times)
+        matching_nccl_cpu_group = None  # {'start_ns': ..., 'end_ns': ..., 'group_id': ..., 'communicator_hash': ...}
+        for nccl_cpu_group in thread_id_to_nccl_cpu_groups[nvtx_range['thread_id']]:
+            starts_inside = nvtx_range['start_ns'] <= nccl_cpu_group['start_ns']
+            ends_inside = nccl_cpu_group['end_ns'] <= nvtx_range['end_ns']
+            if starts_inside and ends_inside:
+                if matching_nccl_cpu_group is not None:
+                    raise ValueError(f"{nvtx_range_label}: expected exactly one enclosed NCCL group")
+                matching_nccl_cpu_group = nccl_cpu_group
+        if matching_nccl_cpu_group is None:
+            raise ValueError(f"{nvtx_range_label}: could not find an enclosed NCCL CPU group")
+
+        # 5) Use combined key to find find GPU-side channels: process_id distinguishes local ranks, communicator distinguishes groups of ranks
+        process_id = nvtx_range['thread_id'] >> 24
+        communicator_hash = matching_nccl_cpu_group['communicator_hash']
+        group_id = matching_nccl_cpu_group['group_id']
+        combined_key = (process_id, communicator_hash, group_id)
+        if combined_key in seen_combined_keys:
+            raise ValueError(f"{nvtx_range_label}: GPU collective alleary assigned to another NVTX range")
+        seen_combined_keys.add(combined_key)
+        # {'start_ns': ..., 'end_ns': ..., 'operation': ..., 'sequence_number': ..., 'rank': ..., 'channel_id': ..., 'channel_count': ...}
+        gpu_channels_list = combined_key_to_gpu_channels[combined_key]
+        if not gpu_channels_list:
+            raise ValueError(f"{nvtx_range_label}: could not find matching GPU collectives")
+
+        # 6) Confirm that all GPU channels are consistent with the user-supplied NVTX range information
+        # Example label: 'custom_collective rank=0 adamw_g2_p5_32768x768_rs'
+        prefix, rank_label, bucket_name = nvtx_range_label.split()
+        user_defined_rank = int(rank_label.split('=')[1])             # e.g. 0
+        user_defined_suffix = bucket_name.rsplit('_', 1)[1]           # e.g. 'rs'
+        suffix2op = {'rs': 'ReduceScatter', 'ar': 'AllReduce', 'ag': 'AllGather'}
+        user_defined_operation = suffix2op[user_defined_suffix]       # e.g. 'ReduceScatter'
+        # Confirm all channels have the same 'sequence_number'
+        if any(gpu_channel['sequence_number'] != gpu_channels_list[0]['sequence_number'] for gpu_channel in gpu_channels_list):
+            raise ValueError(f"{nvtx_range_label}: inconsistent sequence numbers among GPU channels")
+        # Confirm all channels rank matches the user-supplied rank
+        if any(gpu_channel['rank'] != user_defined_rank for gpu_channel in gpu_channels_list):
+            raise ValueError(f"{nvtx_range_label}: GPU collective rank does not match user-supplied rank")
+        # Confirm all channels operation matches the user-supplied operation
+        if any(gpu_channel['operation'] != user_defined_operation for gpu_channel in gpu_channels_list):
+            raise ValueError(f"{nvtx_range_label}: GPU collective operation does not match user-supplied operation")
+        # Confirm that all expected GPU channels are present
+        gpu_channel_ids = [gpu_channel['channel_id'] for gpu_channel in gpu_channels_list]
+        if set(gpu_channel_ids) != set(range(gpu_channels_list[0]['channel_count'])):
+            raise ValueError(f"{nvtx_range_label}: incomplete GPU channel capture")
+
+        # 7) Combine the GPU channels, take earliest `start_ts` and latest `end_ts` and create results begin/end rows in easy to use format
+        gpu_start = min(gpu_channel['start_ns'] for gpu_channel in gpu_channels_list)
+        gpu_end = max(gpu_channel['end_ns'] for gpu_channel in gpu_channels_list)
+        result_label = f'custom_event {rank_label} {bucket_name}'
+        result_rows.append((result_label + '.begin', gpu_start))
+        result_rows.append((result_label + '.end', gpu_end))
+
+
+    if nvtx_cpu_side_ranges:
+        print(f'Mapped {len(nvtx_cpu_side_ranges)} user-supplied NVTX ranges to NCCL GPU execution channels')
+    else:
+        print("No user-supplied NVTX ranges found")
+    return result_rows
+
 
 def extract_rows(filename):
     """Extract rows from the given Nsight Systems report"""
@@ -99,12 +282,14 @@ def extract_rows(filename):
         print(f"Exporting SQLite database to: {temp_filepath}")
         args = [
             "nsys", "export", "--type=sqlite", "--force-overwrite=true", "--quiet=true",
-            f"--output={temp_filepath}", filename
+            "--include-json=true", f"--output={temp_filepath}", filename
         ]
         subprocess.run(args, check=True)
         with sqlite3.connect(temp_filepath) as conn:
-            rows = conn.execute(query).fetchall()
-            return rows
+            event_rows = conn.execute(query).fetchall()
+            collective_rows = extract_collective_rows(conn)
+            sorted_rows = sorted(event_rows + collective_rows, key=lambda row: row[1])
+            return sorted_rows
 
 
 
