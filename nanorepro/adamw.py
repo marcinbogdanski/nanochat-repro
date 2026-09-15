@@ -209,12 +209,9 @@ class DistAdamW(torch.optim.Optimizer):
         self.gather_works = [None] * len(self.buckets)
 
     @torch.no_grad()
-    def launch_reduce(self, bucket_idx, during_backward):
+    def launch_reduce(self, bucket_idx):
         assert self.reduce_works[bucket_idx] is None
         group, param = self.buckets[bucket_idx]
-
-        if during_backward and group['is_small']:
-            return  # skip launching small during backward pass, to be tested if this does anything to performance
 
         # Sync point 1
         event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
@@ -307,7 +304,7 @@ class DistAdamW(torch.optim.Optimizer):
     def launch_pending_reduces(self):
         for bucket_idx in range(len(self.buckets)):
             if self.reduce_works[bucket_idx] is None:
-                self.launch_reduce(bucket_idx, during_backward=False)  # Launch only if not launched during backward pass
+                self.launch_reduce(bucket_idx)  # Launch only if not launched during backward pass
 
     @torch.no_grad()
     def step(self):
