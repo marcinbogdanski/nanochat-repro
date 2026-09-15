@@ -1,5 +1,5 @@
 import torch
-from nanorepro.nsight_trace import record_event
+from nanorepro.nsight_trace import record_event, collective_range
 
 # From https://arxiv.org/pdf/2505.16932
 polar_express_coeffs = [
@@ -214,7 +214,8 @@ class DistMuon(torch.optim.Optimizer):
         # Initialize Static Buffers
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
-        for group_idx, group in enumerate(self.param_groups):
+        # Each param group corresponds to exactly one comms bucket, I index by bucket_idx everywhere for consistency
+        for bucket_idx, group in enumerate(self.param_groups):
             # Size and Pointer Accounting
             anchor = group['params'][0]  # shape, dtype, device
             num_params = len(group['params'])  # param objects in this group
@@ -235,7 +236,7 @@ class DistMuon(torch.optim.Optimizer):
             num_params_this_rank = min(num_params_per_rank, max(0, num_params-param_start))  # last rank may be padded
             # Group Name for Events
             shape_str = "x".join(map(str, group["params"][0].shape))
-            group_name = f"muon_g{group_idx}_{shape_str}"
+            group_name = f"muon_g{bucket_idx}_{shape_str}"
 
             self.group_buffers.append({
                 'params': params_buffer,
@@ -254,7 +255,11 @@ class DistMuon(torch.optim.Optimizer):
             else:
                 self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
 
-        self._reduce_works = [None] * len(self.param_groups)
+        self.reduce_works = [None] * len(self.param_groups)
+        self.gather_works = [None] * len(self.param_groups)
+
+    def get_param_to_bucket_idx(self):
+        return {param: group_idx for group_idx, group in enumerate(self.param_groups) for param in group['params']}
 
     def get_metrics(self):
         return self.debug_stats
@@ -265,117 +270,125 @@ class DistMuon(torch.optim.Optimizer):
         # Note calling model.zero_grad(set_to_none=True) will still set .grad = None and break things, hence assert in step()
         for buffer in self.group_buffers:
             buffer['grads'].zero_()
-        self._reduce_works = [None] * len(self.param_groups)
+        self.debug_stats = {}  # clear every step
+        self.reduce_works = [None] * len(self.param_groups)
+        self.gather_works = [None] * len(self.param_groups)
 
     @torch.no_grad()
-    def launch_reduce(self, group_idx):
-        assert self._reduce_works[group_idx] is None
+    def launch_reduce(self, bucket_idx):
+        assert self.reduce_works[bucket_idx] is None
 
-        buffers = self.group_buffers[group_idx]
-        group = self.param_groups[group_idx]
+        buffers = self.group_buffers[bucket_idx]
+        group = self.param_groups[bucket_idx]
         for param_idx, param in enumerate(group["params"]):
             # Calling model.zero_grad(set_to_none=True) will set .grad=None and break static buffers, so we guard explicitly
             assert param.grad is not None and param.grad.data_ptr() == buffers['grads'][param_idx].data_ptr()
 
-        record_event(buffers['group_name'] + "_rs.begin")
-        self._reduce_works[group_idx] = torch.distributed.reduce_scatter_tensor(
-            output=buffers['grads_shard'],
-            input=buffers['grads'],
-            op=torch.distributed.ReduceOp.AVG,
-            async_op=True
-        )
+        with collective_range(buffers['group_name'] + "_rs"):    # Name the collective so we can label GPU channels in post processing
+            self.reduce_works[bucket_idx] = torch.distributed.reduce_scatter_tensor(
+                output=buffers['grads_shard'],
+                input=buffers['grads'],
+                op=torch.distributed.ReduceOp.AVG,
+                async_op=True
+            )
 
     @torch.no_grad()
-    def step(self):
-        assert all(p.grad is not None for group in self.param_groups for p in group["params"])
-        self.debug_stats = {}  # clear every step
+    def bucket_step(self, bucket_idx):
+        assert self.gather_works[bucket_idx] is None
+        buffers = self.group_buffers[bucket_idx]
+        group = self.param_groups[bucket_idx]
+        anchor = group['params'][0]  # shape, dtype, device
 
-        # Loop 1: Launch reduce-scatter
-        # - backward overlap enabled: RS is launched from param hooks during backward and loop 1 is no-op
-        # - backward overlap disabled: loop 1 is launching comms as usual
-        for group_idx in range(len(self.param_groups)):
-            if self._reduce_works[group_idx] is None:
-                self.launch_reduce(group_idx)
+        # Wait for reduce-scatter
+        self.reduce_works[bucket_idx].wait()
 
-        # Loop 2: Step and launch all-gather
-        gather_works = []
-        for i, group in enumerate(self.param_groups):
-            buffers = self.group_buffers[i]
-            anchor = group['params'][0]  # shape, dtype, device
+        # Guard empty rank
+        num_params_this_rank = buffers['num_local']
+        if num_params_this_rank > 0:
 
-            # Wait for reduce-scatter
-            self._reduce_works[i].wait()
-            record_event(buffers['group_name'] + "_rs.end")
+            # Update LR/beta2
+            lr = group['lr'] * (max(1, anchor.size(-2) / anchor.size(-1)))**0.5
+            beta2 = group['beta2'] if group['beta2'] is not None else 0.0
 
-            # Guard empty rank
-            num_params_this_rank = buffers['num_local']
-            if num_params_this_rank > 0:
+            # 0-D CPU tensors to avoid re-compilation when values change
+            lr = torch.tensor(lr, device='cpu', dtype=torch.float32)
+            momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
+            wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
+            beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
 
-                # Update LR/beta2
-                lr = group['lr'] * (max(1, anchor.size(-2) / anchor.size(-1)))**0.5
-                beta2 = group['beta2'] if group['beta2'] is not None else 0.0
+            # Fused Kernel
+            record_event(buffers['group_name'] + "_fused.begin")
+            grad_sum_squares, update_sum_squares, params_sum_squares = fused_muon_step(
+                params=buffers['params_shard'][:num_params_this_rank],
+                grad=buffers['grads_shard'][:num_params_this_rank],
+                momentum_buffer=self.state[anchor]['momentum_buffer'][:num_params_this_rank],
+                momentum_buffer2=self.state[anchor]['momentum_buffer2'][:num_params_this_rank],
+                lr=lr,
+                momentum=momentum,
+                wd=wd,
+                beta2=beta2,
+                steps=group['ns_steps'],
+                compute_dtype=self.compute_dtype,
+                metrics=self.enable_metrics,
+            )
+            record_event(buffers['group_name'] + "_fused.end")
 
-                # 0-D CPU tensors to avoid re-compilation when values change
-                lr = torch.tensor(lr, device='cpu', dtype=torch.float32)
-                momentum = torch.tensor(group['momentum'], device='cpu', dtype=torch.float32)
-                wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
-                beta2 = torch.tensor(beta2, device='cpu', dtype=torch.float32)
-
-                # Fused Kernel
-                record_event(buffers['group_name'] + "_fused.begin")
-                grad_sum_squares, update_sum_squares, params_sum_squares = fused_muon_step(
-                    params=buffers['params_shard'][:num_params_this_rank],
-                    grad=buffers['grads_shard'][:num_params_this_rank],
-                    momentum_buffer=self.state[anchor]['momentum_buffer'][:num_params_this_rank],
-                    momentum_buffer2=self.state[anchor]['momentum_buffer2'][:num_params_this_rank],
-                    lr=lr,
-                    momentum=momentum,
-                    wd=wd,
-                    beta2=beta2,
-                    steps=group['ns_steps'],
-                    compute_dtype=self.compute_dtype,
-                    metrics=self.enable_metrics,
-                )
-                record_event(buffers['group_name'] + "_fused.end")
-
-                # Collect Metrics
-                if self.enable_metrics:
-                    none_list = [None] * num_params_this_rank
-                    grad_sum_squares = grad_sum_squares.cpu().numpy() if grad_sum_squares is not None else none_list
-                    update_sum_squares = update_sum_squares.cpu().numpy() if update_sum_squares is not None else none_list
-                    params_sum_squares = params_sum_squares.cpu().numpy() if params_sum_squares is not None else none_list
-                    idx_start = buffers['param_start']
-                    owned_params = group['params'][idx_start:idx_start+num_params_this_rank]
-                    for jj, param in enumerate(owned_params):
-                        self.debug_stats[param] = {
-                            'grad_sq_sum': float(grad_sum_squares[jj]),  # np.float32 -> float
-                            'update_sq_sum': float(update_sum_squares[jj]),
-                            'params_sq_sum': float(params_sum_squares[jj]),
-                            'params_num_el': param.numel(),
-                        }
-
-            # All metrics are sum-reduced across ranks, so fill with zeros to be explicit
+            # Collect Metrics
             if self.enable_metrics:
-                for p in group['params']:
-                    if p not in self.debug_stats:
-                        self.debug_stats[p] = {
-                            'grad_sq_sum': 0.0,
-                            'update_sq_sum': 0.0,
-                            'params_sq_sum': 0.0,
-                            'params_num_el': 0,
-                        }
+                none_list = [None] * num_params_this_rank
+                grad_sum_squares = grad_sum_squares.cpu().numpy() if grad_sum_squares is not None else none_list
+                update_sum_squares = update_sum_squares.cpu().numpy() if update_sum_squares is not None else none_list
+                params_sum_squares = params_sum_squares.cpu().numpy() if params_sum_squares is not None else none_list
+                idx_start = buffers['param_start']
+                owned_params = group['params'][idx_start:idx_start+num_params_this_rank]
+                for jj, param in enumerate(owned_params):
+                    self.debug_stats[param] = {
+                        'grad_sq_sum': float(grad_sum_squares[jj]),  # np.float32 -> float
+                        'update_sq_sum': float(update_sum_squares[jj]),
+                        'params_sq_sum': float(params_sum_squares[jj]),
+                        'params_num_el': param.numel(),
+                    }
 
+        # All metrics are sum-reduced across ranks, so fill with zeros to be explicit
+        if self.enable_metrics:
+            for p in group['params']:
+                if p not in self.debug_stats:
+                    self.debug_stats[p] = {
+                        'grad_sq_sum': 0.0,
+                        'update_sq_sum': 0.0,
+                        'params_sq_sum': 0.0,
+                        'params_num_el': 0,
+                    }
 
-            # Do all-gather directly to static buffer
-            record_event(buffers['group_name'] + "_ag.begin")
-            work = torch.distributed.all_gather_into_tensor(
+        # Do all-gather directly to static buffer
+        with collective_range(buffers['group_name'] + "_ag"):
+            self.gather_works[bucket_idx] = torch.distributed.all_gather_into_tensor(
                 output_tensor=buffers["params"],
                 input_tensor=buffers['params_shard'],
                 async_op=True
             )
-            gather_works.append(work)
+
+    @torch.no_grad()
+    def wait_gather(self, bucket_idx):
+        self.gather_works[bucket_idx].wait()
+
+    @torch.no_grad()
+    def launch_pending_reduces(self):
+        for bucket_idx in range(len(self.param_groups)):
+            if self.reduce_works[bucket_idx] is None:
+                self.launch_reduce(bucket_idx)  # Launch only if not launched during backward pass
+
+    @torch.no_grad()
+    def step(self):
+        assert all(p.grad is not None for group in self.param_groups for p in group["params"])
+
+        # Loop 1: Launch reduce-scatter
+        self.launch_pending_reduces()
+
+        # Loop 2: Step and launch all-gather
+        for bucket_idx in range(len(self.param_groups)):
+            self.bucket_step(bucket_idx)
 
         # Loop 3: Wait for all-gather
-        for i, work in enumerate(gather_works):
-            work.wait()
-            record_event(self.group_buffers[i]['group_name'] + "_ag.end")
+        for bucket_idx in range(len(self.param_groups)):
+            self.wait_gather(bucket_idx)

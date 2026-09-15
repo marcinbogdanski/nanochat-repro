@@ -28,12 +28,20 @@ Furthermore, because record_event() is not reliable when used inside compiled re
 we need to call these additional record_event() from the outside of the compiled regions (before forward() and after backward() ).
 """
 import os
+from contextlib import nullcontext
 import torch
 
 _TRACE_ENABLED = os.environ.get("NANOREPRO_TRACE", "").lower() in {"1", "true", "yes", "on"}
 
 def is_trace_enabled():
     return _TRACE_ENABLED
+
+def collective_range(name):
+    """Wrap CPU collevtive launch, so postprocessing can find it and map to NCCL GPU spans."""
+    if not _TRACE_ENABLED:
+        return nullcontext()
+    rank = torch.distributed.get_rank()
+    return torch.cuda.nvtx.range(f"custom_collective rank={rank} {name}")
 
 def record_event(name):
     """Create a wrapped CUDA event, allowing us to tie a "name" to the event later.

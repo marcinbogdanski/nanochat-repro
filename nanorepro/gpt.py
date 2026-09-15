@@ -7,7 +7,7 @@ from nanorepro.moe import MoE
 from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
-from nanorepro.backward_scheduler import BackwardScheduler
+from nanorepro.backward_scheduler import BackwardScheduler, ScheduledBucket
 from nanorepro.nsight_trace import clone_boundary
 
 class GPTConfig:
@@ -427,8 +427,10 @@ class GPTModel(nn.Module):
         """Manually build comms buckets in backward pass order."""
 
         # Construct the list of non-small params in backward order.
-        # I omit small params because as they are.. well, small and i expect not much to gain from backward overlapping them. Did not test.
-        backward_params = [self.lm_head.weight]
+        backward_params = [
+            self.lm_head.weight,
+            self.backout_lambda,   # output blending, just before lm_head in forward; is_small=True
+        ]
         for layer_idx in reversed(range(self.config.n_layer)):
             block = self.transformer.h[layer_idx]
             if isinstance(block.mlp, MLP):
@@ -453,7 +455,15 @@ class GPTModel(nn.Module):
                 backward_params.append(block.attn.ve_gate.weight)
             if str(layer_idx) in self.value_embeds:
                 backward_params.append(self.value_embeds[str(layer_idx)].weight)
-        backward_params.append(self.transformer.wte.weight)
+
+        # In forward, first contribution of either of these is before first transformer block so in backward they go last
+        backward_params.extend([
+            self.x0_lambdas,
+            self.resid_lambdas,
+            self.smear_lambda,
+            self.smear_gate.weight,
+            self.transformer.wte.weight
+        ])
 
         params_matrix = set(params_matrix)
         muon_params_in_bwd_order = [p for p in backward_params if p in params_matrix]
@@ -519,7 +529,7 @@ class GPTModel(nn.Module):
         # backward_collectives = [('adamw', [param]), ('muon', [param, param], ...]
         backward_collectives = self._build_backward_collectives(params_matrix, muon_params_per_bucket)
         scheduled_params = [param for _, bucket_params in backward_collectives for param in bucket_params]
-        expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router
+        expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router + params_resid + params_x0 + smear_backout_params
         assert len(scheduled_params) == len(expected_params) and set(scheduled_params) == set(expected_params)
 
         # Muon Groups
@@ -544,29 +554,34 @@ class GPTModel(nn.Module):
             enable_metrics=enable_metrics,
         )
 
-        adamw_param_to_idx = {param: (i, j) for i, group in enumerate(adamw_optimizer.param_groups) for j, param in enumerate(group['params'])}
-        muon_param_to_idx = {param: group_idx for group_idx, group in enumerate(muon_optimizer.param_groups) for param in group['params']}
-        comm_launchers = []
+        schdeuled_buckets = []
         if ddp:
+            adamw_param_to_bucket_idx = adamw_optimizer.get_param_to_bucket_idx()
+            muon_param_to_bucket_idx = muon_optimizer.get_param_to_bucket_idx()
             for param_bucket in backward_collectives:
                 optim_type, bucket_params = param_bucket
                 if optim_type == 'adamw':
                     param = bucket_params[0]  # single param per adamw bucket
-                    group_idx, param_idx = adamw_param_to_idx[param]
-                    launcher = partial(adamw_optimizer.launch_reduce, group_idx, param_idx)
-                    comm_launchers.append(launcher)
+                    adamw_bucket_idx = adamw_param_to_bucket_idx[param]
+                    schdeuled_buckets.append(ScheduledBucket(
+                        optimizer=adamw_optimizer,
+                        bucket_idx=adamw_bucket_idx,
+                        params=bucket_params,         # list of param objects
+                    ))
                 elif optim_type == 'muon':
-                    group_idx = muon_param_to_idx[bucket_params[0]]
-                    launcher = partial(muon_optimizer.launch_reduce, group_idx)
-                    comm_launchers.append(launcher)
+                    muon_bucket_idx = muon_param_to_bucket_idx[bucket_params[0]]
+                    schdeuled_buckets.append(ScheduledBucket(
+                        optimizer=muon_optimizer,
+                        bucket_idx=muon_bucket_idx,
+                        params=bucket_params,         # list of param objects
+                    ))
 
-        param_buckets = [bucket_params for _, bucket_params in backward_collectives]
         backward_scheduler = BackwardScheduler(
-            param_buckets=param_buckets,
-            comm_launchers=comm_launchers,
+            schdeuled_buckets=schdeuled_buckets,
             backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
+            optimizers=[adamw_optimizer, muon_optimizer]
         )
-        
+
         # Set initial_lr in param groups for proper LR scaling
         for opt in [adamw_optimizer, muon_optimizer]:
                 for group in opt.param_groups:

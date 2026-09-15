@@ -1,5 +1,5 @@
 import torch
-from nanorepro.nsight_trace import record_event
+from nanorepro.nsight_trace import record_event, collective_range
 
 @torch.compile(dynamic=False, fullgraph=True)
 def fused_adamw_step(
@@ -152,11 +152,15 @@ class DistAdamW(torch.optim.Optimizer):
         super().__init__(params, defaults)
         self.enable_metrics = enable_metrics
         self.debug_stats = {}    # metrics, if enabled
-        self.param_buffers = {}  # (group_idx, param_idx) -> grad_slice for large params, etc
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
+
+        # Map to flat array, so we launch_reduce(), bucket_step() and wait_gather() can address by single bucket_idx
+        self.buckets = [(group, param) for group in self.param_groups for param in group['params']]
 
         # Init Momentum Buffers
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        self.param_buffers = []  # bucket_idx -> grad_slice for large params, etc
+        bucket_idx = 0
         for group_idx, group in enumerate(self.param_groups):
             for param_idx, param in enumerate(group['params']):
                 if group['is_small']:
@@ -172,22 +176,27 @@ class DistAdamW(torch.optim.Optimizer):
                     param_slice = param[slice_start:slice_end]
                 shape_str = "x".join(map(str, param.shape))
                 param_name = f"adamw_g{group_idx}_p{param_idx}_{shape_str}"   # g=group, p=param
-                self.param_buffers[(group_idx, param_idx)] = {
+                self.param_buffers.append({
                     'grad_slice': grad_slice,
                     'param_name': param_name,
                     'param_slice': param_slice,
-                }
+                })
                 self.state[param] = {
                     'step': 0,
                     'exp_avg': torch.zeros_like(param[:slice_width]),
                     'exp_avg_sq': torch.zeros_like(param[:slice_width]),
                 }
+                bucket_idx += 1
 
-        self._reduce_works = {}
-        for group_idx, group in enumerate(self.param_groups):
-            for param_idx, param in enumerate(group['params']):
-                self._reduce_works[group_idx, param_idx] = None
+        self.reduce_works = [None] * len(self.buckets)
+        self.gather_works = [None] * len(self.buckets)
 
+    def get_param_to_bucket_idx(self):
+        return {param: bucket_idx for bucket_idx, (group, param) in enumerate(self.buckets)}
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        self.buckets = [(group, param) for group in self.param_groups for param in group['params']]  # rebuild on load
 
     def get_metrics(self):
         return self.debug_stats
@@ -195,119 +204,119 @@ class DistAdamW(torch.optim.Optimizer):
     @torch.no_grad()
     def zero_grad(self, set_to_none=True):
         super().zero_grad(set_to_none=set_to_none)
-        for key in self._reduce_works:
-            self._reduce_works[key] = None
+        self.debug_stats = {}  # clear every step
+        self.reduce_works = [None] * len(self.buckets)
+        self.gather_works = [None] * len(self.buckets)
 
     @torch.no_grad()
-    def launch_reduce(self, group_idx, param_idx):
-        assert self._reduce_works[(group_idx, param_idx)] is None
-
-        group = self.param_groups[group_idx]
-        param = group['params'][param_idx]
+    def launch_reduce(self, bucket_idx):
+        assert self.reduce_works[bucket_idx] is None
+        group, param = self.buckets[bucket_idx]
 
         # Sync point 1
         event_suffix = "_rs" if not group['is_small'] else "_ar"  # _rs for reduce_scatter, _ar for all_reduce
-        event_name = self.param_buffers[(group_idx,param_idx)]['param_name'] + event_suffix + ".begin"
-        record_event(event_name)  # spans launch-to-completion, includes waiting, not just NCCL comms
-        if group['is_small']:
-            self._reduce_works[(group_idx, param_idx)] = torch.distributed.all_reduce(                      # don't slice small params
-                param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-            )
-        else:
-            grad_slice = self.param_buffers[(group_idx, param_idx)]['grad_slice']
-            self._reduce_works[(group_idx, param_idx)] = torch.distributed.reduce_scatter_tensor(
-                grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
-            )
+        event_name = self.param_buffers[bucket_idx]['param_name'] + event_suffix
+        with collective_range(event_name):  # Name the collective so we can label GPU channels in post processing
+            if group['is_small']:
+                self.reduce_works[bucket_idx] = torch.distributed.all_reduce(          # don't slice small params
+                    param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                )
+            else:
+                grad_slice = self.param_buffers[bucket_idx]['grad_slice']
+                self.reduce_works[bucket_idx] = torch.distributed.reduce_scatter_tensor(
+                    grad_slice, param.grad, op=torch.distributed.ReduceOp.AVG, async_op=True
+                )
 
+    @torch.no_grad()
+    def bucket_step(self, bucket_idx):
+        rank = torch.distributed.get_rank()
+        group, param = self.buckets[bucket_idx]
+        grad_slice = self.param_buffers[bucket_idx]['grad_slice']
+        grad_slice = grad_slice if grad_slice is not None else param.grad
+        param_slice = self.param_buffers[bucket_idx]['param_slice']
+
+        # Wait for reduce scatter
+        self.reduce_works[bucket_idx].wait()
+
+        exp_avg = self.state[param]['exp_avg']
+        exp_avg_sq = self.state[param]['exp_avg_sq']
+        self.state[param]['step'] += 1
+
+        step = torch.tensor(self.state[param]['step'], device='cpu', dtype=torch.float32)
+        lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
+        beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
+        beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
+        eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
+        wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
+
+        # Record event for tracing
+        event_name = self.param_buffers[bucket_idx]['param_name']
+        if not group['is_small']:
+            record_event(event_name + "_fused.begin")
+        grad_sum_squares, update_sum_squares, param_sum_squares = fused_adamw_step(
+            params=param_slice,
+            grad=grad_slice,
+            exp_avg=exp_avg,
+            exp_avg_sq=exp_avg_sq,
+            step=step,
+            lr=lr,
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
+            wd=wd,
+            metrics=self.enable_metrics,
+        )
+        if self.enable_metrics:
+            grad_sum_squares = grad_sum_squares.item() if grad_sum_squares is not None else None
+            update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
+            param_sum_squares = param_sum_squares.item() if param_sum_squares is not None else None
+            param_num_el = grad_slice.numel()
+            if rank != 0 and group['is_small']:
+                # For small param, rank 0 has the full param and grad, zero other ranks to avoid duplication
+                grad_sum_squares = 0.0
+                update_sum_squares = 0.0
+                param_sum_squares = 0.0
+                param_num_el = 0
+            self.debug_stats[param] = {
+                'grad_sq_sum': grad_sum_squares,
+                'update_sq_sum': update_sum_squares,
+                'params_sq_sum': param_sum_squares,
+                'params_num_el': param_num_el,
+            }
+        if not group['is_small']:
+            record_event(event_name + "_fused.end")
+
+        # Sync point 2
+        if not group['is_small']:
+            with collective_range(event_name + "_ag"):
+                work = torch.distributed.all_gather_into_tensor(
+                    param, param_slice, async_op=True
+                ).get_future()
+            self.gather_works[bucket_idx] = work
+
+    @torch.no_grad()
+    def wait_gather(self, bucket_idx):
+        group, param = self.buckets[bucket_idx]
+        if not group['is_small']:
+            self.gather_works[bucket_idx].wait()
+
+    @torch.no_grad()
+    def launch_pending_reduces(self):
+        for bucket_idx in range(len(self.buckets)):
+            if self.reduce_works[bucket_idx] is None:
+                self.launch_reduce(bucket_idx)  # Launch only if not launched during backward pass
 
     @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
-        rank = torch.distributed.get_rank()
-        self.debug_stats = {}  # clear every step
 
         # Loop 1: Launch reduce-scatter
-        # - backward overlap enabled: launch all-reduce for small params only. reduce-scatters are launched from param hooks during backward
-        # - backward overlap disabled: loop 1 is launching all the comms as usual
-        for i, group in enumerate(self.param_groups):
-            for j, param in enumerate(group['params']):
-                if self._reduce_works[(i, j)] is None:
-                    self.launch_reduce(i, j)
+        self.launch_pending_reduces()
 
         # Loop 2: Step and launch all-gather
-        gather_works = {}
-        for i, group in enumerate(self.param_groups):
-            for j, param in enumerate(group['params']):
-                grad_slice = self.param_buffers[(i, j)]['grad_slice']
-                grad_slice = grad_slice if grad_slice is not None else param.grad
-                param_slice = self.param_buffers[(i,j)]['param_slice']
-
-                # Wait for reduce scatter
-                self._reduce_works[(i, j)].wait()
-
-                # Record event for tracing
-                event_name = self.param_buffers[(i,j)]['param_name']
-                event_suffix = "_rs" if not group['is_small'] else "_ar"
-                record_event(event_name + event_suffix + ".end")
-
-                exp_avg = self.state[param]['exp_avg']
-                exp_avg_sq = self.state[param]['exp_avg_sq']
-                self.state[param]['step'] += 1
-
-                step = torch.tensor(self.state[param]['step'], device='cpu', dtype=torch.float32)
-                lr = torch.tensor(group['lr'], device='cpu', dtype=torch.float32)
-                beta1 = torch.tensor(group['betas'][0], device='cpu', dtype=torch.float32)
-                beta2 = torch.tensor(group['betas'][1], device='cpu', dtype=torch.float32)
-                eps = torch.tensor(group['eps'], device='cpu', dtype=torch.float32)
-                wd = torch.tensor(group['weight_decay'], device='cpu', dtype=torch.float32)
-
-                if not group['is_small']:
-                    record_event(event_name + "_fused.begin")
-                grad_sum_squares, update_sum_squares, param_sum_squares = fused_adamw_step(
-                    params=param_slice,
-                    grad=grad_slice,
-                    exp_avg=exp_avg,
-                    exp_avg_sq=exp_avg_sq,
-                    step=step,
-                    lr=lr,
-                    beta1=beta1,
-                    beta2=beta2,
-                    eps=eps,
-                    wd=wd,
-                    metrics=self.enable_metrics,
-                )
-                if self.enable_metrics:
-                    grad_sum_squares = grad_sum_squares.item() if grad_sum_squares is not None else None
-                    update_sum_squares = update_sum_squares.item() if update_sum_squares is not None else None
-                    param_sum_squares = param_sum_squares.item() if param_sum_squares is not None else None
-                    param_num_el = grad_slice.numel()
-                    if rank != 0 and group['is_small']:
-                        # For small param, rank 0 has the full param and grad, zero other ranks to avoid duplication
-                        grad_sum_squares = 0.0
-                        update_sum_squares = 0.0
-                        param_sum_squares = 0.0
-                        param_num_el = 0
-                    self.debug_stats[param] = {
-                        'grad_sq_sum': grad_sum_squares,
-                        'update_sq_sum': update_sum_squares,
-                        'params_sq_sum': param_sum_squares,
-                        'params_num_el': param_num_el,
-                    }
-                if not group['is_small']:
-                    record_event(event_name + "_fused.end")
-
-                # Sync point 2
-                if not group['is_small']:
-                    record_event(event_name + "_ag.begin")
-                    work = torch.distributed.all_gather_into_tensor(
-                        param, param_slice, async_op=True
-                    ).get_future()
-                    gather_works[(i, j)] = work
+        for bucket_idx in range(len(self.buckets)):
+            self.bucket_step(bucket_idx)
 
         # Loop 3: Wait for all-gather
-        for i, group in enumerate(self.param_groups):
-            for j, param in enumerate(group['params']):
-                if not group['is_small']:
-                    gather_works[(i, j)].wait()
-                    event_name = self.param_buffers[(i,j)]['param_name']
-                    record_event(event_name + "_ag.end")
+        for bucket_idx in range(len(self.buckets)):
+            self.wait_gather(bucket_idx)
