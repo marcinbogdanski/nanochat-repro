@@ -1,5 +1,13 @@
 # Assorted Development Notes
 
+## 2026.09.15 - Backward Overlap 2
+
+Interleave AdamW/Muon compute steps and all-gather operations in backaward order. Previously AdamW went first, then Muon after. Also refactor optimizers and backward scheduler for general sanity.
+
+Repeated tests (`966f28da`, depth 20, 4x3090 @1500MHz, BF16/FA3, device batch 8, GA16) show no measurable speedup. Tested both cases: is_small params retained till after backward, and is_small included in backward overlap - no measureable difference either.
+
+The Nsight traces at the d20 show a tail of ~789ms all-gethers after final optimizer compute step. Part of this could be hidden under next-step forward pass, but at this config the single forward GA pass is only 300ms (~1.9% of full step time of ~15.8s), serving as an optimistic ceiling of potential gain if implemented.
+
 ## 2026.09.13 - 2x 5060 Ti Migration
 
 Switching to `kernels-community/flash-attn2` as the new default on consumer cards.

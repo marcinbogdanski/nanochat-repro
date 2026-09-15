@@ -427,7 +427,6 @@ class GPTModel(nn.Module):
         """Manually build comms buckets in backward pass order."""
 
         # Construct the list of non-small params in backward order.
-        # I omit small params because as they are.. well, small and i expect not much to gain from backward overlapping them. Did not test.
         backward_params = [
             self.lm_head.weight,
             self.backout_lambda,   # output blending, just before lm_head in forward; is_small=True
