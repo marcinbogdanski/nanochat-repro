@@ -19,8 +19,9 @@ class ScheduledBucket:
         self.ready = [False] * len(self.params)
 
 class BackwardScheduler:
-    def __init__(self, schdeuled_buckets, backward_overlap):
+    def __init__(self, schdeuled_buckets, backward_overlap, optimizers):
         self._backward_overlap = backward_overlap  # if False, then this class becomes no-op
+        self._optimizers = optimizers
         if not self._backward_overlap:
             return   # no-op if not enabled
 
@@ -43,9 +44,9 @@ class BackwardScheduler:
                 bucket.ready[param_idx] = True  # mark this param is ready
                 while self._next_bucket_to_launch < len(self._schdeuled_buckets):
                     bucket = self._schdeuled_buckets[self._next_bucket_to_launch]
-                    if bucket.is_ready():                                  # when all params in group are ready...
-                        bucket.optim.launch_reduce(bucket.bucket_idx)      # ...launch the reduce-scatter...
-                        self._next_bucket_to_launch += 1                   # ...and advance to the next group
+                    if bucket.is_ready():                                                    # when all params in group are ready...
+                        bucket.optim.launch_reduce(bucket.bucket_idx, during_backward=True)  # ...launch the reduce-scatter...
+                        self._next_bucket_to_launch += 1                                     # ...and advance to the next group
                     else:
                         break
 
@@ -64,3 +65,17 @@ class BackwardScheduler:
         assert self._backward_active
         assert self._next_bucket_to_launch == len(self._schdeuled_buckets)
         self._backward_active = False
+
+    def step_optimizers(self):
+        if not self._backward_overlap:
+            # Fall back to old logic
+            for optimizer in self._optimizers:
+                optimizer.step()
+        else:
+            # Launch optimizer operations in backward order across the optimizers
+            for optimizer in self._optimizers:
+                optimizer.launch_pending_reduces()
+            for bucket in self._schdeuled_buckets:
+                bucket.optim.bucket_step(bucket.bucket_idx)
+            for bucket in self._schdeuled_buckets:
+                bucket.optim.wait_gather(bucket.bucket_idx)

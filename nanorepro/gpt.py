@@ -428,7 +428,10 @@ class GPTModel(nn.Module):
 
         # Construct the list of non-small params in backward order.
         # I omit small params because as they are.. well, small and i expect not much to gain from backward overlapping them. Did not test.
-        backward_params = [self.lm_head.weight]
+        backward_params = [
+            self.lm_head.weight,
+            self.backout_lambda,   # output blending, just before lm_head in forward; is_small=True
+        ]
         for layer_idx in reversed(range(self.config.n_layer)):
             block = self.transformer.h[layer_idx]
             if isinstance(block.mlp, MLP):
@@ -453,7 +456,15 @@ class GPTModel(nn.Module):
                 backward_params.append(block.attn.ve_gate.weight)
             if str(layer_idx) in self.value_embeds:
                 backward_params.append(self.value_embeds[str(layer_idx)].weight)
-        backward_params.append(self.transformer.wte.weight)
+
+        # In forward, first contribution of either of these is before first transformer block so in backward they go last
+        backward_params.extend([
+            self.x0_lambdas,
+            self.resid_lambdas,
+            self.smear_lambda,
+            self.smear_gate.weight,
+            self.transformer.wte.weight
+        ])
 
         params_matrix = set(params_matrix)
         muon_params_in_bwd_order = [p for p in backward_params if p in params_matrix]
@@ -519,7 +530,7 @@ class GPTModel(nn.Module):
         # backward_collectives = [('adamw', [param]), ('muon', [param, param], ...]
         backward_collectives = self._build_backward_collectives(params_matrix, muon_params_per_bucket)
         scheduled_params = [param for _, bucket_params in backward_collectives for param in bucket_params]
-        expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router
+        expected_params = params_matrix + params_lm_head + params_embedding + params_val_embds + params_router + params_resid + params_x0 + smear_backout_params
         assert len(scheduled_params) == len(expected_params) and set(scheduled_params) == set(expected_params)
 
         # Muon Groups
@@ -569,6 +580,7 @@ class GPTModel(nn.Module):
         backward_scheduler = BackwardScheduler(
             schdeuled_buckets=schdeuled_buckets,
             backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
+            optimizers=[adamw_optimizer, muon_optimizer]
         )
 
         # Set initial_lr in param groups for proper LR scaling

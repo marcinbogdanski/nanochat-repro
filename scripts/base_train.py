@@ -517,12 +517,9 @@ def main():
         model.zero_moe_counters()
 
         # Optimizer Step
-        record_event("adamw.begin")
-        adamw_optim.step()
-        record_event("adamw.end")
-        record_event("muon.begin")
-        muon_optim.step()
-        record_event("muon.end")
+        record_event("optim.begin")
+        backward_scheduler.step_optimizers()
+        record_event("optim.end")
 
         # Loss sync
         if torch.distributed.is_initialized():

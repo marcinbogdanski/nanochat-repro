@@ -56,9 +56,9 @@ setup_nsys_writer()
 from nsys_writer import Session, TimeBase  # pyright: ignore[reportMissingImports]
 
 
-source_filename = "nsight_trace.nsys-rep"  # sys.argv[1]  # e.g. example_nsight.nsys-rep
+source_filename = sys.argv[1]  # e.g. example_nsight.nsys-rep
 source_ref_filename = source_filename.replace(".nsys-rep", "_ref.nsys-rep")
-output_filename = "nsight_trace_gpu_spans.nsys-rep"  # sys.argv[2]  # e.g. example_nsight_gpu_spans.nsys-rep
+output_filename = sys.argv[2]  # e.g. example_nsight_gpu_spans.nsys-rep
 assert source_filename.endswith(".nsys-rep"), "Source file must be an Nsight Systems report (.nsys-rep)"
 assert output_filename.endswith(".nsys-rep"), "Output file must be an Nsight Systems report (.nsys-rep)"
 
@@ -331,7 +331,7 @@ def get_color(name):
         return "#4CAF50"
     elif "backward" in name:
         return "#41C4D5"
-    elif "optimizer" in name:
+    elif "optimizer" in name or "optim" in name:
         return "#EDF461"
     elif "adamw" in name:
         if "_rs" in name or "_ar" in name:  # initial reduce-scatter or all-reduce

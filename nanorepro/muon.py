@@ -275,7 +275,7 @@ class DistMuon(torch.optim.Optimizer):
         self.gather_works = [None] * len(self.param_groups)
 
     @torch.no_grad()
-    def launch_reduce(self, bucket_idx):
+    def launch_reduce(self, bucket_idx, during_backward):
         assert self.reduce_works[bucket_idx] is None
 
         buffers = self.group_buffers[bucket_idx]
@@ -373,13 +373,17 @@ class DistMuon(torch.optim.Optimizer):
         self.gather_works[bucket_idx].wait()
 
     @torch.no_grad()
+    def launch_pending_reduces(self):
+        for bucket_idx in range(len(self.param_groups)):
+            if self.reduce_works[bucket_idx] is None:
+                self.launch_reduce(bucket_idx, during_backward=False)  # Launch only if not launched during backward pass
+
+    @torch.no_grad()
     def step(self):
         assert all(p.grad is not None for group in self.param_groups for p in group["params"])
 
         # Loop 1: Launch reduce-scatter
-        for bucket_idx in range(len(self.param_groups)):
-            if self.reduce_works[bucket_idx] is None:
-                self.launch_reduce(bucket_idx)  # Launch only if not launched during backward pass
+        self.launch_pending_reduces()
 
         # Loop 2: Step and launch all-gather
         for bucket_idx in range(len(self.param_groups)):
