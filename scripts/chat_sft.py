@@ -427,9 +427,8 @@ def main():
         if last_step:
             print0("Saving model...")
             loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
-            print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
-            file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
+            checkpoint_md5sum, optim_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
+            file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum, 'optim_md5sum': optim_md5sum})
 
         # Exit Condition
         if last_step:

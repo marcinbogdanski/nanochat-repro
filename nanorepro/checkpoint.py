@@ -7,6 +7,7 @@ from nanorepro.gpt import GPTModel, GPTConfig
 def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, user_config, training_hyperparameters):
     os.makedirs(checkpoints_path, exist_ok=True)
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
     step = loop_vars['step']
 
     model_md5sum = None
@@ -51,12 +52,23 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
     adamw_opt, muon_opt = optimizers
     optim_path = os.path.join(checkpoints_path, f"optim_{step:06d}_rank{rank:d}.pt")
     torch.save({'adamw': adamw_opt.state_dict(), 'muon': muon_opt.state_dict()}, optim_path)
+    optim_md5sum = os.popen(f"md5sum {optim_path}").read().split()[0]
     
     # Dataloader state
     dataloader_path = os.path.join(checkpoints_path, f"dataloader_{step:06d}_rank{rank:d}.pt")
     torch.save(dataloader.state_dict(), dataloader_path)
 
-    return model_md5sum
+    # Print MD5 sums
+    if rank == 0:
+        print(f"Saved model_{step:06d}.pt with MD5 sum: {model_md5sum}")
+    for r in range(world_size):
+        if r == rank:
+            md5sum_optim = os.popen(f"md5sum {optim_path}").read().split()[0]
+            print(f"Saved optim optim_{step:06d}_rank{r:d}.pt MD5 sum: {md5sum_optim}")
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+    return model_md5sum, optim_md5sum
 
 
 def get_latest_checkpoint_step(checkpoints_path):
