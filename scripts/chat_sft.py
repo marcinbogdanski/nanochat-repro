@@ -7,7 +7,7 @@ import pickle
 import argparse
 import torch
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import save_checkpoint, load_model
+from nanorepro.checkpoint import save_checkpoint, load_model, load_optimizer_state
 from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
@@ -242,16 +242,16 @@ def main():
     if args.load_optimizer == 1:
         print0(f"Loading optimizer states from checkpoint step {checkpoint_step}")
         optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
-        optim_state = torch.load(optim_path, map_location=device)
+        adamw_sd, muon_sd = load_optimizer_state(optim_path, device, adamw_optim, muon_optim)
         # Load AdamW
         base_lrs = [group['lr'] for group in adamw_optim.param_groups]
-        adamw_optim.load_state_dict(optim_state['adamw'])
+        adamw_optim.load_state_dict(adamw_sd)
         for group, lr in zip(adamw_optim.param_groups, base_lrs):
             group['lr'] = lr
             group['initial_lr'] = lr
         # Load Muon
         base_lrs = [group['lr'] for group in muon_optim.param_groups]
-        muon_optim.load_state_dict(optim_state['muon'])
+        muon_optim.load_state_dict(muon_sd)
         for group, lr in zip(muon_optim.param_groups, base_lrs):
             group['lr'] = lr
             group['initial_lr'] = lr
