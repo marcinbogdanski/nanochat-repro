@@ -61,9 +61,10 @@ def generate_test_samples_sft(orig_model, tokenizer):
 def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
-    # Logging
+    # Init
     parser.add_argument('--run', type=str, default="default", help="Current run name (default: 'default').")
     parser.add_argument('--wandb', action='store_true', help="Enable logging to Weights & Biases, uses name from --run.")
+    parser.add_argument('--load-optimizer', type=int, default=1, help="Whether to load the optimizer states from base checkpoint (default: 1).")
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
@@ -238,20 +239,24 @@ def main():
     )
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     checkpoint_step = pretrain_metadata["step"]
-    optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
-    optim_state = torch.load(optim_path, map_location=device)
-    # Load AdamW
-    base_lrs = [group['lr'] for group in adamw_optim.param_groups]
-    adamw_optim.load_state_dict(optim_state['adamw'])
-    for group, lr in zip(adamw_optim.param_groups, base_lrs):
-        group['lr'] = lr
-        group['initial_lr'] = lr
-    # Load Muon
-    base_lrs = [group['lr'] for group in muon_optim.param_groups]
-    muon_optim.load_state_dict(optim_state['muon'])
-    for group, lr in zip(muon_optim.param_groups, base_lrs):
-        group['lr'] = lr
-        group['initial_lr'] = lr
+    if args.load_optimizer == 1:
+        print0(f"Loading optimizer states from checkpoint step {checkpoint_step}")
+        optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
+        optim_state = torch.load(optim_path, map_location=device)
+        # Load AdamW
+        base_lrs = [group['lr'] for group in adamw_optim.param_groups]
+        adamw_optim.load_state_dict(optim_state['adamw'])
+        for group, lr in zip(adamw_optim.param_groups, base_lrs):
+            group['lr'] = lr
+            group['initial_lr'] = lr
+        # Load Muon
+        base_lrs = [group['lr'] for group in muon_optim.param_groups]
+        muon_optim.load_state_dict(optim_state['muon'])
+        for group, lr in zip(muon_optim.param_groups, base_lrs):
+            group['lr'] = lr
+            group['initial_lr'] = lr
+    else:
+        print0("Skipping loading optimizer states as per --load-optimizer flag")
 
     # Steps Related
     flops_per_token = model.estimate_flops_per_token()
