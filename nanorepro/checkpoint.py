@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import torch
 from nanorepro.gpt import GPTModel, GPTConfig
@@ -26,15 +27,25 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
         # Model state
         model_path = os.path.join(checkpoints_path, f"model_{step:06d}.pt")
         model_state = model.state_dict()
-        # Model params may be views into static buffers created by optimizer. Here we save them as clean, independent copies.
-        # Preferably I would just save them as clean CPU tensors, but I want MD5 checkpoint compatibility with Nanochat,
-        # so instead I preserve original container class and _metadata and keep tensors on GPU. Prob cleanup later.
-        # Also, this GPU copy creates unnecessary memory pressure point during save, but at that point fwd/bwd/optim are dormant, so hopefully ok for now.
+
+        # Nanochat saves per-param tensors directly from the GPU. This ceremony maintains MD5 checksum compatibility.
+        # In this repo, model params may be views into static buffers created by optimizer,
+        # so we need to create independent copies of each param tensor. To save GPU VRAM we copy them to CPU,
+        # but now they are CPU-tagged, which breaks checksum. So we hack again and override PyTorch's location tagging mechanism.
+        # This way we have VRAM-friendly CPU saving, params are saved as independent tensors, and .pt file is GPU-tagged. Happy days.
         model_state_meta = model_state._metadata
-        model_state = model_state.__class__((name, tensor.detach().clone()) for name, tensor in model_state.items())
+        model_state = model_state.__class__((name, tensor.detach().to("cpu", copy=True)) for name, tensor in model_state.items())
         model_state._metadata = model_state_meta
-        torch.save(model_state, model_path)
+        try:
+            orig_location_tag = torch.serialization.location_tag  # function that takes storage object and returns str tag
+            device = model.get_device()
+            torch.serialization.location_tag = lambda storage: str(device)   # ignore param and just tag with "cuda:0" etc
+            torch.save(model_state, model_path)
+        finally:
+            torch.serialization.location_tag = orig_location_tag  # always restore
         model_md5sum = os.popen(f"md5sum {model_path}").read().split()[0]
+
+        gc.collect()  # This function creates bunch of tensors on CPU, since GC is disabled in base_train.py, we cleanup manually
     
     # Optimizer state
     adamw_opt, muon_opt = optimizers
