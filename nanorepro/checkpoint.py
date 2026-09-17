@@ -47,8 +47,8 @@ def optim_state_to_nanochat_format(adamw_state_dict, muon_state_dict):
     for i, st in muon_state_dict['state'].items():
         # in Nanochat Muon buffers are created with zeros_like() on views and inherit 
         nanochat_format_state[i + num_adamw_params] = {  # offset to match Nanochat combined optimizer
-            'momentum_buffer': st['momentum_buffer'].clone(memory_format=torch.contiguous_format),
-            'second_momentum_buffer': st['momentum_buffer2'].clone(memory_format=torch.contiguous_format)
+            'momentum_buffer': st['momentum_buffer'],
+            'second_momentum_buffer': st['momentum_buffer2'],
         }
 
     # This is what Nanochat combined optimizer saves
