@@ -108,6 +108,13 @@ def main():
     parser.add_argument('--muon-params-per-bucket', type=int, default=None, help='Number of Muon optimizer parameters per communication bucket. Valid values: -1 (one bucket per param shape) or positive value divisible by world_size. (defaults: -1 if backward overlap disabled, world_size otherwise).')
     args = parser.parse_args()
 
+    # Run Guard
+    run_path = os.path.join(BASE_DIR, "runs", args.run)
+    print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
+    if args.run != "default" and not args.resume and os.path.exists(run_path):
+        print0(f"Run path '{run_path}' already exists. Exiting")
+        exit(1)
+
     # DDP Init
     device, ddp_master, ddp_world_size = ddp_init()
 
@@ -120,11 +127,9 @@ def main():
 
     # Compute setup and helpers
     enable_fp8 = (args.fp8 == "true" or (args.fp8 == "auto" and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9))
-    print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init("nanochat", args.run if args.wandb else None, user_config, ddp_master)
-    run_path = os.path.join(BASE_DIR, "runs", args.run)
     stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
     resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
     file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
