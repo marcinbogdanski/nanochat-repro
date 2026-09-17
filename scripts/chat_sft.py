@@ -369,23 +369,24 @@ def main():
     trained_consumed = 0  # data items that were actually used for training
     bpb_eval_data, chatcore_metric_data, train_log_dict = None, None, None
     while True:
+        # Sync the furthest 'consumed' across all ranks, so trained_progress and LR schedules are consistent across ranks
+        max_trained_consumed = trained_consumed
+        if torch.distributed.is_initialized():
+            max_trained_consumed_t = torch.tensor(max_trained_consumed, dtype=torch.int64, device=device)
+            torch.distributed.all_reduce(max_trained_consumed_t, op=torch.distributed.ReduceOp.MAX)
+            max_trained_consumed = max_trained_consumed_t.item()
+
         # Stop Conditions
         last_step = args.num_iterations > 0 and step >= args.num_iterations
         # This caps training at approximately one epoch even if num_iterations asks for more
-        if trained_consumed >= len(tasks_train):
+        if max_trained_consumed >= len(tasks_train):
             last_step = True
         # Progress Tracking
         if args.num_iterations > 0:
             trained_progress = step / args.num_iterations
         else:
-            trained_progress = trained_consumed / len(tasks_train)
+            trained_progress = max_trained_consumed / len(tasks_train)
         total_flops = step * total_batch_size * flops_per_token
-
-        # Sync the stop condition across ranks
-        if torch.distributed.is_initialized():
-            last_step_t = torch.tensor(last_step, dtype=torch.int32, device=device)
-            torch.distributed.all_reduce(last_step_t, op=torch.distributed.ReduceOp.MAX)
-            last_step = bool(last_step_t.item())
 
         # BPB Evaluation
         # Always eval on step 0 to get a initial baseline
