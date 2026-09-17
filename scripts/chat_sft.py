@@ -7,7 +7,7 @@ import pickle
 import argparse
 import torch
 from nanorepro.loss_eval import evaluate_bpb
-from nanorepro.checkpoint import save_checkpoint, load_model
+from nanorepro.checkpoint import save_checkpoint, load_model, load_optimizer_state
 from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, download_file_rank0, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
@@ -61,9 +61,10 @@ def generate_test_samples_sft(orig_model, tokenizer):
 def main():
 
     parser = argparse.ArgumentParser(description="Train a GPT model with Muon optimizer.")
-    # Logging
+    # Init
     parser.add_argument('--run', type=str, default="default", help="Current run name (default: 'default').")
     parser.add_argument('--wandb', action='store_true', help="Enable logging to Weights & Biases, uses name from --run.")
+    parser.add_argument('--load-optimizer', type=int, default=1, help="Whether to load the optimizer states from base checkpoint (default: 1).")
     # FP8 training
     parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
     parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
@@ -208,20 +209,21 @@ def main():
 
     # Hyperparameter Transfer and Calculation
     pretrain_user_cfg = pretrain_metadata["user_config"]
-    max_seq_len = pretrain_user_cfg['max_seq_len']
+    pretrain_hyperparam_cfg = pretrain_metadata["training_hyperparameters"]
+    max_seq_len = pretrain_hyperparam_cfg['max_seq_len']
     embedding_lr = args.embedding_lr if args.embedding_lr is not None else pretrain_user_cfg['embedding_lr']
     unembedding_lr = args.unembedding_lr if args.unembedding_lr is not None else pretrain_user_cfg['unembedding_lr']
     matrix_lr = args.matrix_lr if args.matrix_lr is not None else pretrain_user_cfg['matrix_lr']
     # Batch size
     param_counts: dict = model.number_scaling_params()
-    pretrain_hyperparam_cfg = pretrain_metadata["training_hyperparameters"]
+    
     total_batch_size = args.total_batch_size if args.total_batch_size is not None else pretrain_hyperparam_cfg['total_batch_size']
 
     # Grad Accumulation
-    micro_batch = args.device_batch_size if args.device_batch_size is not None else pretrain_user_cfg['device_batch_size']
-    assert total_batch_size % (max_seq_len*micro_batch*ddp_world_size) == 0
-    grad_accum = total_batch_size // (max_seq_len*micro_batch*ddp_world_size)
-    print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
+    device_batch_size = args.device_batch_size if args.device_batch_size is not None else pretrain_hyperparam_cfg['device_batch_size']
+    assert total_batch_size % (max_seq_len*device_batch_size*ddp_world_size) == 0
+    grad_accum = total_batch_size // (max_seq_len*device_batch_size*ddp_world_size)
+    print0(f"Training hyperparameters: micro_batch={device_batch_size}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
     adamw_optim, muon_optim, backward_scheduler = model.setup_optimizer(
@@ -238,20 +240,24 @@ def main():
     )
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     checkpoint_step = pretrain_metadata["step"]
-    optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
-    optim_state = torch.load(optim_path, map_location=device)
-    # Load AdamW
-    base_lrs = [group['lr'] for group in adamw_optim.param_groups]
-    adamw_optim.load_state_dict(optim_state['adamw'])
-    for group, lr in zip(adamw_optim.param_groups, base_lrs):
-        group['lr'] = lr
-        group['initial_lr'] = lr
-    # Load Muon
-    base_lrs = [group['lr'] for group in muon_optim.param_groups]
-    muon_optim.load_state_dict(optim_state['muon'])
-    for group, lr in zip(muon_optim.param_groups, base_lrs):
-        group['lr'] = lr
-        group['initial_lr'] = lr
+    if args.load_optimizer == 1:
+        print0(f"Loading optimizer states from checkpoint step {checkpoint_step}")
+        optim_path = os.path.join(checkpoints_path, f"optim_{checkpoint_step:06d}_rank{rank:d}.pt")
+        adamw_sd, muon_sd = load_optimizer_state(optim_path, device, adamw_optim, muon_optim)
+        # Load AdamW
+        base_lrs = [group['lr'] for group in adamw_optim.param_groups]
+        adamw_optim.load_state_dict(adamw_sd)
+        for group, lr in zip(adamw_optim.param_groups, base_lrs):
+            group['lr'] = lr
+            group['initial_lr'] = lr
+        # Load Muon
+        base_lrs = [group['lr'] for group in muon_optim.param_groups]
+        muon_optim.load_state_dict(muon_sd)
+        for group, lr in zip(muon_optim.param_groups, base_lrs):
+            group['lr'] = lr
+            group['initial_lr'] = lr
+    else:
+        print0("Skipping loading optimizer states as per --load-optimizer flag")
 
     # Steps Related
     flops_per_token = model.estimate_flops_per_token()
@@ -260,8 +266,9 @@ def main():
 
     # Log calculated hyperparameters
     training_hyperparameters = {
+        'max_seq_len': max_seq_len,
+        'device_batch_size': device_batch_size,
         'total_batch_size': total_batch_size,
-        'micro_batch': micro_batch,
         'grad_accum': grad_accum,
         'flops_per_token': flops_per_token,
         'flops_per_iter': flops_per_iter,
@@ -308,15 +315,15 @@ def main():
         raise ValueError(f"Unknown training mixture: {args.data_mixture}")
     train_loader = DataLoaderSFT(
         tasks=tasks_train,
-        batch_size=micro_batch,
+        batch_size=device_batch_size,
         block_size=max_seq_len,
         tokenizer=tokenizer,
         device=device,
     )
 
     # Eval Dataloader
-    assert args.eval_tokens % (micro_batch * max_seq_len * ddp_world_size) == 0
-    eval_steps = args.eval_tokens // (micro_batch * max_seq_len * ddp_world_size)
+    assert args.eval_tokens % (device_batch_size * max_seq_len * ddp_world_size) == 0
+    eval_steps = args.eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
     tasks_eval = TaskMixture([
         TaskSmolTalk(split="test"),                        # 24K tasks
         TaskMMLU(subset="all", split="test", stop=5200),   #  5.2K tasks - match training ratio before repetition (whole test set is 14K)
@@ -324,7 +331,7 @@ def main():
     ])
     eval_loader = DataLoaderSFT(
         tasks=tasks_eval,
-        batch_size=micro_batch,
+        batch_size=device_batch_size,
         block_size=max_seq_len,
         tokenizer=tokenizer,
         device=device,
@@ -352,7 +359,7 @@ def main():
             }
 
     # Training Loop
-    step, total_time, smooth_tloss = 0, 0.0, 0.0
+    step, total_time, smooth_tloss, bpb, min_val_bpb = 0, 0.0, 0.0, float('inf'), float('inf')
     x, y = train_loader.get_batch_bos()
     # Progress tracking and stop conditions
     trained_consumed = 0  # data items that were actually used for training
@@ -382,10 +389,11 @@ def main():
             time_start = time.time()
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             time_end = time.time()
+            min_val_bpb = min(min_val_bpb, bpb)
             print0(f"BPB evaluation took {time_end - time_start:.2f} seconds.")
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
-            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
-            bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes}
+            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb, 'val/min_val_bpb': min_val_bpb})
+            bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes, 'val/min_val_bpb': min_val_bpb}
             file_logger.log0('bpb_eval', step, data=bpb_eval_data)
 
         # ChatCORE Metric
@@ -394,7 +402,7 @@ def main():
                 tasks_dict=chatcore_tasks,
                 model=model,
                 tokenizer=tokenizer,
-                micro_batch=micro_batch,
+                micro_batch=device_batch_size,
                 max_prompt_len=max_seq_len,
                 num_samples=1,
                 temperature=0.0,
@@ -421,10 +429,9 @@ def main():
         # Save Model
         if last_step:
             print0("Saving model...")
-            loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
-            checkpoint_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
-            print0(f"Saved model_{step:06d}.pt with MD5 sum: {checkpoint_md5sum}")
-            file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum})
+            loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss, 'val_bpb': bpb, 'min_val_bpb': min_val_bpb}
+            checkpoint_md5sum, optim_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
+            file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum, 'optim_md5sum': optim_md5sum})
 
         # Exit Condition
         if last_step:

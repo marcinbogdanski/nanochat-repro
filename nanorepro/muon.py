@@ -150,12 +150,13 @@ class Muon(torch.optim.Optimizer):
             stacked_grads = torch.stack([p.grad for p in group['params']])
 
             # Create buffers
+            # memory_format=contiguous keeps memory layout "clean" which helps with Nanochat checkpoint compatibility
             if 'momentum_buffer' not in self.state[p]:
-                self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_params)
+                self.state[p]['momentum_buffer'] = torch.zeros_like(stacked_params, memory_format=torch.contiguous_format)
                 if p.size(-2) >= p.size(-1):
-                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1])
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1], memory_format=torch.contiguous_format)
                 else:
-                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1, :])
+                    self.state[p]['momentum_buffer2'] = torch.zeros_like(stacked_grads[..., :1, :], memory_format=torch.contiguous_format)
 
             # Update
             lr = group['lr'] * (max(1, p.size(-2) / p.size(-1)))**0.5
@@ -249,11 +250,12 @@ class DistMuon(torch.optim.Optimizer):
             })
 
             # Create Momentum Buffers
-            self.state[anchor]['momentum_buffer'] = torch.zeros_like(grads_shard)
+            # memory_format=contiguous keeps memory layout "clean" which helps with Nanochat checkpoint compatibility
+            self.state[anchor]['momentum_buffer'] = torch.zeros_like(grads_shard, memory_format=torch.contiguous_format)
             if anchor.size(-2) >= anchor.size(-1):
-                self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1])
+                self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1], memory_format=torch.contiguous_format)
             else:
-                self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :])
+                self.state[anchor]['momentum_buffer2'] = torch.zeros_like(grads_shard[..., :1, :], memory_format=torch.contiguous_format)
 
         self.reduce_works = [None] * len(self.param_groups)
         self.gather_works = [None] * len(self.param_groups)

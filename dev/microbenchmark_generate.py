@@ -90,7 +90,7 @@ def main():
         "If 5*x + 3 = 13, then x is",
     ]
     max_new_tokens = 16
-    block_size = model.config.block_size
+    sequence_len = model.config.sequence_len
     bos_token = tokenizer.encode_single_token('<|bos|>')
 
     print()
@@ -103,7 +103,7 @@ def main():
         kv_cache = KVCache(config=model.config, batch_size=1, max_seq_len=max_seq_len, compute_dtype=compute_dtype, device=device)
         for i in range(max_new_tokens):
             # Forward without KV cache
-            idx_tail = idx[:, -block_size:]      # B,T  sliding window
+            idx_tail = idx[:, -sequence_len:]      # B,T  sliding window
             logits, _, _ = model(idx_tail)       # B,T,C <- B,T
             logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
             # Forward with KV cache

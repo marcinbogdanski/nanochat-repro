@@ -11,8 +11,9 @@ from nanorepro.backward_scheduler import BackwardScheduler, ScheduledBucket
 from nanorepro.nsight_trace import clone_boundary
 
 class GPTConfig:
-    def __init__(self, block_size, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable, moe_experts, moe_top_k):
-        self.block_size = block_size
+    def __init__(self, sequence_len, vocab_size, n_layer, n_head, n_embd, window_pattern, moe_enable=False, moe_experts=8, moe_top_k=2, n_kv_head=None):
+        assert n_kv_head is None or n_kv_head == n_head  # not used at present, load compatibility
+        self.sequence_len = sequence_len
         self.vocab_size = vocab_size
         self.n_layer = n_layer
         self.n_head = n_head
@@ -23,17 +24,20 @@ class GPTConfig:
         self.moe_top_k = moe_top_k
 
     def to_dict(self):
-        return {
-            'block_size': self.block_size,
+        result = {
+            'sequence_len': self.sequence_len,
             'vocab_size': self.vocab_size,
             'n_layer': self.n_layer,
             'n_head': self.n_head,
+            'n_kv_head': self.n_head,  # compatibility so checkpoint can be loaded in Nanochat
             'n_embd': self.n_embd,
             'window_pattern': self.window_pattern,
-            'moe_enable': self.moe_enable,
-            'moe_experts': self.moe_experts,
-            'moe_top_k': self.moe_top_k,
         }
+        if self.moe_enable:
+            result['moe_enable'] = self.moe_enable
+            result['moe_experts'] = self.moe_experts
+            result['moe_top_k'] = self.moe_top_k
+        return result
 
 class CausalSelfAttentionRoPE(nn.Module):
     """Multiple self-attention heads"""
@@ -42,7 +46,7 @@ class CausalSelfAttentionRoPE(nn.Module):
         assert config.n_embd % config.n_head == 0
         assert isinstance(enable_fa, bool)
         self.n_head = config.n_head
-        self.block_size = config.block_size
+        self.sequence_len = config.sequence_len
         self.layer_idx = layer_idx
         self.enable_fa = enable_fa
 
@@ -222,7 +226,7 @@ class GPTModel(nn.Module):
         })
 
         cos, sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            seq_len=config.block_size * 10,
+            seq_len=config.sequence_len * 10,
             head_size=config.n_embd // config.n_head,
             base=100_000,
         )
@@ -303,7 +307,7 @@ class GPTModel(nn.Module):
 
         # RoPE buffers in compute dtype
         self.cos, self.sin = CausalSelfAttentionRoPE.precalculate_cos_sin(
-            seq_len=self.config.block_size * 10,
+            seq_len=self.config.sequence_len * 10,
             head_size=self.config.n_embd // self.config.n_head,
             base=100_000,
             device=self.transformer.wte.weight.device,
@@ -602,7 +606,7 @@ class GPTModel(nn.Module):
         head_size = self.config.n_embd // self.config.n_head
         for layer_idx in range(self.config.n_layer):
             window_size, _ = self.window_sizes[layer_idx]  # (left, right), we only use left for causal attention
-            effective_seq_len = min(window_size, self.config.block_size)
+            effective_seq_len = min(window_size, self.config.sequence_len)
             attn_flops += 12 * self.config.n_head * effective_seq_len * head_size
         return matmul_flops + attn_flops
 
@@ -632,7 +636,7 @@ class GPTModel(nn.Module):
         return result
 
     def _calc_window_sizes(self, config):
-        long_window = config.block_size
+        long_window = config.sequence_len
         short_window = -(-long_window // 4 // 128) * 128  # Nearest multiple of 128 that is at least 1/4 of long_window
         chat_to_window_type = {
             'L': (long_window, 0),
@@ -889,10 +893,10 @@ class GPTModel(nn.Module):
         is_training = self.training
         self.eval()
 
-        block_size = self.config.block_size
+        sequence_len = self.config.sequence_len
         with torch.no_grad():
             for _ in range(max_new_tokens):
-                idx_tail = idx[:, -block_size:]      # B,T  sliding window
+                idx_tail = idx[:, -sequence_len:]      # B,T  sliding window
                 logits, _, _ = self(idx_tail, use_compiled_if_available=False)      # B,T,C <- B,T  don't use compiled, shapes change
                 logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
                 xcol = self.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=sample_rng)  # B,1
