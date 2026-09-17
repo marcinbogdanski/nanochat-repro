@@ -136,13 +136,29 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
             'step': step,
             'total_time': loop_vars['total_time'],
             'smooth_tloss': loop_vars['smooth_tloss'],
+            'val_bpb': loop_vars['val_bpb'],  # Nanochat compatibility
+            'min_val_bpb': loop_vars['min_val_bpb'],  # Nanochat compatibility
             'model_config': model.config.to_dict(),
             'user_config': user_config,
             'training_hyperparameters': training_hyperparameters,
+            # Compatiblity fields, so Nanochat can load our checkpoints, they are not read-back in this repo:
+            'device_batch_size': training_hyperparameters['device_batch_size'],
+            'max_seq_len': training_hyperparameters['max_seq_len'],
+            'total_batch_size': training_hyperparameters['total_batch_size'],  # use resolved value, user_config has -1 when autoresolving batch size
+            'dataloader_state_dict': {
+                'pq_idx': dataloader.shard_idx if hasattr(dataloader, 'shard_idx') else None,  # Dataloader only, DataloaderSFT doesn't have this attribute
+                'rg_idx': dataloader.group_idx if hasattr(dataloader, 'group_idx') else None,
+                'epoch': dataloader.epoch + 1,  # Nanochat counts starting from 1
+            },
+            'loop_state': {
+                'min_val_bpb': loop_vars['min_val_bpb'],
+                'smooth_train_loss': loop_vars['smooth_tloss'],
+                'total_training_time': loop_vars['total_time'],
+            }
         }
         meta_path = os.path.join(checkpoints_path, f"meta_{step:06d}.json")
         with open(meta_path, "w") as f:
-            json.dump(metadata, f)
+            json.dump(metadata, f, indent=2)
         
         # Model state
         model_path = os.path.join(checkpoints_path, f"model_{step:06d}.pt")
@@ -216,6 +232,8 @@ def load_checkpoint(checkpoints_path, model, optimizers, dataloader, device, ste
         "step": metadata["step"],
         "total_time": metadata["total_time"],
         "smooth_tloss": metadata["smooth_tloss"],
+        "val_bpb": metadata["val_bpb"],
+        "min_val_bpb": metadata["min_val_bpb"]
     }
 
     # Model state

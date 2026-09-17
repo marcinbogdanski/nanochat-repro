@@ -190,7 +190,7 @@ def main():
         num_heads = model_dim // args.head_dim
         # Model
         model_config = GPTConfig(
-            block_size=args.max_seq_len,
+            sequence_len=args.max_seq_len,
             vocab_size=vocab_size,
             n_layer=depth,
             n_head=num_heads,
@@ -296,10 +296,9 @@ def main():
     print0(f"Scaled weight decay: {args.weight_decay} -> {scaled_weight_decay}")
 
     # Grad Accumulation
-    micro_batch = args.device_batch_size
-    assert total_batch_size % (args.max_seq_len*micro_batch*ddp_world_size) == 0
-    grad_accum = total_batch_size // (args.max_seq_len*micro_batch*ddp_world_size)
-    print0(f"Training hyperparameters: micro_batch={micro_batch}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
+    assert total_batch_size % (args.max_seq_len*args.device_batch_size*ddp_world_size) == 0
+    grad_accum = total_batch_size // (args.max_seq_len*args.device_batch_size*ddp_world_size)
+    print0(f"Training hyperparameters: micro_batch={args.device_batch_size}, total_batch_size={total_batch_size}, grad_accum={grad_accum}")
 
     # Optimizers
     # AdamW for embeddings and scalars, Muon for large matrix params
@@ -332,13 +331,14 @@ def main():
     
     # Log calculated hyperparameters
     training_hyperparameters = {
+        'max_seq_len': args.max_seq_len,
         'scaling_params': scaling_params,
         'target_tokens': target_tokens,
+        'device_batch_size': args.device_batch_size,
         'total_batch_size': total_batch_size,
         'batch_ratio': batch_ratio,
         'batch_lr_scale': batch_lr_scale,
         'scaled_weight_decay': scaled_weight_decay,
-        'micro_batch': micro_batch,
         'grad_accum': grad_accum,
         'flops_per_token': flops_per_token,
         'flops_per_iter': flops_per_iter,
@@ -385,7 +385,7 @@ def main():
     train_loader = DataLoader(
         dataset_or_folderpath=args.dataset,
         split="train",
-        batch_size=micro_batch,
+        batch_size=args.device_batch_size,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
         device=device,
@@ -393,13 +393,13 @@ def main():
     print0(f"Train dataloader initialized with dataset {args.dataset} shards {train_loader.first_shard} - {train_loader.last_shard}")
 
     # Eval Dataloader
-    assert args.eval_tokens % (micro_batch * args.max_seq_len * ddp_world_size) == 0
-    eval_steps = args.eval_tokens // (micro_batch * args.max_seq_len * ddp_world_size)
+    assert args.eval_tokens % (args.device_batch_size * args.max_seq_len * ddp_world_size) == 0
+    eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
     print0(f"Eval BPB every {args.eval_every} steps, eval_steps={eval_steps}")
     eval_loader = DataLoader(
         dataset_or_folderpath=args.dataset,
         split="val",
-        batch_size=micro_batch,
+        batch_size=args.device_batch_size,
         block_size=args.max_seq_len,
         tokenizer=tokenizer,
         device=device,
@@ -411,12 +411,13 @@ def main():
         print0("Resuming from latest checkpoint...")
         loaded_vars = load_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, device, step=resume_from_step)
         step = loaded_vars["step"]
-        total_time = loaded_vars["total_time"]        
+        total_time = loaded_vars["total_time"]
         smooth_tloss = loaded_vars["smooth_tloss"]
+        bpb, min_val_bpb = loaded_vars["val_bpb"], loaded_vars["min_val_bpb"]
         print0(f"Resumed checkpoint from step {step}")
         x, y = train_loader.get_last_batch_without_advancing()
     else:
-        step, total_time, smooth_tloss = 0, 0.0, 0.0
+        step, total_time, smooth_tloss, bpb, min_val_bpb = 0, 0.0, 0.0, float('inf'), float('inf')
         x, y = train_loader.get_batch_bos()
 
     # Training Loop
@@ -440,8 +441,9 @@ def main():
         if args.eval_every > 0 and (step % args.eval_every == 0 or step == max_steps):
             bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
             print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
-            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb})
-            bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes}
+            min_val_bpb = min(min_val_bpb, bpb)
+            wandb_logger.log({'step': step, 'total_training_flops': total_flops, 'total_training_time': total_time, 'val/bpb': bpb, 'val/min_val_bpb': min_val_bpb})
+            bpb_eval_data = {'val/bpb': bpb, 'val/total_nats': total_nats, 'val/total_bytes': total_bytes, 'val/min_val_bpb': min_val_bpb}
             file_logger.log0('bpb_eval', step, data=bpb_eval_data)
 
         # Core Metric
@@ -463,7 +465,7 @@ def main():
         # Save Model
         if args.save_every > 0 and step > start_step and (step % args.save_every == 0 or step == max_steps or stop_requested):
             print0("Saving model...")
-            loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss}
+            loop_vars = {'step': step, 'total_time': total_time, 'smooth_tloss': smooth_tloss, 'val_bpb': bpb, 'min_val_bpb': min_val_bpb}
             checkpoint_md5sum, optim_md5sum = save_checkpoint(run_path, model, [adamw_optim, muon_optim], train_loader, loop_vars, user_config, training_hyperparameters)
             file_logger.log('save_model', step, {'checkpoint_md5sum': checkpoint_md5sum, 'optim_md5sum': optim_md5sum})
 

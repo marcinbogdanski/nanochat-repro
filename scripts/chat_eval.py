@@ -100,8 +100,9 @@ def main():
     # Hyperparameter Transfer and Calculation
     step = pretrain_metadata["step"]
     pretrain_user_cfg = pretrain_metadata["user_config"]
-    max_seq_len = pretrain_user_cfg['max_seq_len']
-    micro_batch = args.device_batch_size if args.device_batch_size is not None else pretrain_user_cfg['device_batch_size']
+    pretrain_hyperparam_cfg = pretrain_metadata["training_hyperparameters"]
+    max_seq_len = pretrain_hyperparam_cfg['max_seq_len']
+    micro_batch = args.device_batch_size if args.device_batch_size is not None else pretrain_hyperparam_cfg['device_batch_size']
     data_mixture = args.data_mixture if args.data_mixture is not None else pretrain_user_cfg['data_mixture']
 
     # Eval Dataloader

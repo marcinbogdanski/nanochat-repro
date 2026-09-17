@@ -56,6 +56,7 @@ class DataLoader:
         self.shard_idx = self.first_shard
         self.group_idx = self.rank
         self.idx_in_group = 0
+        self.epoch = 0  # approx
 
         # Cached Shards
         self.loaded_shard_idx = None
@@ -96,6 +97,7 @@ class DataLoader:
         #     x, y = dataloader.get_batch_bos()
         # We save last x,y so they can be consumed on resume, otherwise they would be skipped
         return {
+            "epoch": self.epoch,
             "shard_idx": self.shard_idx,
             "group_idx": self.group_idx,
             "idx_in_group": self.idx_in_group,
@@ -105,6 +107,7 @@ class DataLoader:
         }
 
     def load_state_dict(self, state):
+        self.epoch = state["epoch"]
         self.shard_idx = state["shard_idx"]
         self.group_idx = state["group_idx"]
         self.idx_in_group = state["idx_in_group"]
@@ -149,6 +152,7 @@ class DataLoader:
                 self.shard_idx += 1
                 if self.shard_idx > self.last_shard:
                     self.shard_idx = self.first_shard
+                    self.epoch += 1
 
     def _get_next_document_batch(self, num):
         doc_list = self._get_example_text_batch(num=num)
@@ -228,6 +232,7 @@ class DataLoaderSFT:
         # Create Cursor
         self.current_task_idx = self.rank
         self.consumed = self.rank
+        self.epoch = 0
 
         # Tensor Buffers
         self.use_cuda = device.startswith("cuda")
@@ -248,10 +253,12 @@ class DataLoaderSFT:
 
         self.current_task_idx = self.rank
         self.consumed = self.rank
+        self.epoch = 0
 
     def state_dict(self):
         # Just some useful info, we don't support resume in SFT
         return {
+            "epoch": self.epoch,
             "current_task_idx": self.current_task_idx,
             "consumed": self.consumed,
         }
@@ -260,6 +267,7 @@ class DataLoaderSFT:
         self.current_task_idx += self.world_size
         if self.current_task_idx >= len(self.tasks):
             self.current_task_idx = self.current_task_idx % len(self.tasks)
+            self.epoch += 1
 
     def _fill_conv_buffer(self):
         while len(self.conv_buffer) < 100:
