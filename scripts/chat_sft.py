@@ -43,7 +43,7 @@ def generate_test_samples_sft(orig_model, tokenizer):
         results = []
         for prompt in prompts:
             tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-            gen_results = engine.generate(
+            gen_results = engine.generate_batch(
                 tokens,
                 num_samples=1,
                 max_new_tokens=16,

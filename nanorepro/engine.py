@@ -11,7 +11,7 @@ class KVCache:
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.previous_embd = None
 
-class ResultRow:
+class RowState:
     """Internal class to track row status in batch generation."""
     def __init__(self, tokens, stop_tokens=None):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
@@ -30,10 +30,14 @@ class ResultRow:
         assert len(self.forced_tokens) == 0
         self.forced_tokens = tokens
 
+    def has_forced_tokens(self):
+        return len(self.forced_tokens) > 0
+
     def get_forced_token(self):
         if len(self.forced_tokens) > 0:
             return self.forced_tokens.pop(0)
-        return None
+        else:
+            raise ValueError("No forced tokens available to retrieve.")
 
     def get_tokens(self):
         return self.tokens
@@ -51,7 +55,7 @@ class Engine:
         self.tool_trigger_token = None if tool_handler is None else tool_handler.tool_trigger_token
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
+    def generate_stream(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
         max_new_tokens = self.model.config.sequence_len - len(tokens) if max_new_tokens is None else max_new_tokens
 
@@ -60,8 +64,7 @@ class Engine:
         rng = torch.Generator(device=device).manual_seed(seed)
         max_seq_len = len(tokens) + max_new_tokens
 
-        indices = torch.tensor([tokens], dtype=torch.long, device=device)  # B,T
-        results = [ResultRow(indices[0].tolist(), self.stop_tokens) for _ in range(num_samples)]
+        rows = [RowState(tokens.copy(), self.stop_tokens) for _ in range(num_samples)]
         kv_cache = KVCache(
             config=self.model.config,
             batch_size=1,
@@ -72,13 +75,13 @@ class Engine:
 
         # Generate new tokens
         num_generated = 0
-        logits_list = []
         while True:
-            if num_generated >= max_new_tokens or all(res.is_stopped() for res in results):
+            if num_generated >= max_new_tokens or all(row.is_stopped() for row in rows):
                 break
 
             if num_generated == 0:
                 # Prefill the model with the initial tokens
+                indices = torch.tensor([tokens], dtype=torch.long, device=device)  # B,T
                 logits, _, _ = self.model(indices, kv_cache=kv_cache)       # B,T,C <- B,T
                 logits = logits[:, -1, :]             # B,C <- B,T,C  discard all but last
                 logits = logits.expand(num_samples, -1)  # B,C <- B=1,C  broadcast to num_samples
@@ -91,40 +94,55 @@ class Engine:
 
             else:
                 # Generate next token
-                logits, _, _ = self.model(x_col, kv_cache=kv_cache)       # B,T,C <- B,T
+                logits, _, _ = self.model(token_column_t, kv_cache=kv_cache)       # B,T,C <- B,T
                 logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
 
-            # Store logits if requested
-            if return_logits:
-                logits_list.append(logits)
-
             # Append new token to the sequence
-            x_col = self.model.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=rng)  # B,1
-            x_col_list = x_col[:, 0].tolist()
+            token_column_t = self.model.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=rng)  # B,1
+            token_column = token_column_t[:, 0].tolist()  # avoid .item() on each loop iteration
 
             # Update results and handle forced tokens
             for i in range(num_samples):
-                if results[i].is_stopped():
-                    continue
-                forced_token = results[i].get_forced_token()
-                if forced_token is not None:
-                    x_col[i, 0] = forced_token  # is this safe?
-                    results[i].append_token(forced_token)
+                if rows[i].is_stopped():
+                    # rows[i].append_token(..)          # append: nothing to append, row is done
+                    # token_column_t[i, 0] = bos_token  # feed: could pad, but makes no difference what we feed to the model, this row is done
+                    token_column[i] = None              # return: what we return
+                elif rows[i].has_forced_tokens():
+                    forced_token = rows[i].get_forced_token()
+                    rows[i].append_token(forced_token)   # append: append row
+                    token_column_t[i, 0] = forced_token  # feed: feed to the model
+                    token_column[i] = forced_token       # return: what we return
                 else:
-                    sampled_token = x_col_list[i]
-                    results[i].append_token(sampled_token)
-                    if sampled_token == self.tool_trigger_token:
-                        tool_output_tokens = self.tool_handler.handle_tool_call(results[i].get_tokens())
+                    rows[i].append_token(token_column[i])           # append: append row
+                    # token_column_t[i, 0] = token_column_t[i, 0]   # feed: current token is valid to feed back to the model
+                    # token_column[i] = ...                         # return: already assigned
+                    if token_column[i] == self.tool_trigger_token:
+                        tool_output_tokens = self.tool_handler.handle_tool_call(rows[i].get_tokens())
                         if tool_output_tokens is not None:
-                            results[i].add_forced_tokens(tool_output_tokens)
+                            rows[i].add_forced_tokens(tool_output_tokens)
+
+            if return_logits:
+                yield token_column, logits
+            else:
+                yield token_column, None
             num_generated += 1
 
-        # Return the final results
-        result_tokens = [res.get_tokens() for res in results]
+    def generate_batch(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
+        token_rows = [tokens.copy() for _ in range(num_samples)]
+        logits_list = []
+        for token_column, logits_column in self.generate_stream(tokens, num_samples, max_new_tokens, temperature, top_k, seed, return_logits):
+            for i in range(num_samples):
+                if token_column[i] is not None:
+                    token_rows[i].append(token_column[i])
+            logits_list.append(logits_column)
+
+        # Package and Return
         if return_logits:
             logits_list = torch.stack(logits_list, dim=1)  # B,T,C
-            return result_tokens, logits_list
-        return result_tokens
+            return token_rows, logits_list
+        return token_rows
+
+
 
     @torch.inference_mode()
     def generate_naive(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
