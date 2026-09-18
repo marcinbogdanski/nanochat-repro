@@ -60,8 +60,8 @@ class Engine:
         rng = torch.Generator(device=device).manual_seed(seed)
         max_seq_len = len(tokens) + max_new_tokens
 
-        # Prefill and sample
         indices = torch.tensor([tokens], dtype=torch.long, device=device)  # B,T
+        results = [ResultRow(indices[0].tolist(), self.stop_tokens) for _ in range(num_samples)]
         kv_cache = KVCache(
             config=self.model.config,
             batch_size=1,
@@ -69,36 +69,40 @@ class Engine:
             compute_dtype=compute_dtype,
             device=device
         )
-        logits, _, _ = self.model(indices, kv_cache=kv_cache)       # B,T,C <- B,T
-        logits = logits[:, -1, :]             # B,C <- B,T,C  discard all but last
-        logits = logits.expand(num_samples, -1)  # B,C <- B=1,C  broadcast to num_samples
-        x_col = self.model.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=rng)  # B,1
-
-        # Broadcast to num_samples
-        kv_cache.k_cache = kv_cache.k_cache.expand(-1, num_samples, -1, -1, -1).clone()
-        kv_cache.v_cache = kv_cache.v_cache.expand(-1, num_samples, -1, -1, -1).clone()
-        kv_cache.cache_seqlens = kv_cache.cache_seqlens.expand(num_samples).clone()
-        kv_cache.previous_embd = kv_cache.previous_embd.expand(num_samples, -1, -1).clone()  # B,1,E  broadcast to num_samples
-
-        # Will return Python lists
-        results = [ResultRow(indices[0].tolist(), self.stop_tokens) for _ in range(num_samples)]
-        x_col_list = x_col[:, 0].tolist()
-        for i in range(num_samples):
-            results[i].append_token(x_col_list[i])
-        if return_logits:
-            logits_list = [logits]
 
         # Generate new tokens
-        num_generated = 1
-        while num_generated < max_new_tokens:
-            if all(res.is_stopped() for res in results):
+        num_generated = 0
+        logits_list = []
+        while True:
+            if num_generated >= max_new_tokens or all(res.is_stopped() for res in results):
                 break
-            logits, _, _ = self.model(x_col, kv_cache=kv_cache)       # B,T,C <- B,T
-            logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
+
+            if num_generated == 0:
+                # Prefill the model with the initial tokens
+                logits, _, _ = self.model(indices, kv_cache=kv_cache)       # B,T,C <- B,T
+                logits = logits[:, -1, :]             # B,C <- B,T,C  discard all but last
+                logits = logits.expand(num_samples, -1)  # B,C <- B=1,C  broadcast to num_samples
+
+                # Broadcast to num_samples
+                kv_cache.k_cache = kv_cache.k_cache.expand(-1, num_samples, -1, -1, -1).clone()
+                kv_cache.v_cache = kv_cache.v_cache.expand(-1, num_samples, -1, -1, -1).clone()
+                kv_cache.cache_seqlens = kv_cache.cache_seqlens.expand(num_samples).clone()
+                kv_cache.previous_embd = kv_cache.previous_embd.expand(num_samples, -1, -1).clone()  # B,1,E  broadcast to num_samples
+
+            else:
+                # Generate next token
+                logits, _, _ = self.model(x_col, kv_cache=kv_cache)       # B,T,C <- B,T
+                logits = logits[:, -1, :]            # B,C <- B,T,C  discard all but last
+
+            # Store logits if requested
             if return_logits:
                 logits_list.append(logits)
+
+            # Append new token to the sequence
             x_col = self.model.sample_one_token(logits, temperature=temperature, top_k=top_k, sample_rng=rng)  # B,1
             x_col_list = x_col[:, 0].tolist()
+
+            # Update results and handle forced tokens
             for i in range(num_samples):
                 if results[i].is_stopped():
                     continue
@@ -115,6 +119,7 @@ class Engine:
                             results[i].add_forced_tokens(tool_output_tokens)
             num_generated += 1
 
+        # Return the final results
         result_tokens = [res.get_tokens() for res in results]
         if return_logits:
             logits_list = torch.stack(logits_list, dim=1)  # B,T,C

@@ -52,7 +52,7 @@ def main():
     #    torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
     # Model Setup
-    checkpoints_path = os.path.join(BASE_DIR, "runs/scaling3/scaling3_1e18_d12")
+    checkpoints_path = os.path.join(BASE_DIR, "runs/d12")
     latest_checkpoint_step = get_latest_checkpoint_step(checkpoints_path)
     latest_meta_path = os.path.join(checkpoints_path, f"meta_{latest_checkpoint_step:06d}.json")  # last saved file
     with open(latest_meta_path, "r") as f:
