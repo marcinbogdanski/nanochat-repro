@@ -113,10 +113,18 @@ def main():
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     if args.run != "default" and not args.resume and os.path.exists(run_path):
         print0(f"Run path '{run_path}' already exists. Exiting")
-        exit(1)
+        exit(1)  # causes noisy torchrun error
 
     # DDP Init
     device, ddp_master, ddp_world_size = ddp_init()
+
+    # Remove STOP file
+    stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
+    stop_next_filepath = os.path.join(run_path, "STOP_NEXT")  # if created, training will exit gracefully at the next planned checkpoint save (e.g. 250 iter)
+    if ddp_master and os.path.exists(stop_filepath):
+        os.remove(stop_filepath)
+    if ddp_master and os.path.exists(stop_next_filepath):
+        os.remove(stop_next_filepath)
 
     # Resolve user config
     if args.layers_per_compiled_region is None:
@@ -130,15 +138,10 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init("nanochat", args.run if args.wandb else None, user_config, ddp_master)
-    stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
     resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
     file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
     file_logger.log('user_config', step=None, data=user_config)
     file_logger.log('provenance', step=None, data=collect_provenance(run_path))
-
-    # Remove STOP file
-    if ddp_master and os.path.exists(stop_filepath):
-        os.remove(stop_filepath)
 
     # Warnings
     warnings = []
@@ -436,7 +439,10 @@ def main():
 
         # Stop File Check
         if ddp_master:
-            stop_tensor.fill_(int(os.path.exists(stop_filepath)))
+            if os.path.exists(stop_filepath):
+                stop_tensor.fill_(1)
+            if args.save_every > 0 and step > start_step and step % args.save_every == 0 and os.path.exists(stop_next_filepath):
+                stop_tensor.fill_(1)
         if torch.distributed.is_initialized():
             torch.distributed.broadcast(stop_tensor, src=0)
         stop_requested = bool(stop_tensor.item())
