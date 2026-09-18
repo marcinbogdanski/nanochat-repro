@@ -502,7 +502,6 @@ def main():
             _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
-            rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             if ga_idx == grad_accum - 1:
@@ -534,6 +533,7 @@ def main():
         record_event("optim.end")
 
         # Loss sync
+        rank_tloss = loss_accum.clone()
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
@@ -548,7 +548,7 @@ def main():
         # Logs
         tps = int(total_batch_size / dt)
         pct = step / max_steps * 100
-        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * rank_tloss.item()
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * loss_accum.item()
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
@@ -573,10 +573,9 @@ def main():
         if step % args.log_every == 0 or step == max_steps-1:
             train_log_dict = {
                 'step': step,
-                'train/train_loss': loss_accum.item(),
-                'train/rank_tloss': rank_tloss.item(),
-                'train/smooth_rank_tloss': smooth_tloss,
-                'train/debiased_smooth_rank_tloss': debiased_smooth_tloss,
+                'train/train_loss': loss_accum.item(),             # avg over ranks and GA
+                'train/smooth_train_loss': debiased_smooth_tloss,  # avg over ranks and GA, smoothed, debiased
+                'train/rank_tloss': rank_tloss.item(),             # avg over GA, this rank
                 'train/lrm': lrm,
                 'train/muon_momentum': muon_momentum,
                 'train/muon_weight_decay': muon_weight_decay,
