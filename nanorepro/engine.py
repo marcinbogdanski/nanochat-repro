@@ -124,17 +124,21 @@ class Engine:
             if return_logits:
                 yield token_column, logits
             else:
-                yield token_column, None
+                yield token_column
             num_generated += 1
 
     def generate_batch(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
         token_rows = [tokens.copy() for _ in range(num_samples)]
         logits_list = []
-        for token_column, logits_column in self.generate_stream(tokens, num_samples, max_new_tokens, temperature, top_k, seed, return_logits):
+        for result in self.generate_stream(tokens, num_samples, max_new_tokens, temperature, top_k, seed, return_logits):
+            if return_logits:
+                token_column, logits_column = result
+                logits_list.append(logits_column)
+            else:
+                token_column = result
             for i in range(num_samples):
                 if token_column[i] is not None:
                     token_rows[i].append(token_column[i])
-            logits_list.append(logits_column)
 
         # Package and Return
         if return_logits:
