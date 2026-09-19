@@ -166,3 +166,47 @@ class FileLogger:
         with open(self.log_filepath, 'a') as f:
             json.dump({'timestamp': datetime_iso, 'event': event, 'step': step, 'rank': self.rank, **data}, f)
             f.write('\n')
+
+
+class UTF8Buffer:
+    """Buffer incomplete UTF-8 characters and replace invalid characters
+
+    We could use `codecs.getincrementaldecoder("utf-8")(errors="replace")` instead of this custom implementation,
+    but that would hide the issue, so for educational purposes I implement it manually.
+    
+    Tokens don't need to represent valid UTF-8 characters, e.g. smiling face emoji UTF-8
+    b'\xf0\x9f\x98\x80' may be composed of two tokens representing bytes b'\xf0\x9f' and b'\x98\x80',
+    neither of which is valid string if decoded in separation.
+
+    During streaming, we get one token at a time, so to correctly decode and print token sequence representing:
+    [b'Hi, ', b'\xf0\x9f', b'\x98\x80', b'!'], we need to buffer them to form complete UTF-8 characters.
+
+    Example:
+        decoder = UTF8Buffer()
+        decoder.decode(b"Hi \xf0\x9f")  # "Hi "
+        decoder.decode(b"\x98\x80!")    # "😀!"
+    """
+    def __init__(self):
+        self.pending_bytes = b""
+
+    def decode(self, new_bytes, final=False):
+        assert isinstance(new_bytes, bytes)
+        self.pending_bytes += new_bytes
+        parts = []
+        while self.pending_bytes:
+            try:
+                # Try to decode the whole thing
+                parts.append(self.pending_bytes.decode("utf-8"))
+                self.pending_bytes = b""
+            except UnicodeDecodeError as error:
+                # Keep any valid bytes before the error
+                parts.append(self.pending_bytes[:error.start].decode("utf-8"))
+                if error.reason == "unexpected end of data" and not final:
+                    # Keep incomplete bytes for the next pass
+                    self.pending_bytes = self.pending_bytes[error.start:]
+                    break
+                else:
+                    # Replace invalid bytes and continue decode
+                    parts.append("\ufffd")  # �
+                    self.pending_bytes = self.pending_bytes[error.end:]
+        return "".join(parts)

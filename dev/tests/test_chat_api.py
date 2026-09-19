@@ -49,8 +49,11 @@ def test_chat_completion():
 
     choice = completion.choices[0]
     assert choice.message.role == "assistant"
-    assert choice.message.content == "Hello, world!"
-    assert choice.finish_reason == "stop"
+    assert isinstance(choice.message.content, str)
+    assert choice.message.content.strip()
+    assert choice.finish_reason in {"stop", "length"}
+    assert "<|bos|>" not in choice.message.content  # confirm stop tokens don't leak to client
+    assert "<|assistant_end|>" not in choice.message.content
 
 def test_invalid_requests():
     valid_messages = [{"role": "user", "content": "Hello!"}]

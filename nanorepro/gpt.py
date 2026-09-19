@@ -241,6 +241,9 @@ class GPTModel(nn.Module):
         self._compiled_output_region = None
         self._compiled_whole_transformer_region = None
 
+    def max_position_embeddings(self):
+        return self.cos.size(1)
+
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
 
