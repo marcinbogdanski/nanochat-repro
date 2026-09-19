@@ -37,7 +37,7 @@ index d1af271..03ca730 100644
 +    torch.cuda.manual_seed_all(42)
 +
 +################################ EQUIVALENCE ###############################
-+# Dissable TORCH.COMPILE for reproducibility non-DDP/DDP
++# Disable TORCH.COMPILE for reproducibility non-DDP/DDP
 +torch.backends.cudnn.deterministic = True
 +torch.backends.cudnn.benchmark = False
 +torch.use_deterministic_algorithms(True)

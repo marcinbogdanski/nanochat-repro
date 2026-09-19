@@ -141,7 +141,7 @@ def save_checkpoint(checkpoints_path, model, optimizers, dataloader, loop_vars, 
             'model_config': model.config.to_dict(),
             'user_config': user_config,
             'training_hyperparameters': training_hyperparameters,
-            # Compatiblity fields, so Nanochat can load our checkpoints, they are not read-back in this repo:
+            # Compatibility fields, so Nanochat can load our checkpoints, they are not read-back in this repo:
             'device_batch_size': training_hyperparameters['device_batch_size'],
             'max_seq_len': training_hyperparameters['max_seq_len'],
             'total_batch_size': training_hyperparameters['total_batch_size'],  # use resolved value, user_config has -1 when autoresolving batch size
