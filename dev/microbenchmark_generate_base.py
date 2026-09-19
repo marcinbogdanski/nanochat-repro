@@ -52,7 +52,7 @@ def main():
     #    torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
     # Model Setup
-    checkpoints_path = os.path.join(BASE_DIR, "runs/scaling3/scaling3_1e18_d12")
+    checkpoints_path = os.path.join(BASE_DIR, "runs/d12")
     latest_checkpoint_step = get_latest_checkpoint_step(checkpoints_path)
     latest_meta_path = os.path.join(checkpoints_path, f"meta_{latest_checkpoint_step:06d}.json")  # last saved file
     with open(latest_meta_path, "r") as f:
@@ -142,7 +142,7 @@ def main():
             seed=42,
             return_logits=True
         )
-        results_kv, logits_kv = engine.generate(
+        results_kv, logits_kv = engine.generate_batch(
             tokens,
             num_samples=3,
             max_new_tokens=max_new_tokens,
@@ -228,7 +228,7 @@ def main():
 
     # Warmup
     for _ in range(2):
-        _ = engine.generate(
+        _ = engine.generate_batch(
             tokens,
             num_samples=num_samples,
             max_new_tokens=max_new_tokens,
@@ -240,7 +240,7 @@ def main():
     # Timing KV cache generation
     torch.cuda.synchronize() if device.startswith("cuda") else None
     start_time = time.time()
-    _ = engine.generate(
+    _ = engine.generate_batch(
         tokens,
         num_samples=num_samples,
         max_new_tokens=max_new_tokens,

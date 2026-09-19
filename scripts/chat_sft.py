@@ -43,7 +43,7 @@ def generate_test_samples_sft(orig_model, tokenizer):
         results = []
         for prompt in prompts:
             tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-            gen_results = engine.generate(
+            gen_results = engine.generate_batch(
                 tokens,
                 num_samples=1,
                 max_new_tokens=16,
@@ -369,23 +369,24 @@ def main():
     trained_consumed = 0  # data items that were actually used for training
     bpb_eval_data, chatcore_metric_data, train_log_dict = None, None, None
     while True:
+        # Sync the furthest 'consumed' across all ranks, so trained_progress and LR schedules are consistent across ranks
+        max_trained_consumed = trained_consumed
+        if torch.distributed.is_initialized():
+            max_trained_consumed_t = torch.tensor(max_trained_consumed, dtype=torch.int64, device=device)
+            torch.distributed.all_reduce(max_trained_consumed_t, op=torch.distributed.ReduceOp.MAX)
+            max_trained_consumed = max_trained_consumed_t.item()
+
         # Stop Conditions
         last_step = args.num_iterations > 0 and step >= args.num_iterations
         # This caps training at approximately one epoch even if num_iterations asks for more
-        if trained_consumed >= len(tasks_train):
+        if max_trained_consumed >= len(tasks_train):
             last_step = True
         # Progress Tracking
         if args.num_iterations > 0:
             trained_progress = step / args.num_iterations
         else:
-            trained_progress = trained_consumed / len(tasks_train)
+            trained_progress = max_trained_consumed / len(tasks_train)
         total_flops = step * total_batch_size * flops_per_token
-
-        # Sync the stop condition across ranks
-        if torch.distributed.is_initialized():
-            last_step_t = torch.tensor(last_step, dtype=torch.int32, device=device)
-            torch.distributed.all_reduce(last_step_t, op=torch.distributed.ReduceOp.MAX)
-            last_step = bool(last_step_t.item())
 
         # BPB Evaluation
         # Always eval on step 0 to get a initial baseline
@@ -456,7 +457,6 @@ def main():
             split_compiled_regions = args.backward_overlap and ddp_world_size > 1 and ga_idx == grad_accum - 1
             _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             fwd_metrics.append(metrics)
-            rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             if ga_idx == grad_accum - 1:
@@ -483,6 +483,8 @@ def main():
         for opt in [adamw_optim, muon_optim]:
             opt.step()
 
+        # Loss sync
+        rank_tloss = loss_accum.clone()
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
@@ -495,7 +497,7 @@ def main():
         # Logs
         tps = int(total_batch_size / dt)
         pct = trained_progress * 100
-        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * rank_tloss.item()
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * loss_accum.item()
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         print0(f"Step {step} ({pct:.2f}%) | "
@@ -515,10 +517,9 @@ def main():
         if step % args.log_every == 0 or last_step:
             train_log_dict = {
                 'step': step,
-                'train/train_loss': loss_accum.item(),
-                'train/rank_tloss': rank_tloss.item(),
-                'train/smooth_rank_tloss': smooth_tloss,
-                'train/debiased_smooth_rank_tloss': debiased_smooth_tloss,
+                'train/train_loss': loss_accum.item(),             # avg over ranks and GA
+                'train/smooth_train_loss': debiased_smooth_tloss,  # avg over ranks and GA, smoothed, debiased
+                'train/rank_tloss': rank_tloss.item(),             # avg over GA, this rank
                 'train/lrm': lrm,
                 'train/muon_momentum': muon_momentum,
                 'train/muon_weight_decay': 0.0,  # compatibility with pre-training schema

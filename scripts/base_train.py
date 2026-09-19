@@ -113,10 +113,18 @@ def main():
     print0 = print if os.environ.get("RANK", "0") == "0" else lambda *args, **kwargs: None
     if args.run != "default" and not args.resume and os.path.exists(run_path):
         print0(f"Run path '{run_path}' already exists. Exiting")
-        exit(1)
+        exit(1)  # causes noisy torchrun error
 
     # DDP Init
     device, ddp_master, ddp_world_size = ddp_init()
+
+    # Remove STOP file
+    stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
+    stop_next_filepath = os.path.join(run_path, "STOP_NEXT")  # if created, training will exit gracefully at the next planned checkpoint save (e.g. 250 iter)
+    if ddp_master and os.path.exists(stop_filepath):
+        os.remove(stop_filepath)
+    if ddp_master and os.path.exists(stop_next_filepath):
+        os.remove(stop_next_filepath)
 
     # Resolve user config
     if args.layers_per_compiled_region is None:
@@ -130,15 +138,10 @@ def main():
     synchronize = lambda: torch.cuda.synchronize() if device.startswith("cuda") else None
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
     wandb_logger = wandb_init("nanochat", args.run if args.wandb else None, user_config, ddp_master)
-    stop_filepath = os.path.join(run_path, "STOP")  # if created, training will exit gracefully at the current step
     resume_from_step = get_latest_checkpoint_step(run_path) if args.resume else None
     file_logger = FileLogger(run_path, resume_from_step=resume_from_step)
     file_logger.log('user_config', step=None, data=user_config)
     file_logger.log('provenance', step=None, data=collect_provenance(run_path))
-
-    # Remove STOP file
-    if ddp_master and os.path.exists(stop_filepath):
-        os.remove(stop_filepath)
 
     # Warnings
     warnings = []
@@ -436,7 +439,10 @@ def main():
 
         # Stop File Check
         if ddp_master:
-            stop_tensor.fill_(int(os.path.exists(stop_filepath)))
+            if os.path.exists(stop_filepath):
+                stop_tensor.fill_(1)
+            if args.save_every > 0 and step > start_step and step % args.save_every == 0 and os.path.exists(stop_next_filepath):
+                stop_tensor.fill_(1)
         if torch.distributed.is_initialized():
             torch.distributed.broadcast(stop_tensor, src=0)
         stop_requested = bool(stop_tensor.item())
@@ -496,7 +502,6 @@ def main():
             _, loss, metrics = model(x, y, return_logits=False, use_compiled_if_available=True, split_compiled_regions=split_compiled_regions)
             record_event(f"forward_ga{ga_idx}.end")
             fwd_metrics.append(metrics)  # may be None if metrics not enabled
-            rank_tloss = loss.detach()
             loss = loss / grad_accum
             loss_accum += loss.detach()
             if ga_idx == grad_accum - 1:
@@ -528,6 +533,7 @@ def main():
         record_event("optim.end")
 
         # Loss sync
+        rank_tloss = loss_accum.clone()
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
 
@@ -542,7 +548,7 @@ def main():
         # Logs
         tps = int(total_batch_size / dt)
         pct = step / max_steps * 100
-        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * rank_tloss.item()
+        smooth_tloss = 0.9 * smooth_tloss + (1 - 0.9) * loss_accum.item()
         debiased_smooth_tloss = smooth_tloss / (1 - 0.9**(step+1))
         total_time_str = time.strftime("%H:%M:%S", time.gmtime(total_time))
         remaining_steps = max_steps - step
@@ -567,10 +573,9 @@ def main():
         if step % args.log_every == 0 or step == max_steps-1:
             train_log_dict = {
                 'step': step,
-                'train/train_loss': loss_accum.item(),
-                'train/rank_tloss': rank_tloss.item(),
-                'train/smooth_rank_tloss': smooth_tloss,
-                'train/debiased_smooth_rank_tloss': debiased_smooth_tloss,
+                'train/train_loss': loss_accum.item(),             # avg over ranks and GA
+                'train/smooth_train_loss': debiased_smooth_tloss,  # avg over ranks and GA, smoothed, debiased
+                'train/rank_tloss': rank_tloss.item(),             # avg over GA, this rank
                 'train/lrm': lrm,
                 'train/muon_momentum': muon_momentum,
                 'train/muon_weight_decay': muon_weight_decay,

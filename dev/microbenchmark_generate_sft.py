@@ -38,7 +38,7 @@ def main():
     #    torch.set_float32_matmul_precision("high")  # uses tf32 instead of fp32 for matmuls
 
     # Model Setup
-    checkpoints_path = os.path.join(BASE_DIR, "runs_sft/scaling3_6e18_d16-counting")
+    checkpoints_path = os.path.join(BASE_DIR, "runs_sft/d12")
     latest_checkpoint_step = get_latest_checkpoint_step(checkpoints_path)
     latest_meta_path = os.path.join(checkpoints_path, f"meta_{latest_checkpoint_step:06d}.json")  # last saved file
     with open(latest_meta_path, "r") as f:
@@ -90,7 +90,7 @@ def main():
     ]
     for prompt in prompts:
         tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-        results = engine.generate(
+        results = engine.generate_batch(
             tokens,
             num_samples=2,
             max_new_tokens=max_new_tokens,
@@ -110,7 +110,7 @@ def main():
     tokens = [bos_token, user_start_token] + tokenizer.encode("Remember that my code word is 'apricot'.") + [user_end_token] \
         + [assistant_start_token] + tokenizer.encode("Okay, I'll remember that.") + [assistant_end_token] \
         + [user_start_token] + tokenizer.encode("What is my code word?") + [user_end_token, assistant_start_token]
-    results = engine.generate(
+    results = engine.generate_batch(
         tokens,
         num_samples=2,
         max_new_tokens=max_new_tokens,
@@ -138,7 +138,7 @@ def main():
         "How many buttons does she have at the end?"
     )
     tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-    results = engine.generate(
+    results = engine.generate_batch(
         tokens,
         num_samples=6,
         max_new_tokens=max_new_tokens,
@@ -159,7 +159,7 @@ def main():
         "Count the number of times the letter 'r' appears in the word 'strawberry'."
     )
     tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-    results = engine.generate(
+    results = engine.generate_batch(
         tokens,
         num_samples=6,
         max_new_tokens=max_new_tokens,
@@ -181,7 +181,7 @@ def main():
         "Who are you, who created you, and is your source code public?"
     )
     tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-    results = engine.generate(
+    results = engine.generate_batch(
         tokens,
         num_samples=4,
         max_new_tokens=max_new_tokens,
