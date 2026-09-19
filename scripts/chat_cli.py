@@ -14,6 +14,52 @@ from nanorepro.engine import Engine
 from nanorepro.calculator import CalculatorAndCounter
 BASE_DIR = get_base_path()
 
+
+class UTF8Buffer:
+    """Buffer incomplete UTF-8 characters and replace invalid characters
+
+    We could use `codecs.getincrementaldecoder("utf-8")(errors="replace")` instead of this custom implementation,
+    but that would hide the issue, so for educational purposes I implement it manually.
+    
+    Tokens don't need to represent valid UTF-8 characters, e.g. smiling face emoji UTF-8
+    b'\xf0\x9f\x98\x80' may be composed of two tokens representing bytes b'\xf0\x9f' and b'\x98\x80',
+    neither of which is valid string if decoded in separation.
+
+    During streaming, we get one token at a time, so to correctly decode and print token sequence representing:
+    [b'Hi, ', b'\xf0\x9f', b'\x98\x80', b'!'], we need to buffer them to form complete UTF-8 characters.
+
+    Example:
+        decoder = UTF8Buffer()
+        decoder.decode(b"Hi \xf0\x9f")  # "Hi "
+        decoder.decode(b"\x98\x80!")    # "😀!"
+    """
+    def __init__(self):
+        self.pending_bytes = b""
+
+    def decode(self, new_bytes, final=False):
+        assert isinstance(new_bytes, bytes)
+        self.pending_bytes += new_bytes
+        parts = []
+        while self.pending_bytes:
+            try:
+                # Try to decode the whole thing
+                parts.append(self.pending_bytes.decode("utf-8"))
+                self.pending_bytes = b""
+            except UnicodeDecodeError as error:
+                # Keep any valid bytes before the error
+                parts.append(self.pending_bytes[:error.start].decode("utf-8"))
+                if error.reason == "unexpected end of data" and not final:
+                    # Keep incomplete bytes for the next pass
+                    self.pending_bytes = self.pending_bytes[error.start:]
+                    break
+                else:
+                    # Replace invalid bytes and continue decode
+                    parts.append("\ufffd")  # �
+                    self.pending_bytes = self.pending_bytes[error.end:]
+        return "".join(parts)
+
+
+
 @torch.inference_mode()
 def main():
 
@@ -73,6 +119,7 @@ def main():
     stop_tokens = [assistant_end_token, bos_token]  # stop generation if either token is generated
     calculator = CalculatorAndCounter(tokenizer)
     engine = Engine(model, stop_tokens=stop_tokens, tool_handler=calculator)
+    utf8_buffer = UTF8Buffer()
 
     if not args.prompt:
         print()
@@ -122,17 +169,21 @@ def main():
             generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
             conversation_tokens.append(generated_token)  # includes <assistant_end>
             if generated_token != assistant_end_token:
-                generated_text = tokenizer.decode([generated_token])  # this can generate incomplete or invalid UTF-8 string, should handle it properly
+                token_bytes = tokenizer.decode_single_token_bytes(generated_token)
+                generated_text = utf8_buffer.decode(token_bytes)
                 print(generated_text, end='', flush=True)
 
         # In case conversation ends due to max_tokens, we need to append assistant end token
         if conversation_tokens[-1] != assistant_end_token:
             conversation_tokens.append(assistant_end_token)
+
+        print(utf8_buffer.decode(b"", final=True), end="", flush=True)  # flush any remaining bytes
         print()
 
         if args.prompt:
             break
 
+    
 
 if __name__ == "__main__":
     main()
