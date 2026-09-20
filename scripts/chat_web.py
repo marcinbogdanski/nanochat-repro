@@ -1,3 +1,12 @@
+"""
+OpenAI-compatible chat web server for Nanochat
+
+Loads an SFT-trained model from the "runs_sft" directory at the BASE_DIR (default ~/.cache/nanorepro).
+
+Run with:
+uv run python -m scripts.chat_web --run=d18
+"""
+
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
@@ -6,6 +15,7 @@ import time
 import json
 import uuid
 import pickle
+import logging
 import argparse
 import threading
 from contextlib import asynccontextmanager
@@ -21,8 +31,16 @@ from nanorepro.engine import Engine
 from nanorepro.calculator import CalculatorAndCounter
 from nanorepro.tokenizer import ConversationRenderer
 BASE_DIR = get_base_path()
+MAX_TOTAL_CONVERSATION_LENGTH = 32000   # max prompt length, utf-8 characters before tokenization
 
+# Standard logging setup
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
+# Command-line argument parsing
 parser = argparse.ArgumentParser(description="Run the Nanochat web server")
 parser.add_argument('--run', type=str, default="default", help="Current run name (default: 'default').")
 parser.add_argument('--temperature', type=float, default=0.6, help='Control randomness, lower values favor top-scoring tokens, higher for more random generation (0.0 is greedy; default: 0.6)')
@@ -35,8 +53,6 @@ parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attentio
 parser.add_argument('--host', type=str, default="127.0.0.1", help="Host for the web server (default: '127.0.0.1').")
 parser.add_argument('--port', type=int, default=8000, help="Port for the web server (default: 8000).")
 args = parser.parse_args()
-
-MAX_TOTAL_CONVERSATION_LENGTH = 32000   # max prompt length, utf-8 characters before tokenization
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
@@ -52,8 +68,11 @@ class ChatRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize resources here
+    """Lifespan context manager for the FastAPI app
 
+    Initializes model, tokenizer, and other resources before the app starts serving requests.
+    Currently there is no cleanup needed, as model etc will get released automatically.
+    """
     # Compute setup and helpers
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
@@ -65,6 +84,7 @@ async def lifespan(app: FastAPI):
 
     # Model Setup
     checkpoints_path = os.path.join(BASE_DIR, "runs_sft", args.run)
+    logger.info("Loading model run=%s device=%s dtype=%s", args.run, device, args.compute_dtype)
     model, _ = load_model(
         checkpoints_path=checkpoints_path,
         compute_dtype=compute_dtype,
@@ -73,9 +93,7 @@ async def lifespan(app: FastAPI):
         enable_metrics=False,  # doesn't matter for inference
         device=device,
         step=None)
-    print("Model configuration:")
-    for k, v in model.config.to_dict().items():
-        print(f"  {k:>16}: {v}")
+    logger.debug("Model configuration: %s", model.config.to_dict())
 
     # Generate Test Samples
     convo_renderer = ConversationRenderer(tokenizer)
@@ -88,6 +106,7 @@ async def lifespan(app: FastAPI):
     app.state.model = model
     app.state.convo_renderer = convo_renderer
     app.state.engine = engine
+    logger.info("Model loaded run=%s device=%s dtype=%s", args.run, device, args.compute_dtype)
 
     yield  # App serves requests during that time
 
@@ -114,7 +133,7 @@ class ChatCompletionsStreamingResponse(StreamingResponse):
             self.sse_chunks_generator.close()
 
 def stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens):
-
+    """Generator that yields Server-Sent Events (SSE) chunks for streaming chat completions."""
     def event(delta, finish_reason):
         chunk = {
             "id": completion_id,
@@ -129,31 +148,45 @@ def stream_sse_chunks(state, conversation_tokens, completion_id, created_at, mod
         }
         return "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"  # ensure_ascii=False so raw stream is more readable
 
-    yield event({"role": "assistant"}, finish_reason=None)
+    start_time = time.perf_counter()
+    num_generated_tokens = 0
+    try:
+        yield event({"role": "assistant"}, finish_reason=None)
 
-    # Generate the assistant response text
-    utf8_buffer = UTF8Buffer()
-    with state.lock:  # synchronize across FastAPI request workers
-        for token_column, finish_reasons in state.engine.generate_stream(
-            conversation_tokens,
-            max_new_tokens=max_tokens,
-            num_samples=1,
-            temperature=temperature,
-            top_k=top_k,
-            seed=42,
-        ):
-            generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
-            stop_reason = finish_reasons[0]
-            if generated_token not in state.engine.stop_tokens:  # if stop_reason is 'length', the last token is a valid part of text
-                token_bytes = state.tokenizer.decode_single_token_bytes(generated_token)
-                text_chunk = utf8_buffer.decode(token_bytes)
-                if text_chunk:
-                    yield event({"content": text_chunk}, finish_reason=None)
-        text_chunk = utf8_buffer.decode(b"", final=True)  # flush any remaining bytes in the UTF-8 buffer
-        if text_chunk:
-            yield event({"content": text_chunk}, finish_reason=None)
-    yield event({}, finish_reason=stop_reason)  # To ensure we sent stop_reason once, send it separately on it's own
-    yield "data: [DONE]\n\n"
+        # Generate the assistant response text
+        utf8_buffer = UTF8Buffer()
+        with state.lock:  # synchronize across FastAPI request workers
+            for token_column, finish_reasons in state.engine.generate_stream(
+                conversation_tokens,
+                max_new_tokens=max_tokens,
+                num_samples=1,
+                temperature=temperature,
+                top_k=top_k,
+                seed=42,
+            ):
+                num_generated_tokens += 1
+                generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
+                stop_reason = finish_reasons[0]
+                if generated_token not in state.engine.stop_tokens:  # if stop_reason is 'length', the last token is a valid part of text
+                    token_bytes = state.tokenizer.decode_single_token_bytes(generated_token)
+                    text_chunk = utf8_buffer.decode(token_bytes)
+                    if text_chunk:
+                        yield event({"content": text_chunk}, finish_reason=None)
+            text_chunk = utf8_buffer.decode(b"", final=True)  # flush any remaining bytes in the UTF-8 buffer
+            if text_chunk:
+                yield event({"content": text_chunk}, finish_reason=None)
+        yield event({}, finish_reason=stop_reason)  # To ensure we sent stop_reason once, send it separately on it's own
+        yield "data: [DONE]\n\n"
+    except GeneratorExit:
+        logger.info(
+            "Stream interrupted id=%s prompt_tokens=%d generated_tokens=%d elapsed_s=%.2f",
+            completion_id, len(conversation_tokens), num_generated_tokens, time.perf_counter() - start_time
+        )
+        raise
+    logger.info(
+        "Completion OK id=%s stream=True prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f",
+        completion_id, len(conversation_tokens), num_generated_tokens, stop_reason, time.perf_counter() - start_time
+    )
 
 # Test stream=False case:
 # curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"nanochat","messages":[{"role":"user","content":"Hello!"}]}'
@@ -194,10 +227,15 @@ def chat_completions(body: ChatRequest, request: Request):
     created_at = int(time.time())
     model_name = "nanochat"
     if body.stream:
+        # OpenAI-compatible stream mode implementation
         sse_chunks_generator = stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens)
         return ChatCompletionsStreamingResponse(sse_chunks_generator)
 
     else:
+        # OpenAI-compatible non-stream mode implementation
+
+        # Run the model
+        start_time = time.perf_counter()
         with state.lock:  # synchronize across FastAPI request workers
             new_token_rows, finish_reasons = state.engine.generate_batch(
                 conversation_tokens,
@@ -207,12 +245,16 @@ def chat_completions(body: ChatRequest, request: Request):
                 top_k=top_k,
                 seed=42,
             )
+        # Decode the generated tokens into a string
         generated_tokens = new_token_rows[0]    # num_samples=1, so index 0 is our generated token sequence
         stop_reason = finish_reasons[0]
         if generated_tokens[-1] in state.engine.stop_tokens:
             generated_tokens = generated_tokens[:-1]  # remove terminal token if present
         assistant_response = state.tokenizer.decode(generated_tokens)
-
+        logger.info(
+            "Completion OK id=%s stream=False prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f",
+            completion_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time
+        )
         # Package and return
         result = {
             "id": completion_id,
@@ -244,6 +286,11 @@ def list_models():
             }
         ]
     }
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok"}
 
 @app.get("/")
 def read_root():

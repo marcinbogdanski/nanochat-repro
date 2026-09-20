@@ -118,7 +118,7 @@ def test_disconnect_releases_lock():
             assert False  # stream produced no content?
 
     # Second call: if server-side worker-lock did not release, this will hang
-    completion = client.chat.completions.create(
+    completion = my_client.chat.completions.create(
         model="nanochat",
         messages=[{"role": "user", "content": "Hello!"}],
     )
