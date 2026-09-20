@@ -3,6 +3,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
 import time
+import json
 import uuid
 import pickle
 import argparse
@@ -13,6 +14,7 @@ import uvicorn
 from pydantic import BaseModel, Field
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from nanorepro.common import get_base_path, UTF8Buffer
 from nanorepro.checkpoint import load_model
 from nanorepro.engine import Engine
@@ -92,40 +94,44 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Test with:
-# curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"nanochat","messages":[{"role":"user","content":"Hello!"}]}'
-@app.post("/v1/chat/completions")
-def chat_completions(body: ChatRequest, request: Request):
-    """OpenAI-compatible endpoint to create chat completions"""
-    if body.model != "nanochat":
-        raise HTTPException(status_code=404, detail="Model not supported")
-    if body.stream:
-        raise HTTPException(status_code=400, detail="Streaming is not supported yet")
+class ChatCompletionsStreamingResponse(StreamingResponse):
+    """Stream SSE chunks and make sure to close the generator when response ends
+    
+    If the client disconnects, StreamingResponse may stop consuming the generator w/o closing it.
+    If the generator is suspended at yield, it will not release the model lock and block subsequent requests.
+    """
+    def __init__(self, sse_chunks_generator):
+        super().__init__(sse_chunks_generator, media_type="text/event-stream")
+        self.sse_chunks_generator = sse_chunks_generator
 
-    # Fetch the components
-    model = request.app.state.model
-    tokenizer = request.app.state.tokenizer
-    convo_renderer = request.app.state.convo_renderer
-    engine = request.app.state.engine
-    utf8_buffer = UTF8Buffer()
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.sse_chunks_generator.close()
 
-    # Prepare the input tokens
-    messages = [message.model_dump() for message in body.messages]
-    try:
-        conversation_tokens, _ = convo_renderer.render_conversation(messages)  # checks for alternating user/assistant roles etc
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
-    conversation_tokens.append(convo_renderer.assistant_start_token)
+def stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name):
 
-    # Check capacity of position embeddings
-    if len(conversation_tokens) + args.max_tokens > model.max_position_embeddings():
-        raise HTTPException(status_code=400, detail="Prompt length plus max_tokens exceeds maximum position embeddings")
+    def event(delta, finish_reason):
+        chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_at,
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,  # None | "stop" | "length"
+            }]
+        }
+        return "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"  # ensure_ascii=False so raw stream is more readable
+
+    yield event({"role": "assistant"}, finish_reason=None)
 
     # Generate the assistant response text
-    assistant_response = ""
-    stop_reason = "length"
-    with request.app.state.lock:  # synchronize across FastAPI request workers
-        for token_column, finish_reasons in engine.generate_stream(
+    utf8_buffer = UTF8Buffer()
+    with state.lock:  # synchronize across FastAPI request workers
+        for token_column, finish_reasons in state.engine.generate_stream(
             conversation_tokens,
             max_new_tokens=args.max_tokens,
             num_samples=1,
@@ -135,27 +141,81 @@ def chat_completions(body: ChatRequest, request: Request):
         ):
             generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
             stop_reason = finish_reasons[0]
-            if generated_token not in engine.stop_tokens:  # if stop_reason is 'length', the last token is a valid part of text
-                token_bytes = tokenizer.decode_single_token_bytes(generated_token)
-                assistant_response += utf8_buffer.decode(token_bytes)
-        assistant_response += utf8_buffer.decode(b"", final=True)  # flush any remaining bytes in the UTF-8 buffer
+            if generated_token not in state.engine.stop_tokens:  # if stop_reason is 'length', the last token is a valid part of text
+                token_bytes = state.tokenizer.decode_single_token_bytes(generated_token)
+                text_chunk = utf8_buffer.decode(token_bytes)
+                if text_chunk:
+                    yield event({"content": text_chunk}, finish_reason=None)
+        text_chunk = utf8_buffer.decode(b"", final=True)  # flush any remaining bytes in the UTF-8 buffer
+        if text_chunk:
+            yield event({"content": text_chunk}, finish_reason=None)
+    yield event({}, finish_reason=stop_reason)  # To ensure we sent stop_reason once, send it separately on it's own
+    yield "data: [DONE]\n\n"
 
-    # Package and return
-    result = {
-        "id": "chatcmpl-" + uuid.uuid4().hex,
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": "nanochat",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": assistant_response  # generated_text
-            },
-            "finish_reason": stop_reason,
-        }]
-    }
-    return result
+# Test stream=False case:
+# curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"nanochat","messages":[{"role":"user","content":"Hello!"}]}'
+# Test stream=True case:
+# curl -N http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"nanochat","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+@app.post("/v1/chat/completions")
+def chat_completions(body: ChatRequest, request: Request):
+    """OpenAI-compatible endpoint to create chat completions"""
+    if body.model != "nanochat":
+        raise HTTPException(status_code=404, detail="Model not supported")
+
+    # Fetch the state (tokenizer, model, engine, ..)
+    state = request.app.state
+
+    # Prepare the input tokens
+    messages = [message.model_dump() for message in body.messages]
+    try:
+        conversation_tokens, _ = state.convo_renderer.render_conversation(messages)  # checks for alternating user/assistant roles etc
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    conversation_tokens.append(state.convo_renderer.assistant_start_token)
+
+    # Check capacity of position embeddings
+    if len(conversation_tokens) + args.max_tokens > state.model.max_position_embeddings():
+        raise HTTPException(status_code=400, detail="Prompt length plus max_tokens exceeds maximum position embeddings")
+
+    completion_id = "chatcmpl-" + uuid.uuid4().hex
+    created_at = int(time.time())
+    model_name = "nanochat"
+    if body.stream:
+        sse_chunks_generator = stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name)
+        return ChatCompletionsStreamingResponse(sse_chunks_generator)
+
+    else:
+        with state.lock:  # synchronize across FastAPI request workers
+            new_token_rows, finish_reasons = state.engine.generate_batch(
+                conversation_tokens,
+                max_new_tokens=args.max_tokens,
+                num_samples=1,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                seed=42,
+            )
+        generated_tokens = new_token_rows[0]    # num_samples=1, so index 0 is our generated token sequence
+        stop_reason = finish_reasons[0]
+        if generated_tokens[-1] in state.engine.stop_tokens:
+            generated_tokens = generated_tokens[:-1]  # remove terminal token if present
+        assistant_response = state.tokenizer.decode(generated_tokens)
+
+        # Package and return
+        result = {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created_at,
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": assistant_response  # generated_text
+                },
+                "finish_reason": stop_reason,
+            }]
+        }
+        return result
 
 @app.get("/v1/models")
 def list_models():
