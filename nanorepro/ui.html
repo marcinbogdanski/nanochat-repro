@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tigger Chat</title>
+    <style>
+        * { box-sizing: border-box; }    /* include padding and border in element size */
+
+        body {
+            width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
+            max-width: 800px;
+            height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
+            margin: 0 auto;    /* no top/bottom; equal left/right */
+            display: flex;
+            flex-direction: column;
+            font: 16px/1.5 system-ui, sans-serif;    /* 16px font, 1.5 line spacing, system font with fallback */
+            color: #222;
+            background: white;
+        }
+
+        h1 { font-size: 1.5rem }
+
+        #message-history {
+            flex: 1;    /* take remaining vertical space */
+            min-height: 0;    /* allow shrink, so input is always visible */
+            overflow-y: auto;    /* enable scroll */
+            padding: 1rem 0.5rem;    /* slightly more top/bottom space */
+        }
+
+        .message {
+            margin: 0 0 1.5rem;    /* top, left/right, some space at the bottom */
+            white-space: pre-wrap;    /* preserve line breaks, but also wrap */
+            overflow-wrap: anywhere;    /* allow breaking long words */
+        }
+
+        .user {
+            width: fit-content;    /* make user bubble fit around the text */
+            max-width: 80%;
+            margin-left: auto;    /* push user bubble to the right */
+            padding: 0.6rem 1rem;    /* vertical, horizontal space inside bubble */
+            border-radius: 1rem;    /* rounded corners */
+            background: #f5f5f5;
+            box-shadow: 0 2px 5px #0002;    /* bubble shadow */
+        }
+
+        #chat-form {
+            display: flex;    /* defaults to horizontal row */
+            align-items: center;    /* center vertically (since flex is a row) */
+            gap: 0.5rem;
+            padding: 1rem 0;    /* inner space: top/bottom, no left/right */
+        }
+
+        input, button {
+            font: inherit;
+            padding: 0.6rem;    /* padding around text */
+            border: 1px solid #ccc;    /* border around input/button */
+            border-radius: 0.5rem;    /* slightly rounded */
+        }
+
+        input {
+            flex: 1;    /* take remaining horizontal space */
+            min-width: 0;    /* allow shrinking */
+        }
+        input::placeholder {
+            color: #999;  /* applies to a hint displayed when input is empty */
+            opacity: 1;   /* prevent browsers from applying additional transparency */
+        }
+        button { cursor: pointer; }    /* show pointer cursor on hover */
+    </style>
+</head>
+<body>
+    <h1>Tigger Chat</h1>
+
+    <div id="message-history"></div>
+
+    <form id="chat-form">
+        <input id="chat-input" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message">
+        <button type="submit">Send</button>
+    </form>
+
+    <script>
+        const messageHistory = document.getElementById('message-history');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+
+        function addMessage(role, text) {
+            const paragraph = document.createElement('p');
+            paragraph.className = `message ${role}`;  // set two CSS classes
+            paragraph.textContent = text;
+            messageHistory.appendChild(paragraph);
+            messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to the bottom
+        }
+
+        chatForm.addEventListener('submit', function(event) {
+            event.preventDefault();  // don't reload page
+            const text = chatInput.value.trim();
+            if (!text) return;  // user entered only whitespace
+
+            addMessage('user', text);
+            addMessage('assistant', 'This is a placeholder response.');  // simulate assistant response
+            chatInput.value = "";  // reset input
+            chatInput.focus();
+        });
+    </script>
+</body>
+</html>

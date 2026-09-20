@@ -18,13 +18,14 @@ import pickle
 import logging
 import argparse
 import threading
+from pathlib import Path
 from contextlib import asynccontextmanager
 import torch
 import uvicorn
 from pydantic import BaseModel, Field
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from nanorepro.common import get_base_path, UTF8Buffer
 from nanorepro.checkpoint import load_model
 from nanorepro.engine import Engine
@@ -294,8 +295,9 @@ async def health():
 
 @app.get("/")
 def read_root():
-    """Placeholder for future web endpoint"""
-    return {"message": "Hello world"}
+    """Serve the UI"""
+    ui_path = Path(__file__).resolve().parent.parent / "nanorepro" / "ui.html"
+    return FileResponse(ui_path, media_type="text/html")
 
 if __name__ == "__main__":
     uvicorn.run(app, host=args.host, port=args.port)
