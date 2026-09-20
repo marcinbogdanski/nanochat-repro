@@ -99,7 +99,7 @@ def main():
             seed=42,
         )
         for res in results:
-            gen_text = tokenizer.decode(res)
+            gen_text = tokenizer.decode(tokens + res)
             print("-"*80)
             print(gen_text)
 
@@ -119,7 +119,7 @@ def main():
         seed=42,
     )
     for res in results:
-        gen_text = tokenizer.decode(res)
+        gen_text = tokenizer.decode(tokens + res)
         print("-"*80)
         print(gen_text)
 
@@ -147,7 +147,7 @@ def main():
         seed=42,
     )
     for res in results:
-        gen_text = tokenizer.decode(res)
+        gen_text = tokenizer.decode(tokens + res)
         print("-"*80)
         print(gen_text)
 
@@ -168,7 +168,7 @@ def main():
         seed=42,
     )
     for res in results:
-        gen_text = tokenizer.decode(res)
+        gen_text = tokenizer.decode(tokens + res)
         print("-"*80)
         print(gen_text)
 
@@ -190,7 +190,7 @@ def main():
         seed=42,
     )
     for res in results:
-        gen_text = tokenizer.decode(res)
+        gen_text = tokenizer.decode(tokens + res)
         print("-"*80)
         print(gen_text)
 

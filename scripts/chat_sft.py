@@ -52,7 +52,7 @@ def generate_test_samples_sft(orig_model, tokenizer):
                 seed=42,
             )
             for res in gen_results:
-                gen_text = tokenizer.decode(res)
+                gen_text = tokenizer.decode(tokens + res)
                 results.append(gen_text)
         return results
     finally:

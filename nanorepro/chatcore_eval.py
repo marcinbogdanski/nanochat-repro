@@ -89,7 +89,7 @@ def evaluate_sft_generative(task, model, tokenizer, micro_batch, max_prompt_len,
         tokens = tokens[:max_prompt_len]  # Nanochat hard-truncates to 2048, all ChatCORE generative prompts fit anyway, see NOTES.md
         tokens.append(assistant_start_token)  # Add <|assistant_start|> to encourage the model
         # Generate batch
-        rows_prompt_and_new_tokens, _ = engine.generate_batch(  # list of lists or int
+        rows_new_tokens, _ = engine.generate_batch(  # list of lists or int
             tokens,
             max_new_tokens=max_new_tokens,
             num_samples=num_samples,
@@ -99,7 +99,6 @@ def evaluate_sft_generative(task, model, tokenizer, micro_batch, max_prompt_len,
             return_logits=False
         )
         # Unpack and check answer
-        rows_new_tokens = [r[len(tokens):] for r in rows_prompt_and_new_tokens]  # remove prompt tokens
         rows_new_tokens = [r[:-1] if r[-1] in stop_tokens else r for r in rows_new_tokens]  # remove terminal token if present
         rows_assistant_responses = tokenizer.decode_batch(rows_new_tokens)
         evaluations = [task.evaluate(assistant_response, eval_data=example['eval']) for assistant_response in rows_assistant_responses]

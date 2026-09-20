@@ -132,7 +132,7 @@ class Engine:
 
 
     def generate_batch(self, tokens, max_new_tokens, num_samples=1, temperature=1.0, top_k=None, seed=42, return_logits=False):
-        token_rows = [tokens.copy() for _ in range(num_samples)]
+        token_rows = [[] for _ in range(num_samples)]
         logits_list = []
         for result in self.generate_stream(tokens, max_new_tokens, num_samples, temperature, top_k, seed, return_logits):
             if return_logits:
@@ -177,7 +177,8 @@ class Engine:
             num_generated += 1
 
         finish_reasons = ["length"] * num_samples  # this is for API compatibility only, since we don't support stop_tokens this is always 'length'
+        generated_tokens = indices[:, len(tokens):].tolist()
         if return_logits:
             logits_list = torch.stack(logits_list, dim=1)  # B,T,C
-            return indices.tolist(), finish_reasons, logits_list
-        return indices.tolist(), finish_reasons
+            return generated_tokens, finish_reasons, logits_list
+        return generated_tokens, finish_reasons

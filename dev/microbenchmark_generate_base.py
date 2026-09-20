@@ -153,9 +153,9 @@ def main():
         )
         for res, res_kv in zip(results, results_kv):
             gen_text = tokenizer.decode(res)
-            print(gen_text)
+            print(prompt + gen_text)
             gen_text_kv = tokenizer.decode(res_kv)
-            print(gen_text_kv)
+            print(prompt + gen_text_kv)
             # check_diff(f"logits vs logits_kv (prompt={prompt})", logits, logits_kv)
             assert res == res_kv
         assert torch.allclose(logits, logits_kv, atol=1e-4, rtol=1e-4)
