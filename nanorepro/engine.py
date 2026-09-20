@@ -55,30 +55,20 @@ class Engine:
         self.tool_trigger_token = None if tool_handler is None else tool_handler.tool_trigger_token
 
     @torch.inference_mode()
-    def generate_stream(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
+    def generate_stream(self, tokens, max_new_tokens, num_samples=1, temperature=1.0, top_k=None, seed=42, return_logits=False):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
-        max_new_tokens = self.model.config.sequence_len - len(tokens) if max_new_tokens is None else max_new_tokens
+        assert isinstance(max_new_tokens, int) and max_new_tokens > 0
 
         device = self.model.get_device()
         compute_dtype = self.model.compute_dtype
         rng = torch.Generator(device=device).manual_seed(seed)
         max_seq_len = len(tokens) + max_new_tokens
-
         rows = [RowState(tokens.copy(), self.stop_tokens) for _ in range(num_samples)]
-        kv_cache = KVCache(
-            config=self.model.config,
-            batch_size=1,
-            max_seq_len=max_seq_len,
-            compute_dtype=compute_dtype,
-            device=device
-        )
+        kv_cache = KVCache(config=self.model.config, batch_size=1, max_seq_len=max_seq_len, compute_dtype=compute_dtype, device=device)
 
         # Generate new tokens
         num_generated = 0
         while True:
-            if num_generated >= max_new_tokens or all(row.is_stopped() for row in rows):
-                break
-
             if num_generated == 0:
                 # Prefill the model with the initial tokens
                 indices = torch.tensor([tokens], dtype=torch.long, device=device)  # B,T
@@ -121,21 +111,35 @@ class Engine:
                         if tool_output_tokens is not None:
                             rows[i].add_forced_tokens(tool_output_tokens)
 
-            if return_logits:
-                yield token_column, logits
-            else:
-                yield token_column
+            # Are we done?
             num_generated += 1
+            finish_reasons = [None] * num_samples
+            for i, row in enumerate(rows):
+                if row.is_stopped():
+                    finish_reasons[i] = "stop"
+                elif num_generated >= max_new_tokens:
+                    finish_reasons[i] = "length"
 
-    def generate_batch(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
+            # Yield Result
+            if return_logits:
+                yield token_column, finish_reasons, logits
+            else:
+                yield token_column, finish_reasons
+
+            # We are done
+            if all(fr is not None for fr in finish_reasons):
+                break
+
+
+    def generate_batch(self, tokens, max_new_tokens, num_samples=1, temperature=1.0, top_k=None, seed=42, return_logits=False):
         token_rows = [tokens.copy() for _ in range(num_samples)]
         logits_list = []
-        for result in self.generate_stream(tokens, num_samples, max_new_tokens, temperature, top_k, seed, return_logits):
+        for result in self.generate_stream(tokens, max_new_tokens, num_samples, temperature, top_k, seed, return_logits):
             if return_logits:
-                token_column, logits_column = result
+                token_column, finish_reasons, logits_column = result
                 logits_list.append(logits_column)
             else:
-                token_column = result
+                token_column, finish_reasons = result
             for i in range(num_samples):
                 if token_column[i] is not None:
                     token_rows[i].append(token_column[i])
@@ -143,15 +147,14 @@ class Engine:
         # Package and Return
         if return_logits:
             logits_list = torch.stack(logits_list, dim=1)  # B,T,C
-            return token_rows, logits_list
-        return token_rows
-
+            return token_rows, finish_reasons, logits_list
+        return token_rows, finish_reasons
 
 
     @torch.inference_mode()
-    def generate_naive(self, tokens, num_samples=1, max_new_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
+    def generate_naive(self, tokens, max_new_tokens, num_samples=1, temperature=1.0, top_k=None, seed=42, return_logits=False):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
-        max_new_tokens = self.model.config.sequence_len - len(tokens) if max_new_tokens is None else max_new_tokens
+        assert isinstance(max_new_tokens, int) and max_new_tokens > 0
         assert self.stop_tokens is None  # we don't support stop tokens here, this function is for base model only and testing
 
         device = self.model.get_device()
@@ -173,7 +176,8 @@ class Engine:
             indices = torch.cat((indices, x_col), dim=1)  # B,T+1  append
             num_generated += 1
 
+        finish_reasons = ["length"] * num_samples  # this is for API compatibility only, since we don't support stop_tokens this is always 'length'
         if return_logits:
             logits_list = torch.stack(logits_list, dim=1)  # B,T,C
-            return indices.tolist(), logits_list
-        return indices.tolist()
+            return indices.tolist(), finish_reasons, logits_list
+        return indices.tolist(), finish_reasons

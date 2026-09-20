@@ -97,10 +97,10 @@ def main():
             user_input = args.prompt
 
         conversation_tokens += [user_start_token] + tokenizer.encode(user_input) + [user_end_token, assistant_start_token]
-        for token_column in engine.generate_stream(
+        for token_column, finish_reasons in engine.generate_stream(
             conversation_tokens,
-            num_samples=1,
             max_new_tokens=256,
+            num_samples=1,
             temperature=args.temperature,
             top_k=args.top_k,
             seed=42,

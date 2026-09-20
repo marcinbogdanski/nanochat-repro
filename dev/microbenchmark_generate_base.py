@@ -133,19 +133,19 @@ def main():
     engine = Engine(model)
     for prompt in prompts:
         tokens = [bos_token] + tokenizer.encode(prompt)
-        results, logits = engine.generate_naive(
+        results, _, logits = engine.generate_naive(
             tokens,
-            num_samples=3,
             max_new_tokens=max_new_tokens,
+            num_samples=3,
             temperature=1.0,
             top_k=50,
             seed=42,
             return_logits=True
         )
-        results_kv, logits_kv = engine.generate_batch(
+        results_kv, _, logits_kv = engine.generate_batch(
             tokens,
-            num_samples=3,
             max_new_tokens=max_new_tokens,
+            num_samples=3,
             temperature=1.0,
             top_k=50,
             seed=42,
@@ -200,10 +200,10 @@ def main():
 
     # Warmup
     for _ in range(2):
-        _ = engine.generate_naive(
+        engine.generate_naive(
             tokens,
-            num_samples=num_samples,
             max_new_tokens=max_new_tokens,
+            num_samples=num_samples,
             temperature=1.0,
             top_k=50,
             seed=42,
@@ -212,10 +212,10 @@ def main():
     # Timing naive generation
     torch.cuda.synchronize() if device.startswith("cuda") else None
     start_time = time.time()
-    _ = engine.generate_naive(
+    engine.generate_naive(
         tokens,
-        num_samples=num_samples,
         max_new_tokens=max_new_tokens,
+        num_samples=num_samples,
         temperature=1.0,
         top_k=50,
         seed=42,
@@ -228,10 +228,10 @@ def main():
 
     # Warmup
     for _ in range(2):
-        _ = engine.generate_batch(
+        engine.generate_batch(
             tokens,
-            num_samples=num_samples,
             max_new_tokens=max_new_tokens,
+            num_samples=num_samples,
             temperature=1.0,
             top_k=50,
             seed=42,
@@ -240,10 +240,10 @@ def main():
     # Timing KV cache generation
     torch.cuda.synchronize() if device.startswith("cuda") else None
     start_time = time.time()
-    _ = engine.generate_batch(
+    engine.generate_batch(
         tokens,
-        num_samples=num_samples,
         max_new_tokens=max_new_tokens,
+        num_samples=num_samples,
         temperature=1.0,
         top_k=50,
         seed=42,

@@ -125,22 +125,20 @@ def chat_completions(body: ChatRequest, request: Request):
     assistant_response = ""
     stop_reason = "length"
     with request.app.state.lock:  # synchronize across FastAPI request workers
-        for token_column in engine.generate_stream(
+        for token_column, finish_reasons in engine.generate_stream(
             conversation_tokens,
-            num_samples=1,
             max_new_tokens=args.max_tokens,
+            num_samples=1,
             temperature=args.temperature,
             top_k=args.top_k,
             seed=42,
         ):
             generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
-            if generated_token in engine.stop_tokens:
-                stop_reason = "stop"
-            else:
+            stop_reason = finish_reasons[0]
+            if generated_token not in engine.stop_tokens:  # if stop_reason is 'length', the last token is a valid part of text
                 token_bytes = tokenizer.decode_single_token_bytes(generated_token)
                 assistant_response += utf8_buffer.decode(token_bytes)
         assistant_response += utf8_buffer.decode(b"", final=True)  # flush any remaining bytes in the UTF-8 buffer
-
 
     # Package and return
     result = {
