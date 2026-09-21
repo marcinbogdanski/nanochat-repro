@@ -70,23 +70,26 @@
 
         #chat-form {
             display: flex;    /* defaults to horizontal row */
-            align-items: center;    /* center vertically (since flex is a row) */
+            align-items: flex-end;    /* keep the button at the bottom as the input grows */
             gap: 0.5rem;
             padding: 1rem 0;    /* inner space: top/bottom, no left/right */
         }
 
-        input, button {
+        textarea, button {
             font: inherit;
             padding: 0.6rem;    /* padding around text */
             border: 1px solid #ccc;    /* border around input/button */
             border-radius: 0.5rem;    /* slightly rounded */
         }
 
-        input {
+        textarea {
             flex: 1;    /* take remaining horizontal space */
             min-width: 0;    /* allow shrinking */
+            max-height: 20rem;    /* limit the height of the textarea */
+            overflow-y: auto;    /* vertical scroll if user enters a lot of text */
+            resize: none;      /* prevent manual resizing */
         }
-        input::placeholder {
+        textarea::placeholder {
             color: #999;  /* applies to a hint displayed when input is empty */
             opacity: 1;   /* prevent browsers from applying additional transparency */
         }
@@ -127,7 +130,7 @@
     <div id="message-history"></div>
 
     <form id="chat-form">
-        <input id="chat-input" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message">
+        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
         <button type="submit">Send</button>
     </form>
 
@@ -140,6 +143,23 @@
         const messages = [];  // conversation turns
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
+
+        function resizeInput() {
+            chatInput.style.height = 'auto';  // allow shrinking when text is deleted
+            const borderHeight = chatInput.offsetHeight - chatInput.clientHeight;
+            chatInput.style.height = `${chatInput.scrollHeight + borderHeight}px`;  // set height needed to display text, CSS handles the layout and caps the max
+        }
+
+        chatInput.addEventListener('input', resizeInput);  // typing and pasting
+        window.addEventListener('resize', resizeInput);  // adjust height if window is resized
+        resizeInput();
+
+        chatInput.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                event.preventDefault();   // prevent newline (textarea default)
+                chatForm.requestSubmit();  // trigger form submission instead
+            }
+        });
 
         function addMessage(role, text) {
             document.body.classList.remove('empty-chat');  // switch to conversation layout
@@ -175,6 +195,7 @@
                 messageHistory.replaceChildren();
                 document.body.classList.add('empty-chat');  // switch to welcome screen layout
                 chatInput.value = '';
+                resizeInput();     // new chat, resize back to normal
                 chatInput.focus();
             }
             finally {
@@ -197,6 +218,7 @@
             const reply = { role: 'assistant', content: '' };
             let assistantParagraph = null;
             chatInput.value = '';  // reset input
+            resizeInput();     // message sent, resize textarea back to normal
             chatInput.disabled = true;
             sendButton.type = 'button';  // switch from 'form submit' to 'button', deactivates form submission handler
             sendButton.textContent = 'Stop';
@@ -283,6 +305,7 @@
                 sendButton.textContent = 'Send';  // restore button text
                 sendButton.disabled = false;
                 document.body.classList.toggle('empty-chat', messageHistory.childElementCount === 0);  // if no history, then show welcome screen
+                resizeInput();  // restore size after text restored
                 chatInput.focus();
             }
         }
