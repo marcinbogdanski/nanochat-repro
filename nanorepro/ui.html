@@ -91,9 +91,31 @@
             opacity: 1;   /* prevent browsers from applying additional transparency */
         }
         button { cursor: pointer; }    /* show pointer cursor on hover */
+
+        /*********************************/
+        
+        body.empty-chat {
+            justify-content: center;    /* elements on welcome screen are centered */
+        }
+        .empty-chat header {
+            align-self: center;    /* centered header */
+        }
+        .empty-chat h1 {
+            flex-direction: column;   /* stack logo and text vertically */
+            margin: 0;
+        }
+        .empty-chat h1 img {
+            width: 6rem;          /* bit larger on welcome screen */
+            height: 6rem;
+        }
+        .empty-chat #new-chat-button,
+        .empty-chat #message-history {
+            display: none;    /* new chat button not needed, nothing to clear yet */
+        }
+
     </style>
 </head>
-<body>
+<body class="empty-chat">
     <header>
         <h1>
             <img src="/tiger_logo.svg" alt="">
@@ -120,6 +142,7 @@
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
 
         function addMessage(role, text) {
+            document.body.classList.remove('empty-chat');  // switch to conversation layout
             const paragraph = document.createElement('p');
             paragraph.className = `message ${role}`;  // set two CSS classes
             paragraph.textContent = text;
@@ -150,6 +173,7 @@
                 await activeRequest;  // wait for ongoing request to finish
                 messages.length = 0;  // clear the UI
                 messageHistory.replaceChildren();
+                document.body.classList.add('empty-chat');  // switch to welcome screen layout
                 chatInput.value = '';
                 chatInput.focus();
             }
@@ -258,6 +282,7 @@
                 sendButton.type = 'submit';  // restore form submit, re-activates form submission handler
                 sendButton.textContent = 'Send';  // restore button text
                 sendButton.disabled = false;
+                document.body.classList.toggle('empty-chat', messageHistory.childElementCount === 0);  // if no history, then show welcome screen
                 chatInput.focus();
             }
         }
