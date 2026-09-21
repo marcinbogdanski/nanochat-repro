@@ -85,6 +85,7 @@
         const chatInput = document.getElementById('chat-input');
         const sendButton = chatForm.querySelector('button')
         const messages = [];  // conversation turns
+        let activeAbortController = null;  // active controller, when request is live
 
         function addMessage(role, text) {
             const paragraph = document.createElement('p');
@@ -95,22 +96,33 @@
             return paragraph;    // streaming updates this in place
         }
 
+        sendButton.addEventListener('click', function() {
+            if (activeAbortController) {
+                sendButton.disabled = true;  // disable so user doesn't click repeatedly
+                sendButton.textContent = 'Cancelling...';  // provide user feedback
+                activeAbortController.abort();  // cancel the ongoing request
+            }
+        });
+
         chatForm.addEventListener('submit', async function(event) {
             event.preventDefault();  // don't reload page
             const text = chatInput.value.trim();
-            if (!text || sendButton.disabled) return;  // ignore whitespace only, or if request in progress
+            if (!text || activeAbortController) return;  // ignore whitespace only, or if request in progress
 
             const userMessage = { role: 'user', content: text };
-            addMessage('user', text);
+            const userParagraph = addMessage('user', text);
+            const reply = { role: 'assistant', content: '' };
+            let assistantParagraph = null;
             chatInput.value = '';  // reset input
             chatInput.disabled = true;
-            sendButton.disabled = true;
-            const controller = new AbortController();
+            sendButton.type = 'button';  // switch from 'form submit' to 'button', deactivates form submission handler
+            sendButton.textContent = 'Stop';
+            activeAbortController = new AbortController();
 
             try {
                 const response = await fetch('/v1/chat/completions', {
                     method: 'POST',
-                    signal: controller.signal,  // closes stream if something goes wrong
+                    signal: activeAbortController.signal,  // closes stream if something goes wrong
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         model: 'nanochat',
@@ -122,8 +134,7 @@
                     throw new Error(`API request failed with status ${response.status}`);
                 }
 
-                const assistantParagraph = addMessage('assistant', '');
-                const reply = { role: 'assistant', content: '' };
+                assistantParagraph = addMessage('assistant', '');
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();  // handle invalid/incomplete UTF-8
                 let networkBuffer = '';    // network read may end in the middle of SSE events
@@ -167,11 +178,26 @@
                 }
                 messages.push(userMessage, reply);  // push only successful turns
             } catch (error) {
-                addMessage('error', `Error: ${error.message}`);
-                chatInput.value = text;  // restore user input so it can be retried
+                if (activeAbortController.signal.aborted) {
+                    if (reply.content) {
+                        messages.push(userMessage, reply);  // keep partial message
+                    } else {
+                        userParagraph.remove();  // cleanup
+                        if (assistantParagraph) {
+                            assistantParagraph.remove();  // cleanup
+                        }
+                        chatInput.value = text;  // restore user input
+                    }
+                } else {
+                    addMessage('error', `Error: ${error.message}`);
+                    chatInput.value = text;  // restore user input so it can be retried
+                }
             } finally {
-                controller.abort();  // abort the fetch request if still ongoing
+                activeAbortController.abort();  // abort the fetch request if still ongoing
+                activeAbortController = null;
                 chatInput.disabled = false;
+                sendButton.type = 'submit';  // restore form submit, re-activates form submission handler
+                sendButton.textContent = 'Send';  // restore button text
                 sendButton.disabled = false;
                 chatInput.focus();
             }
