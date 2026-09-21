@@ -19,7 +19,14 @@
             background: white;
         }
 
-        h1 { font-size: 1.5rem }
+        h1 { font-size: 2rem }
+
+        header {
+            display: flex;
+            flex-direction: column;  /* stack children vertically */
+            align-items: flex-start; /* left-aligned. */
+            gap: 0.5rem;    /* space between children */
+        }
 
         #message-history {
             flex: 1;    /* take remaining vertical space */
@@ -70,7 +77,10 @@
     </style>
 </head>
 <body>
-    <h1>Tigger Chat</h1>
+    <header>
+        <h1>Tigger Chat</h1>
+        <button id="new-chat-button" type="button">New Chat</button>
+    </header>
 
     <div id="message-history"></div>
 
@@ -83,9 +93,11 @@
         const messageHistory = document.getElementById('message-history');
         const chatForm = document.getElementById('chat-form');
         const chatInput = document.getElementById('chat-input');
-        const sendButton = chatForm.querySelector('button')
+        const sendButton = chatForm.querySelector('button');
+        const newChatButton = document.getElementById('new-chat-button');
         const messages = [];  // conversation turns
         let activeAbortController = null;  // active controller, when request is live
+        let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
 
         function addMessage(role, text) {
             const paragraph = document.createElement('p');
@@ -104,11 +116,38 @@
             }
         });
 
-        chatForm.addEventListener('submit', async function(event) {
+        newChatButton.addEventListener('click', async function() {
+            if (newChatButton.disabled) {
+                return;  // prevent clicking multiple times
+            }
+            newChatButton.disabled = true;
+            try {
+                if (activeAbortController) {
+                    sendButton.disabled = true;
+                    sendButton.textContent = 'Cancelling...';
+                    activeAbortController.abort();  // stop request, if in flight
+                }
+                await activeRequest;  // wait for ongoing request to finish
+                messages.length = 0;  // clear the UI
+                messageHistory.replaceChildren();
+                chatInput.value = '';
+                chatInput.focus();
+            }
+            finally {
+                newChatButton.disabled = false;  // re-enable the New Chat button
+            }
+        });
+
+        chatForm.addEventListener('submit', function(event) {
             event.preventDefault();  // don't reload page
             const text = chatInput.value.trim();
-            if (!text || activeAbortController) return;  // ignore whitespace only, or if request in progress
+            if (!text || activeAbortController) {
+                return;  // ignore whitespace only, or if request in progress
+            }
+            activeRequest = sendMessage(text);  // initiate sending the message
+        });
 
+        async function sendMessage(text) {
             const userMessage = { role: 'user', content: text };
             const userParagraph = addMessage('user', text);
             const reply = { role: 'assistant', content: '' };
@@ -201,7 +240,7 @@
                 sendButton.disabled = false;
                 chatInput.focus();
             }
-        });
+        }
     </script>
 </body>
 </html>
