@@ -144,10 +144,19 @@
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
 
+        function isNearBottom() {
+            const distance = messageHistory.scrollHeight - messageHistory.clientHeight - messageHistory.scrollTop;  // distance from bottom
+            return distance < 64;   // scroll close to the bottom (~2.7 lines of text)
+        }
+
         function resizeInput() {
+            const scrollFollowsMessages = isNearBottom();    // if near bottom, scroll along with messages
             chatInput.style.height = 'auto';  // allow shrinking when text is deleted
             const borderHeight = chatInput.offsetHeight - chatInput.clientHeight;
             chatInput.style.height = `${chatInput.scrollHeight + borderHeight}px`;  // set height needed to display text, CSS handles the layout and caps the max
+            if (scrollFollowsMessages) {
+                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+            }
         }
 
         chatInput.addEventListener('input', resizeInput);  // typing and pasting
@@ -162,12 +171,15 @@
         });
 
         function addMessage(role, text) {
+            const scrollFollowsMessages = role === 'user' || isNearBottom();    // always scroll if user just entered message, check before altering textContent!
             document.body.classList.remove('empty-chat');  // switch to conversation layout
             const paragraph = document.createElement('p');
             paragraph.className = `message ${role}`;  // set two CSS classes
             paragraph.textContent = text;
             messageHistory.appendChild(paragraph);
-            messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to the bottom
+            if (scrollFollowsMessages) {
+                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+            }
             return paragraph;    // streaming updates this in place
         }
 
@@ -270,8 +282,11 @@
 
                             const chunk = JSON.parse(data);
                             reply.content += chunk.choices[0].delta.content || '';  // role/finish events have no text
+                            const scrollFollowsMessages = isNearBottom();  // check _before_ altering textContent, updated textContent may push content down below "snap tolerance"
                             assistantParagraph.textContent = reply.content;
-                            messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to the bottom
+                            if (scrollFollowsMessages) {
+                                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+                            }
                         }
                     }
                 } finally {
