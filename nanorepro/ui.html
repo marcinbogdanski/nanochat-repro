@@ -92,6 +92,7 @@
             paragraph.textContent = text;
             messageHistory.appendChild(paragraph);
             messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to the bottom
+            return paragraph;    // streaming updates this in place
         }
 
         chatForm.addEventListener('submit', async function(event) {
@@ -104,32 +105,72 @@
             chatInput.value = '';  // reset input
             chatInput.disabled = true;
             sendButton.disabled = true;
+            const controller = new AbortController();
 
             try {
                 const response = await fetch('/v1/chat/completions', {
                     method: 'POST',
+                    signal: controller.signal,  // closes stream if something goes wrong
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         model: 'nanochat',
                         messages: [...messages, userMessage],  // history plus the new message
-                        stream: false
+                        stream: true
                     })
                 });
                 if (!response.ok){
                     throw new Error(`API request failed with status ${response.status}`);
                 }
 
-                const completion = await response.json();
-                const reply = completion.choices[0].message;
+                const assistantParagraph = addMessage('assistant', '');
+                const reply = { role: 'assistant', content: '' };
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();  // handle invalid/incomplete UTF-8
+                let networkBuffer = '';    // network read may end in the middle of SSE events
+                let streamDone = false;
+
+                try {
+                    while (!streamDone) {
+                        const { value, done } = await reader.read();
+                        if (done) {
+                            throw new Error('Response SSE stream ended before [DONE]');
+                        }
+                        networkBuffer += decoder.decode(value, { stream: true });  // preserve split UTF-8
+
+                        // Our server separates SSE events with a blank line.
+                        let eventEnd;
+                        while ((eventEnd = networkBuffer.indexOf('\n\n')) !== -1) {
+                            const event = networkBuffer.slice(0, eventEnd);
+                            networkBuffer = networkBuffer.slice(eventEnd + 2);  // +2 to move past \n\n
+                            if (!event.startsWith('data: ')) {
+                                throw new Error(`Unexpected SSE event: ${event}`);
+                            }
+
+                            const data = event.slice('data: '.length);
+                            if (data === '[DONE]') {
+                                streamDone = true;
+                                break;
+                            }
+
+                            const chunk = JSON.parse(data);
+                            reply.content += chunk.choices[0].delta.content || '';  // role/finish events have no text
+                            assistantParagraph.textContent = reply.content;
+                            messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to the bottom
+                        }
+                    }
+                } finally {
+                    reader.releaseLock();  // release the reader lock on the stream
+                }
+
                 if (!reply.content){
                     throw new Error('Assistant response is empty');
                 }
-                addMessage(reply.role, reply.content);
-                messages.push(userMessage, reply);  // push only successful turns            
+                messages.push(userMessage, reply);  // push only successful turns
             } catch (error) {
                 addMessage('error', `Error: ${error.message}`);
                 chatInput.value = text;  // restore user input so it can be retried
             } finally {
+                controller.abort();  // abort the fetch request if still ongoing
                 chatInput.disabled = false;
                 sendButton.disabled = false;
                 chatInput.focus();
