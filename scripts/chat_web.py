@@ -293,6 +293,16 @@ async def health():
     """Health check endpoint."""
     return {"status": "ok"}
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    icon_path = Path(__file__).resolve().parent.parent / "assets" / "favicon.ico"
+    return FileResponse(icon_path, media_type="image/x-icon")
+
+@app.get("/tiger_logo.svg", include_in_schema=False)
+def tiger_logo():
+    logo_path = Path(__file__).resolve().parent.parent / "assets" / "tiger_logo.svg"
+    return FileResponse(logo_path, media_type="image/svg+xml")
+
 @app.get("/")
 def read_root():
     """Serve the UI"""

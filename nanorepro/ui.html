@@ -4,10 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Tigger Chat</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <style>
         * { box-sizing: border-box; }    /* include padding and border in element size */
 
+        html {
+            background: #f7f7f7;
+        }
+
         body {
+            padding: 0 1rem;  /* white space inside the left and right edges */
             width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
             max-width: 800px;
             height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
@@ -19,12 +25,23 @@
             background: white;
         }
 
-        h1 { font-size: 2rem }
+        h1 {
+            display: flex;      /* logo and text side by side */
+            align-items: center;    /* vertically center the logo and text */
+            gap: 0.5rem;    /* space between logo and text */
+            font-size: 2rem;
+            margin-bottom: 0;  /* remove default bottom margin for h1 */
+        }
+        h1 img {
+            width: 2.5rem;
+            height: 2.5rem;
+        }
 
         header {
             display: flex;
             flex-direction: column;  /* stack children vertically */
-            align-items: flex-start; /* left-aligned. */
+            align-items: stretch;  /* button fills the header width */
+            width: fit-content;   /* only as wide as logo + text */
             gap: 0.5rem;    /* space between children */
         }
 
@@ -78,7 +95,10 @@
 </head>
 <body>
     <header>
-        <h1>Tigger Chat</h1>
+        <h1>
+            <img src="/tiger_logo.svg" alt="">
+            Tigger Chat
+        </h1>
         <button id="new-chat-button" type="button">New Chat</button>
     </header>
 
