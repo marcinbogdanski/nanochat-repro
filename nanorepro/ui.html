@@ -83,6 +83,8 @@
         const messageHistory = document.getElementById('message-history');
         const chatForm = document.getElementById('chat-form');
         const chatInput = document.getElementById('chat-input');
+        const sendButton = chatForm.querySelector('button')
+        const messages = [];  // conversation turns
 
         function addMessage(role, text) {
             const paragraph = document.createElement('p');
@@ -92,15 +94,46 @@
             messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to the bottom
         }
 
-        chatForm.addEventListener('submit', function(event) {
+        chatForm.addEventListener('submit', async function(event) {
             event.preventDefault();  // don't reload page
             const text = chatInput.value.trim();
-            if (!text) return;  // user entered only whitespace
+            if (!text || sendButton.disabled) return;  // ignore whitespace only, or if request in progress
 
+            const userMessage = { role: 'user', content: text };
             addMessage('user', text);
-            addMessage('assistant', 'This is a placeholder response.');  // simulate assistant response
-            chatInput.value = "";  // reset input
-            chatInput.focus();
+            chatInput.value = '';  // reset input
+            chatInput.disabled = true;
+            sendButton.disabled = true;
+
+            try {
+                const response = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'nanochat',
+                        messages: [...messages, userMessage],  // history plus the new message
+                        stream: false
+                    })
+                });
+                if (!response.ok){
+                    throw new Error(`API request failed with status ${response.status}`);
+                }
+
+                const completion = await response.json();
+                const reply = completion.choices[0].message;
+                if (!reply.content){
+                    throw new Error('Assistant response is empty');
+                }
+                addMessage(reply.role, reply.content);
+                messages.push(userMessage, reply);  // push only successful turns            
+            } catch (error) {
+                addMessage('error', `Error: ${error.message}`);
+                chatInput.value = text;  // restore user input so it can be retried
+            } finally {
+                chatInput.disabled = false;
+                sendButton.disabled = false;
+                chatInput.focus();
+            }
         });
     </script>
 </body>
