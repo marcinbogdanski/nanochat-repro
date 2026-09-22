@@ -58,6 +58,10 @@
             overflow-wrap: anywhere;    /* allow breaking long words */
         }
 
+        .special-token {
+            color: #0891b2;    /* cyan for tool-call markers */
+        }
+
         .user {
             width: fit-content;    /* make user bubble fit around the text */
             max-width: 80%;
@@ -170,12 +174,45 @@
             }
         });
 
+        function renderAssistantText(paragraph, text) {
+            // Color special tokens like <|python_start|> slightly for better visibility
+
+            // Note 1:
+            // This renders full assistant text, including regex, every SSE chunk. Not ideal but for now should be ok.
+            // Alternatively we could append, but then coloring needs to account <|python_start|> may arrive in separate SSE events.
+
+            // Note 2:
+            // Via completions API we are getting plain text with substrings like "<|python_start|>". There is no way
+            // to distinguish between tool call marker and model outputting literal "<|python_start|>" text at this point.
+            // One way to do this properly would be to move to OpenAI responses API, which handles tool calls explicitly.
+
+            // split by special tokens. parts = ["Let's check:", "<|python_start|>", "2+2=", "<|python_end|>", ...]
+            const parts = text.split(/(<\|python_start\|>|<\|python_end\|>|<\|output_start\|>|<\|output_end\|>)/g);
+            
+            const specialTokens = ['<|python_start|>', '<|python_end|>', '<|output_start|>', '<|output_end|>'];
+            paragraph.replaceChildren();
+            parts.forEach((part) => {
+                if (specialTokens.includes(part)) {
+                    const span = document.createElement('span');
+                    span.className = 'special-token';
+                    span.textContent = part;
+                    paragraph.append(span);
+                } else {
+                    paragraph.append(part);
+                }
+            }); 
+        }
+
         function addMessage(role, text) {
             const scrollFollowsMessages = role === 'user' || isNearBottom();    // always scroll if user just entered message, check before altering textContent!
             document.body.classList.remove('empty-chat');  // switch to conversation layout
             const paragraph = document.createElement('p');
             paragraph.className = `message ${role}`;  // set two CSS classes
-            paragraph.textContent = text;
+            if (role === 'assistant') {
+                renderAssistantText(paragraph, text);
+            } else {
+                paragraph.textContent = text;
+            }
             messageHistory.appendChild(paragraph);
             if (scrollFollowsMessages) {
                 messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
@@ -283,7 +320,7 @@
                             const chunk = JSON.parse(data);
                             reply.content += chunk.choices[0].delta.content || '';  // role/finish events have no text
                             const scrollFollowsMessages = isNearBottom();  // check _before_ altering textContent, updated textContent may push content down below "snap tolerance"
-                            assistantParagraph.textContent = reply.content;
+                            renderAssistantText(assistantParagraph, reply.content);  // style current message
                             if (scrollFollowsMessages) {
                                 messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
                             }
