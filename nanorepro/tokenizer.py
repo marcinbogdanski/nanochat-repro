@@ -15,6 +15,26 @@ class ConversationRenderer:
         self.output_end_token = self.tokenizer.encode_single_token('<|output_end|>')
 
     def render_conversation(self, messages):
+        """Render a structured conversation into token list, inserting special tokens as needed (<|user_start|> etc.)
+        
+        Example:
+            messages = [
+                {
+                    "role": "user",
+                    "content": "Hello!"
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Hi there!"},
+                        {"type": "python", "text": "print('Hello World')"},
+                        {"type": "python_output", "text": "Hello World"},
+                        {"type": "text", "text": "Goodbye!"},
+                    ]
+                }
+            ]
+            token_list, mask_list = renderer.render_conversation(messages)
+        """
         if messages[0]['role'] == 'system' and messages[1]['role'] == 'user':
             merged_content = messages[0]['content'] + "\n\n" + messages[1]['content']
             messages = [{'role': 'user', 'content': merged_content}] + messages[2:]
@@ -65,6 +85,48 @@ class ConversationRenderer:
 
         return token_list, mask_list
 
+    def decode_single_message(self, token_list):
+        """Decode token list representing a _single_ message into structured message parts."""
+
+        # Decode into intermediate event list
+        message_decoder = MessageDecoder(self.tokenizer)
+        events = []
+        for token in token_list:
+            events.extend(message_decoder.feed(token))
+        events.extend(message_decoder.end_message_stream())
+
+        # Decode intermediate event list into structured messages
+        message = None
+        for event_type, event_value in events:
+            if event_type == 'role_start':
+                message = {
+                    'role': event_value,
+                    'content': []
+                }
+            elif event_type == 'role_end':
+                pass  # events are guaranteed to be well-formed, so we don't need to do anything here
+            elif event_type == 'part_start':
+                message['content'].append({
+                    'type': event_value,
+                    'text': ''
+                })
+            elif event_type == 'part_end':
+                pass  # events are guaranteed to be well-formed, so we don't need to do anything here
+            elif event_type == 'delta':
+                message['content'][-1]['text'] += event_value
+
+        # Flatten content if it contains only one text part, keep python parts structured
+        if message is not None:
+            if not message['content']:
+                message['content'] = ''
+            elif len(message['content']) == 1 and message['content'][0]['type'] == 'text':
+                message['content'] = message['content'][0]['text']
+        else:
+            raise ValueError("Failed to decode message: no message found")
+        return message
+
+
+
 class DecoderState(Enum):
     """Message decoder state machine.
     
@@ -84,7 +146,7 @@ class DecoderState(Enum):
     STREAM_FINISHED = auto()
 
 class MessageDecoder:
-    """Decodes a stream of tokens representing single user/assistant message into structured parts.
+    """Decodes a stream of tokens representing _single_ user/assistant message into structured parts.
     
     To enable OpenAI-compatible responses API, we need to break down messages into structured parts: user_text, assistant_text, python_code, python_output.
     In batch mode (when we have the whole token sequence), this is simple: scan through the tokens, identify parts and decode.
