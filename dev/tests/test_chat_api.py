@@ -4,7 +4,7 @@
 # ///
 """Test if our chat API is working with OpenAI SDK
 
-Run with:
+Run with (requires running chat_wab.py server):
 uv run dev/tests/test_chat_api.py
 """
 
@@ -33,6 +33,7 @@ def test_models_list():
     print(model)
     assert model.id == "nanochat"
     assert model.owned_by == "nanochat-repro"
+    print("test_models_list passed")
 
 
 def test_chat_completion():
@@ -54,6 +55,7 @@ def test_chat_completion():
     assert choice.finish_reason in {"stop", "length"}
     assert "<|bos|>" not in choice.message.content  # confirm stop tokens don't leak to client
     assert "<|assistant_end|>" not in choice.message.content
+    print("test_chat_completion passed")
 
 def test_chat_completion_stream():
     with client.chat.completions.create(
@@ -82,6 +84,7 @@ def test_chat_completion_stream():
     assert response_text.strip()
     assert "<|bos|>" not in response_text
     assert "<|assistant_end|>" not in response_text
+    print("test_chat_completion_stream passed")
 
 def test_stream_matches_non_stream():
     messages=[{"role": "user", "content": "Hello!"}]
@@ -101,6 +104,7 @@ def test_stream_matches_non_stream():
     stream_response = "".join(choice.delta.content or "" for choice in choices)
     assert non_stream_response == stream_response
     assert completion.choices[0].finish_reason == choices[-1].finish_reason
+    print("test_stream_matches_non_stream passed")
 
 def test_disconnect_releases_lock():
 
@@ -124,6 +128,7 @@ def test_disconnect_releases_lock():
     )
     assert completion.choices[0].message.content
     assert completion.choices[0].finish_reason in {"stop", "length"}
+    print("test_disconnect_releases_lock passed")
 
 
 def test_invalid_requests():
@@ -134,12 +139,16 @@ def test_invalid_requests():
     expect_status(422, model="nanochat", messages=[])
     expect_status(422, model="nanochat", messages=[{"role": "user", "content": ""}])
     expect_status(422, model="nanochat", messages=[{"role": "system", "content": "Hello!"}])
+    print("test_invalid_requests passed")
 
-if __name__ == "__main__":
+def main():
     test_models_list()
     test_chat_completion()
     test_chat_completion_stream()
     test_stream_matches_non_stream()
-    test_invalid_requests()
     test_disconnect_releases_lock()
+    test_invalid_requests()
     print("All tests passed!")
+
+if __name__ == "__main__":
+    main()
