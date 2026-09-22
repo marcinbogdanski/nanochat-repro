@@ -25,6 +25,7 @@ uv run python -m scripts.download_eval_bundle
 uv run python -m scripts.train_tokenizer
 uv run ./runs/train_d12.sh --run=d12              # pretrain, assumes GPUs 0,1 available
 uv run ./runs/train_sft_d12.sh --run=d12          # SFT continuation
+uv run -m scripts.chat_web --run=d12              # serve SFT model on http://localhost:8000
 ```
 
 The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `runs/train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
