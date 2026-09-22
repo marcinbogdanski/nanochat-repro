@@ -1,4 +1,6 @@
+from typing import Literal
 from enum import Enum, auto
+from dataclasses import dataclass
 from nanorepro.common import UTF8Buffer
 
 class ConversationRenderer:
@@ -16,7 +18,7 @@ class ConversationRenderer:
 
     def render_conversation(self, messages):
         """Render a structured conversation into token list, inserting special tokens as needed (<|user_start|> etc.)
-        
+
         Example:
             messages = [
                 {
@@ -85,6 +87,7 @@ class ConversationRenderer:
 
         return token_list, mask_list
 
+
     def decode_single_message(self, token_list):
         """Decode token list representing a _single_ message into structured message parts."""
 
@@ -97,34 +100,30 @@ class ConversationRenderer:
 
         # Decode intermediate event list into structured messages
         message = None
-        for event_type, event_value in events:
-            if event_type == 'role_start':
+        for event in events:
+            if event.type == 'role_start':
                 message = {
-                    'role': event_value,
+                    'role': event.value,
+                    'status': 'incomplete',
                     'content': []
                 }
-            elif event_type == 'role_end':
-                pass  # events are guaranteed to be well-formed, so we don't need to do anything here
-            elif event_type == 'part_start':
+            elif event.type == 'role_end':
+                message['status'] = event.status
+            elif event.type == 'part_start':
                 message['content'].append({
-                    'type': event_value,
-                    'text': ''
+                    'type': event.value,
+                    'text': '',
+                    'status': 'incomplete',
                 })
-            elif event_type == 'part_end':
-                pass  # events are guaranteed to be well-formed, so we don't need to do anything here
-            elif event_type == 'delta':
-                message['content'][-1]['text'] += event_value
+            elif event.type == 'part_end':
+                message['content'][-1]['status'] = event.status
+            elif event.type == 'delta':
+                message['content'][-1]['text'] += event.value
 
-        # Flatten content if it contains only one text part, keep python parts structured
-        if message is not None:
-            if not message['content']:
-                message['content'] = ''
-            elif len(message['content']) == 1 and message['content'][0]['type'] == 'text':
-                message['content'] = message['content'][0]['text']
-        else:
+        # Guard empty case
+        if message is None:
             raise ValueError("Failed to decode message: no message found")
         return message
-
 
 
 class DecoderState(Enum):
@@ -145,6 +144,12 @@ class DecoderState(Enum):
     ASSISTANT_PYTHON_OUTPUT = auto()
     STREAM_FINISHED = auto()
 
+@dataclass
+class MessageStreamEvent:
+    type: Literal["role_start", "role_end", "part_start", "part_end", "delta"]
+    value: str
+    status: Literal["completed", "incomplete"] | None = None   # status only applicable to selected events    
+
 class MessageDecoder:
     """Decodes a stream of tokens representing _single_ user/assistant message into structured parts.
     
@@ -159,16 +164,18 @@ class MessageDecoder:
     - web server incrementally renders OpenAI-compatible responses with SSE
     - client decodes SSE and assembles the final message, with tagged user/assistant and text/python/python_output parts
 
+    Incomplete parts are supported, which allows web UI to flag incomplete generation to the user (max_tokens reached)
+
     Example 1:
     <|user_start|>Hello<|user_end|>
 
     Example 1 output:
     [
-        ('role_start', 'user'),
-        ('part_start', 'text'),
-        ('delta', 'Hello'),         # <- actual text
-        ('part_end', 'text'),
-        ('role_end', 'user')
+        MessageStreamEvent('role_start', 'user'),
+        MessageStreamEvent('part_start', 'text'),
+        MessageStreamEvent('delta', 'Hello'),                            # <- actual text
+        MessageStreamEvent('part_end', 'text', status='completed'),
+        MessageStreamEvent('role_end', 'user', status='completed')
     ]
 
     Example 2:
@@ -176,28 +183,28 @@ class MessageDecoder:
 
     Example 2 output:
     [
-        ('role_start', 'assistant'),
-        ('part_start', 'text'),      -+
-        ('delta', "Let's"),           |
-        ('delta', " check:"),         |
-        ('delta', " 2"),              |
-        ('delta', "+"),               |-  assistant_text
-        ('delta', "2"),               |
-        ('delta', "="),               |
-        ('part_end', 'text'),        -+
-        ('part_start', 'python'),        -+
-        ('delta', '2'),                   |
-        ('delta', '+'),                   |- python_code
-        ('delta', '2'),                   |
-        ('part_end', 'python'),          -+
-        ('part_start', 'python_output'),   -+
-        ('delta', '4'),                     |- python_output
-        ('part_end', 'python_output'),     -+
-        ('part_start', 'text'),      -+
-        ('delta', "4"),               |
-        ('delta', "."),               |- assistant_text again
-        ('part_end', 'text'),        -+
-        ('role_end', 'assistant')
+        MessageStreamEvent('role_start', 'assistant'),
+        MessageStreamEvent('part_start', 'text'),                          -+
+        MessageStreamEvent('delta', "Let's"),                               |
+        MessageStreamEvent('delta', " check:"),                             |
+        MessageStreamEvent('delta', " 2"),                                  |
+        MessageStreamEvent('delta', "+"),                                   |-  assistant_text
+        MessageStreamEvent('delta', "2"),                                   |
+        MessageStreamEvent('delta', "="),                                   |
+        MessageStreamEvent('part_end', 'text', status='completed'),        -+
+        MessageStreamEvent('part_start', 'python'),                            -+
+        MessageStreamEvent('delta', '2'),                                       |
+        MessageStreamEvent('delta', '+'),                                       |- python_code
+        MessageStreamEvent('delta', '2'),                                       |
+        MessageStreamEvent('part_end', 'python', status='completed'),          -+
+        MessageStreamEvent('part_start', 'python_output'),                        -+
+        MessageStreamEvent('delta', '4'),                                          |- python_output
+        MessageStreamEvent('part_end', 'python_output', status='completed'),      -+
+        MessageStreamEvent('part_start', 'text'),                            -+
+        MessageStreamEvent('delta', "4"),                                     |
+        MessageStreamEvent('delta', "."),                                     |- assistant_text again
+        MessageStreamEvent('part_end', 'text', status='completed'),          -+
+        MessageStreamEvent('role_end', 'assistant', status='completed')
     ]
     
     """
@@ -228,7 +235,7 @@ class MessageDecoder:
         self.state = DecoderState.STREAM_INIT
         self.utf8_buffer = UTF8Buffer()
 
-    def end_message_stream(self):
+    def end_message_stream(self, status='incomplete'):
         """End the current message stream and return any remaining events.
         
         This can be called at any point to properly close the current message stream.
@@ -237,44 +244,52 @@ class MessageDecoder:
         if self.state == DecoderState.STREAM_INIT:
             self.state = DecoderState.STREAM_FINISHED
             return []  # we didn't start anything, so nothing to close
+
         elif self.state == DecoderState.USER_READY:
             self.state = DecoderState.STREAM_FINISHED
-            return [('role_end', 'user')]
+            return [MessageStreamEvent('role_end', 'user', status)]
+
         elif self.state == DecoderState.USER_TEXT:
             self.state = DecoderState.STREAM_FINISHED
             text = self.utf8_buffer.flush()
             if text:
-                return [('delta', text), ('part_end', 'text'), ('role_end', 'user')]
-            return [('part_end', 'text'), ('role_end', 'user')]
+                return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'text', status), MessageStreamEvent('role_end', 'user', status)]
+            return [MessageStreamEvent('part_end', 'text', status), MessageStreamEvent('role_end', 'user', status)]
+
         elif self.state == DecoderState.ASSISTANT_READY:
             self.state = DecoderState.STREAM_FINISHED
-            return [('role_end', 'assistant')]
+            return [MessageStreamEvent('role_end', 'assistant', status)]
+
         elif self.state == DecoderState.ASSISTANT_TEXT:
             self.state = DecoderState.STREAM_FINISHED
             text = self.utf8_buffer.flush()
             if text:
-                return [('delta', text), ('part_end', 'text'), ('role_end', 'assistant')]
-            return [('part_end', 'text'), ('role_end', 'assistant')]
+                return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'text', status), MessageStreamEvent('role_end', 'assistant', status)]
+            return [MessageStreamEvent('part_end', 'text', status), MessageStreamEvent('role_end', 'assistant', status)]
+
         elif self.state == DecoderState.ASSISTANT_PYTHON_INPUT:
             self.state = DecoderState.STREAM_FINISHED
             text = self.utf8_buffer.flush()
             if text:
-                return [('delta', text), ('part_end', 'python'), ('role_end', 'assistant')]
-            return [('part_end', 'python'), ('role_end', 'assistant')]
+                return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'python', 'incomplete'), MessageStreamEvent('role_end', 'assistant', 'incomplete')]
+            return [MessageStreamEvent('part_end', 'python', 'incomplete'), MessageStreamEvent('role_end', 'assistant', 'incomplete')]
+
         elif self.state == DecoderState.ASSISTANT_PYTHON_AWAITING_OUTPUT:
             self.state = DecoderState.STREAM_FINISHED
-            return [('role_end', 'assistant')]
+            return [MessageStreamEvent('role_end', 'assistant', 'incomplete')]
+
         elif self.state == DecoderState.ASSISTANT_PYTHON_OUTPUT:
             self.state = DecoderState.STREAM_FINISHED
             text = self.utf8_buffer.flush()
             if text:
-                return [('delta', text), ('part_end', 'python_output'), ('role_end', 'assistant')]
-            return [('part_end', 'python_output'), ('role_end', 'assistant')]
+                return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'python_output', 'incomplete'), MessageStreamEvent('role_end', 'assistant', 'incomplete')]
+            return [MessageStreamEvent('part_end', 'python_output', 'incomplete'), MessageStreamEvent('role_end', 'assistant', 'incomplete')]
+
         elif self.state == DecoderState.STREAM_FINISHED:
             return []
         raise ValueError(f"Unexpected state: {self.state}")
 
-    def feed(self, token) -> list[tuple[str, str]]:
+    def feed(self, token) -> list[MessageStreamEvent]:
         """Feed one message token at a time and return valid event stream.
         
         This method tracks and enforces the state transitions or raises an error.
@@ -284,16 +299,16 @@ class MessageDecoder:
         if self.state == DecoderState.STREAM_INIT:
             if token == self.user_start_token:
                 self.state = DecoderState.USER_READY
-                return [('role_start', 'user')]
+                return [MessageStreamEvent('role_start', 'user')]
             elif token == self.assistant_start_token:
                 self.state = DecoderState.ASSISTANT_READY
-                return [('role_start', 'assistant')]
+                return [MessageStreamEvent('role_start', 'assistant')]
             else:
                 raise ValueError(f"Unexpected token in STREAM_INIT state: {self.tokenizer.decode([token])}")
 
         elif self.state == DecoderState.USER_READY:
             if token in (self.user_end_token, self.bos_token):
-                return self.end_message_stream()
+                return self.end_message_stream(status='completed')
             elif token in self.special_tokens:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in USER_READY state: {self.tokenizer.decode([token])}")
@@ -302,12 +317,12 @@ class MessageDecoder:
                 token_bytes = self.tokenizer.decode_bytes([token])
                 text = self.utf8_buffer.decode(token_bytes)
                 if text:
-                    return [('part_start', 'text'), ('delta', text)]
-                return [('part_start', 'text')]
+                    return [MessageStreamEvent('part_start', 'text'), MessageStreamEvent('delta', text)]
+                return [MessageStreamEvent('part_start', 'text')]
 
         elif self.state == DecoderState.USER_TEXT:
             if token in (self.user_end_token, self.bos_token):
-                return self.end_message_stream()
+                return self.end_message_stream(status='completed')
             elif token in self.special_tokens:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in USER_TEXT state: {self.tokenizer.decode([token])}")
@@ -315,15 +330,15 @@ class MessageDecoder:
                 token_bytes = self.tokenizer.decode_bytes([token])
                 text = self.utf8_buffer.decode(token_bytes)
                 if text:
-                    return [('delta', text)]
+                    return [MessageStreamEvent('delta', text)]
                 return []
 
         elif self.state == DecoderState.ASSISTANT_READY:
             if token in (self.assistant_end_token, self.bos_token):
-                return self.end_message_stream()
+                return self.end_message_stream(status='completed')
             elif token == self.python_start_token:
                 self.state = DecoderState.ASSISTANT_PYTHON_INPUT
-                return [('part_start', 'python')]
+                return [MessageStreamEvent('part_start', 'python')]
             elif token in self.special_tokens:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in ASSISTANT_READY state: {self.tokenizer.decode([token])}")
@@ -332,18 +347,18 @@ class MessageDecoder:
                 token_bytes = self.tokenizer.decode_bytes([token])
                 text = self.utf8_buffer.decode(token_bytes)
                 if text:
-                    return [('part_start', 'text'), ('delta', text)]
-                return [('part_start', 'text')]
+                    return [MessageStreamEvent('part_start', 'text'), MessageStreamEvent('delta', text)]
+                return [MessageStreamEvent('part_start', 'text')]
 
         elif self.state == DecoderState.ASSISTANT_TEXT:
             if token in (self.assistant_end_token, self.bos_token):
-                return self.end_message_stream()
+                return self.end_message_stream(status='completed')
             elif token == self.python_start_token:
                 self.state = DecoderState.ASSISTANT_PYTHON_INPUT
                 text = self.utf8_buffer.flush()
                 if text:
-                    return [('delta', text), ('part_end', 'text'), ('part_start', 'python')]
-                return [('part_end', 'text'), ('part_start', 'python')]
+                    return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'text', 'completed'), MessageStreamEvent('part_start', 'python')]
+                return [MessageStreamEvent('part_end', 'text', 'completed'), MessageStreamEvent('part_start', 'python')]
             elif token in self.special_tokens:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in ASSISTANT_TEXT state: {self.tokenizer.decode([token])}")
@@ -351,18 +366,18 @@ class MessageDecoder:
                 token_bytes = self.tokenizer.decode_bytes([token])
                 text = self.utf8_buffer.decode(token_bytes)
                 if text:
-                    return [('delta', text)]
+                    return [MessageStreamEvent('delta', text)]
                 return []
 
         elif self.state == DecoderState.ASSISTANT_PYTHON_INPUT:
             if token == self.bos_token:
-                return self.end_message_stream()
+                return self.end_message_stream(status='incomplete')
             elif token == self.python_end_token:
                 self.state = DecoderState.ASSISTANT_PYTHON_AWAITING_OUTPUT
                 text = self.utf8_buffer.flush()
                 if text:
-                    return [('delta', text), ('part_end', 'python')]
-                return [('part_end', 'python')]
+                    return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'python', 'completed')]
+                return [MessageStreamEvent('part_end', 'python', 'completed')]
             elif token in self.special_tokens:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in ASSISTANT_PYTHON_INPUT state: {self.tokenizer.decode([token])}")
@@ -370,28 +385,28 @@ class MessageDecoder:
                 token_bytes = self.tokenizer.decode_bytes([token])
                 text = self.utf8_buffer.decode(token_bytes)
                 if text:
-                    return [('delta', text)]
+                    return [MessageStreamEvent('delta', text)]
                 return []
 
         elif self.state == DecoderState.ASSISTANT_PYTHON_AWAITING_OUTPUT:
             if token == self.bos_token:
-                return self.end_message_stream()
+                return self.end_message_stream(status='incomplete')
             elif token == self.python_output_start_token:
                 self.state = DecoderState.ASSISTANT_PYTHON_OUTPUT
-                return [('part_start', 'python_output')]
+                return [MessageStreamEvent('part_start', 'python_output')]
             else:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in ASSISTANT_PYTHON_AWAITING_OUTPUT state: {self.tokenizer.decode([token])}")
 
         elif self.state == DecoderState.ASSISTANT_PYTHON_OUTPUT:
             if token == self.bos_token:
-                return self.end_message_stream()
+                return self.end_message_stream(status='incomplete')
             elif token == self.python_output_end_token:
                 self.state = DecoderState.ASSISTANT_READY
                 text = self.utf8_buffer.flush()
                 if text:
-                    return [('delta', text), ('part_end', 'python_output')]
-                return [('part_end', 'python_output')]
+                    return [MessageStreamEvent('delta', text), MessageStreamEvent('part_end', 'python_output', 'completed')]
+                return [MessageStreamEvent('part_end', 'python_output', 'completed')]
             elif token in self.special_tokens:
                 self.state = DecoderState.STREAM_FINISHED
                 raise ValueError(f"Unexpected special token in ASSISTANT_PYTHON_OUTPUT state: {self.tokenizer.decode([token])}")
@@ -399,7 +414,7 @@ class MessageDecoder:
                 token_bytes = self.tokenizer.decode_bytes([token])
                 text = self.utf8_buffer.decode(token_bytes)
                 if text:
-                    return [('delta', text)]
+                    return [MessageStreamEvent('delta', text)]
                 return []
 
         elif self.state == DecoderState.STREAM_FINISHED:

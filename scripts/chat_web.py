@@ -286,30 +286,27 @@ def chat_completions(body: ChatRequest, request: Request):
         }
         return result
 
-def message_to_responses_output(message_dict, num_completed_tools, stop_reason):
+def message_to_responses_output(message_dict):
     """Convert decoded message dictionary into OpenAI-compatible responses output"""
     msg_parts = message_dict['content']
-    if isinstance(msg_parts, str):
-        msg_parts = [{"type": "text", "text": msg_parts}]
+    assert isinstance(msg_parts, list)
 
     output = []
-    num_tools = 0
     for part in msg_parts:
         if part["type"] == "text":
             output.append({
                 "id": "msg_" + uuid.uuid4().hex,
                 "type": "message",
                 "role": "assistant",
-                "status": "completed",
+                "status": part["status"],
                 "content": [{"type": "output_text", "text": part['text'], "annotations": []}]
             })
         elif part["type"] == "python":
-            num_tools += 1
             output.append({
                 "id": "ci_" + uuid.uuid4().hex,
                 "type": "code_interpreter_call",    # closest official OpenAI compatible type
                 "container_id": "python_ast_parser",  # fake container ID
-                "status": "completed" if num_tools <= num_completed_tools else "incomplete",
+                "status": "incomplete",  # completeness of code_interpreter_call is determined by the presence of completed output part
                 "code": part["text"],
                 "outputs": [],
             })
@@ -319,9 +316,7 @@ def message_to_responses_output(message_dict, num_completed_tools, stop_reason):
                 "type": "logs",
                 "logs": part["text"],
             })
-
-    if stop_reason == "length" and output and output[-1]["type"] == "message":
-        output[-1]["status"] = "incomplete"
+            output[-1]["status"] = part["status"]  # mark whole code_interpreter_call as complete/incomplete
 
     return output
 
@@ -392,12 +387,7 @@ def responses(body: ResponsesRequest, request: Request):
         decoded_message_dict = state.convo_renderer.decode_single_message(
             [state.convo_renderer.assistant_start_token] + generated_tokens  # prepend assistant_start to form full message
         )
-
-        # Last tool call may be truncated, but MessageDecoder guarantees valid event list.
-        # We detect this case by counting <|output_end|> tokens and comparing with ('part_end', 'python_output')
-        # For this reason we need to pass num_completed_tools to message_to_responses_output()
-        num_completed_tools = generated_tokens.count(state.convo_renderer.output_end_token)
-        output = message_to_responses_output(decoded_message_dict, num_completed_tools, stop_reason)
+        output = message_to_responses_output(decoded_message_dict)
         logger.info(
             "Response OK id=%s stream=False prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f",
             response_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time

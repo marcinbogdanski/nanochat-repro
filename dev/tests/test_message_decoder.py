@@ -9,7 +9,7 @@ import os
 import pickle
 
 from nanorepro.common import get_base_path
-from nanorepro.tokenizer import MessageDecoder
+from nanorepro.tokenizer import MessageDecoder, MessageStreamEvent
 BASE_DIR = get_base_path()
 
 def decode_message(tokenizer, message_tokens):
@@ -34,12 +34,12 @@ def test_user_message(tokenizer):
     # Test decode
     events = decode_message(tokenizer, message_tokens)
     assert events == [
-        ('role_start', 'user'),
-        ('part_start', 'text'),
-        ('delta', 'Hello'),
-        ('delta', '!'),
-        ('part_end', 'text'),
-        ('role_end', 'user'),
+        MessageStreamEvent('role_start', 'user'),
+        MessageStreamEvent('part_start', 'text'),
+        MessageStreamEvent('delta', 'Hello'),
+        MessageStreamEvent('delta', '!'),
+        MessageStreamEvent('part_end', 'text', status='completed'),
+        MessageStreamEvent('role_end', 'user', status='completed'),
     ]
     print("test_user_message passed")
 
@@ -62,25 +62,25 @@ def test_assistant_tool_call(tokenizer):
     # Test decode
     events = decode_message(tokenizer, message_tokens)
     assert events == [
-        ('role_start', 'assistant'),
-        ('part_start', 'text'),
-        ('delta', '2'),
-        ('delta', '+'),
-        ('delta', '2'),
-        ('delta', '='),
-        ('part_end', 'text'),
-        ('part_start', 'python'),
-        ('delta', '2'),
-        ('delta', '+'),
-        ('delta', '2'),
-        ('part_end', 'python'),
-        ('part_start', 'python_output'),
-        ('delta', '4'),
-        ('part_end', 'python_output'),
-        ('part_start', 'text'),
-        ('delta', '4'),
-        ('part_end', 'text'),
-        ('role_end', 'assistant'),
+        MessageStreamEvent('role_start', 'assistant'),
+        MessageStreamEvent('part_start', 'text'),
+        MessageStreamEvent('delta', '2'),
+        MessageStreamEvent('delta', '+'),
+        MessageStreamEvent('delta', '2'),
+        MessageStreamEvent('delta', '='),
+        MessageStreamEvent('part_end', 'text', status='completed'),
+        MessageStreamEvent('part_start', 'python'),
+        MessageStreamEvent('delta', '2'),
+        MessageStreamEvent('delta', '+'),
+        MessageStreamEvent('delta', '2'),
+        MessageStreamEvent('part_end', 'python', status='completed'),
+        MessageStreamEvent('part_start', 'python_output'),
+        MessageStreamEvent('delta', '4'),
+        MessageStreamEvent('part_end', 'python_output', status='completed'),
+        MessageStreamEvent('part_start', 'text'),
+        MessageStreamEvent('delta', '4'),
+        MessageStreamEvent('part_end', 'text', status='completed'),
+        MessageStreamEvent('role_end', 'assistant', status='completed'),
     ]
     print("test_assistant_tool_call passed")
 
@@ -96,11 +96,11 @@ def test_split_utf8(tokenizer):
     # Test decode
     events = decode_message(tokenizer, message_tokens)
     assert events == [
-        ('role_start', 'assistant'),
-        ('part_start', 'text'),
-        ('delta', '😀'),
-        ('part_end', 'text'),
-        ('role_end', 'assistant'),
+        MessageStreamEvent('role_start', 'assistant'),
+        MessageStreamEvent('part_start', 'text'),
+        MessageStreamEvent('delta', '😀'),
+        MessageStreamEvent('part_end', 'text', status='completed'),
+        MessageStreamEvent('role_end', 'assistant', status='completed'),
     ]
     print("test_split_utf8 passed")
 
@@ -115,16 +115,48 @@ def test_early_termination(tokenizer):
     # Test decode
     events = decode_message(tokenizer, message_tokens)
     assert events == [
-        ('role_start', 'assistant'),
-        ('part_start', 'text'),
-        ('delta', 'Hello'),
-        ('delta', ','),
-        ('delta', ' '),
-        ('delta', '�'),  # replacement character for incomplete UTF-8 sequence
-        ('part_end', 'text'),
-        ('role_end', 'assistant'),
+        MessageStreamEvent('role_start', 'assistant'),
+        MessageStreamEvent('part_start', 'text'),
+        MessageStreamEvent('delta', 'Hello'),
+        MessageStreamEvent('delta', ','),
+        MessageStreamEvent('delta', ' '),
+        MessageStreamEvent('delta', '�'),  # replacement character for incomplete UTF-8 sequence
+        MessageStreamEvent('part_end', 'text', status='incomplete'),
+        MessageStreamEvent('role_end', 'assistant', status='incomplete'),
     ]
     print("test_early_termination passed")
+
+def test_early_termination_mid_python_output(tokenizer):
+    """Test complete Python input, but generation stops before output ends unexpectedly"""
+
+    # Prepare the tokens
+    assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
+    python_start_token = tokenizer.encode_single_token('<|python_start|>')
+    python_end_token = tokenizer.encode_single_token('<|python_end|>')
+    output_start_token = tokenizer.encode_single_token('<|output_start|>')
+    message_tokens = (
+           [assistant_start_token, python_start_token]
+           + tokenizer.encode('2+2')
+           + [python_end_token, output_start_token]
+           + tokenizer.encode('4')       # simulate early termination before <|output_end|> token is emitted
+    )
+
+    # Test decode
+    events = decode_message(tokenizer, message_tokens)
+    assert events == [
+        MessageStreamEvent('role_start', 'assistant'),
+        MessageStreamEvent('part_start', 'python'),
+        MessageStreamEvent('delta', '2'),
+        MessageStreamEvent('delta', '+'),
+        MessageStreamEvent('delta', '2'),
+        MessageStreamEvent('part_end', 'python', status='completed'),
+        MessageStreamEvent('part_start', 'python_output'),
+        MessageStreamEvent('delta', '4'),
+        MessageStreamEvent('part_end', 'python_output', status='incomplete'),
+        MessageStreamEvent('role_end', 'assistant', status='incomplete'),
+    ]
+    print("test_early_termination_mid_python_output passed")
+    
 
 def test_invalid_tool_boundaries(tokenizer):
     """Test msg with two sequential <python_start> is rejected"""
@@ -155,6 +187,7 @@ def main():
     test_assistant_tool_call(tokenizer)
     test_split_utf8(tokenizer)
     test_early_termination(tokenizer)
+    test_early_termination_mid_python_output(tokenizer)
     test_invalid_tool_boundaries(tokenizer)
     print("All tests passed.")
 
