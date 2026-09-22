@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Cute tiger face icon">
+  <defs>
+    <style>
+      .outline { stroke:#2b2118; stroke-width:5; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+  </defs>
+
+  <!-- ears -->
+  <path d="M25 39 C14 22 22 11 41 24 L37 43 Z" fill="#f58a2a" class="outline"/>
+  <path d="M103 39 C114 22 106 11 87 24 L91 43 Z" fill="#f58a2a" class="outline"/>
+  <path d="M29 32 C24 24 28 20 36 27" fill="none" stroke="#f6c38b" stroke-width="5" stroke-linecap="round"/>
+  <path d="M99 32 C104 24 100 20 92 27" fill="none" stroke="#f6c38b" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- head -->
+  <path d="M64 20
+           C89 20 108 39 108 64
+           C108 90 89 108 64 108
+           C39 108 20 90 20 64
+           C20 39 39 20 64 20 Z"
+        fill="#f58a2a" class="outline"/>
+
+  <!-- forehead stripes, tapering inward from the top of the head -->
+  <g fill="#2b2118">
+    <path d="M41 25 L51 21 L51 39 Z"/>
+    <path d="M59 20 L69 20 L64 41 Z"/>
+    <path d="M77 21 L87 25 L77 39 Z"/>
+  </g>
+
+  <!-- two triangular stripes on each cheek -->
+  <g fill="#2b2118">
+    <path d="M21 55 L20 68 L39 63 Z"/>
+    <path d="M22 76 L27 89 L39 78 Z"/>
+    <path d="M107 55 L108 68 L89 63 Z"/>
+    <path d="M106 76 L101 89 L89 78 Z"/>
+  </g>
+
+  <!-- eye patches -->
+  <path d="M39 51 C46 44 55 46 58 54 C53 61 44 61 39 55 Z" fill="#fff7ea"/>
+  <path d="M89 51 C82 44 73 46 70 54 C75 61 84 61 89 55 Z" fill="#fff7ea"/>
+
+  <!-- eyes -->
+  <ellipse cx="50" cy="54" rx="4" ry="5" fill="#2b2118"/>
+  <ellipse cx="78" cy="54" rx="4" ry="5" fill="#2b2118"/>
+  <circle cx="51.5" cy="52.5" r="1.2" fill="white"/>
+  <circle cx="79.5" cy="52.5" r="1.2" fill="white"/>
+
+  <!-- muzzle -->
+  <ellipse cx="53" cy="76" rx="16" ry="15" fill="#f7d2a4"/>
+  <ellipse cx="75" cy="76" rx="16" ry="15" fill="#f7d2a4"/>
+
+  <!-- nose -->
+  <path d="M57 68 Q64 64 71 68 Q70 76 64 78 Q58 76 57 68 Z" fill="#2b2118"/>
+
+  <!-- smile -->
+  <path d="M64 78 C63 86 55 88 51 84" fill="none" stroke="#2b2118" stroke-width="4" stroke-linecap="round"/>
+  <path d="M64 78 C65 86 73 88 77 84" fill="none" stroke="#2b2118" stroke-width="4" stroke-linecap="round"/>
+</svg>

@@ -19,6 +19,8 @@ dependencies = [
   "pydot==4.0.1",
   "ipympl==0.10.0",
   "nvtx==0.2.16",
+  "fastapi==0.141.1",
+  "uvicorn==0.53.0",
 ]
 
 # Don't allow non-wheel installs (no compile from source)

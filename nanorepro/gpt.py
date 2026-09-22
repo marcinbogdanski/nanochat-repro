@@ -241,6 +241,9 @@ class GPTModel(nn.Module):
         self._compiled_output_region = None
         self._compiled_whole_transformer_region = None
 
+    def max_position_embeddings(self):
+        return self.cos.size(1)
+
     def init_weights(self):
         """Initialize weights/buffers, cast RoPE/WTE/VE to compute_dtype.
 
@@ -558,7 +561,7 @@ class GPTModel(nn.Module):
             enable_metrics=enable_metrics,
         )
 
-        schdeuled_buckets = []
+        scheduled_buckets = []
         if ddp:
             adamw_param_to_bucket_idx = adamw_optimizer.get_param_to_bucket_idx()
             muon_param_to_bucket_idx = muon_optimizer.get_param_to_bucket_idx()
@@ -567,21 +570,21 @@ class GPTModel(nn.Module):
                 if optim_type == 'adamw':
                     param = bucket_params[0]  # single param per adamw bucket
                     adamw_bucket_idx = adamw_param_to_bucket_idx[param]
-                    schdeuled_buckets.append(ScheduledBucket(
+                    scheduled_buckets.append(ScheduledBucket(
                         optimizer=adamw_optimizer,
                         bucket_idx=adamw_bucket_idx,
                         params=bucket_params,         # list of param objects
                     ))
                 elif optim_type == 'muon':
                     muon_bucket_idx = muon_param_to_bucket_idx[bucket_params[0]]
-                    schdeuled_buckets.append(ScheduledBucket(
+                    scheduled_buckets.append(ScheduledBucket(
                         optimizer=muon_optimizer,
                         bucket_idx=muon_bucket_idx,
                         params=bucket_params,         # list of param objects
                     ))
 
         backward_scheduler = BackwardScheduler(
-            schdeuled_buckets=schdeuled_buckets,
+            scheduled_buckets=scheduled_buckets,
             backward_overlap=backward_overlap and ddp,  # whole class becomes no-op if False
             optimizers=[adamw_optimizer, muon_optimizer]
         )

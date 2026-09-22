@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tigger Chat</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        * { box-sizing: border-box; }    /* include padding and border in element size */
+
+        html {
+            background: #f7f7f7;
+        }
+
+        body {
+            padding: 0 1rem;  /* white space inside the left and right edges */
+            width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
+            max-width: 800px;
+            height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
+            margin: 0 auto;    /* no top/bottom; equal left/right */
+            display: flex;
+            flex-direction: column;
+            font: 16px/1.5 system-ui, sans-serif;    /* 16px font, 1.5 line spacing, system font with fallback */
+            color: #222;
+            background: white;
+        }
+
+        h1 {
+            display: flex;      /* logo and text side by side */
+            align-items: center;    /* vertically center the logo and text */
+            gap: 0.5rem;    /* space between logo and text */
+            font-size: 2rem;
+            margin-bottom: 0;  /* remove default bottom margin for h1 */
+        }
+        h1 img {
+            width: 2.5rem;
+            height: 2.5rem;
+        }
+
+        header {
+            display: flex;
+            flex-direction: column;  /* stack children vertically */
+            align-items: stretch;  /* button fills the header width */
+            width: fit-content;   /* only as wide as logo + text */
+            gap: 0.5rem;    /* space between children */
+        }
+
+        #message-history {
+            flex: 1;    /* take remaining vertical space */
+            min-height: 0;    /* allow shrink, so input is always visible */
+            overflow-y: auto;    /* enable scroll */
+            padding: 1rem 0.5rem;    /* slightly more top/bottom space */
+        }
+
+        .message {
+            margin: 0 0 1.5rem;    /* top, left/right, some space at the bottom */
+            white-space: pre-wrap;    /* preserve line breaks, but also wrap */
+            overflow-wrap: anywhere;    /* allow breaking long words */
+        }
+
+        .special-token {
+            color: #0891b2;    /* cyan for tool-call markers */
+        }
+
+        .user {
+            width: fit-content;    /* make user bubble fit around the text */
+            max-width: 80%;
+            margin-left: auto;    /* push user bubble to the right */
+            padding: 0.6rem 1rem;    /* vertical, horizontal space inside bubble */
+            border-radius: 1rem;    /* rounded corners */
+            background: #f5f5f5;
+            box-shadow: 0 2px 5px #0002;    /* bubble shadow */
+        }
+
+        #chat-form {
+            display: flex;    /* defaults to horizontal row */
+            align-items: flex-end;    /* keep the button at the bottom as the input grows */
+            gap: 0.5rem;
+            padding: 1rem 0;    /* inner space: top/bottom, no left/right */
+        }
+
+        textarea, button {
+            font: inherit;
+            padding: 0.6rem;    /* padding around text */
+            border: 1px solid #ccc;    /* border around input/button */
+            border-radius: 0.5rem;    /* slightly rounded */
+        }
+
+        textarea {
+            flex: 1;    /* take remaining horizontal space */
+            min-width: 0;    /* allow shrinking */
+            max-height: 20rem;    /* limit the height of the textarea */
+            overflow-y: auto;    /* vertical scroll if user enters a lot of text */
+            resize: none;      /* prevent manual resizing */
+        }
+        textarea::placeholder {
+            color: #999;  /* applies to a hint displayed when input is empty */
+            opacity: 1;   /* prevent browsers from applying additional transparency */
+        }
+        button { cursor: pointer; }    /* show pointer cursor on hover */
+
+        /*********************************/
+        
+        body.empty-chat {
+            justify-content: center;    /* elements on welcome screen are centered */
+        }
+        .empty-chat header {
+            align-self: center;    /* centered header */
+        }
+        .empty-chat h1 {
+            flex-direction: column;   /* stack logo and text vertically */
+            margin: 0;
+        }
+        .empty-chat h1 img {
+            width: 6rem;          /* bit larger on welcome screen */
+            height: 6rem;
+        }
+        .empty-chat #new-chat-button,
+        .empty-chat #message-history {
+            display: none;    /* new chat button not needed, nothing to clear yet */
+        }
+
+    </style>
+</head>
+<body class="empty-chat">
+    <header>
+        <h1>
+            <img src="/tiger_logo.svg" alt="">
+            Tigger Chat
+        </h1>
+        <button id="new-chat-button" type="button">New Chat</button>
+    </header>
+
+    <div id="message-history"></div>
+
+    <form id="chat-form">
+        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
+        <button type="submit">Send</button>
+    </form>
+
+    <script>
+        const messageHistory = document.getElementById('message-history');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+        const sendButton = chatForm.querySelector('button');
+        const newChatButton = document.getElementById('new-chat-button');
+        const messages = [];  // conversation turns
+        let activeAbortController = null;  // active controller, when request is live
+        let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
+
+        function isNearBottom() {
+            const distance = messageHistory.scrollHeight - messageHistory.clientHeight - messageHistory.scrollTop;  // distance from bottom
+            return distance < 64;   // scroll close to the bottom (~2.7 lines of text)
+        }
+
+        function resizeInput() {
+            const scrollFollowsMessages = isNearBottom();    // if near bottom, scroll along with messages
+            chatInput.style.height = 'auto';  // allow shrinking when text is deleted
+            const borderHeight = chatInput.offsetHeight - chatInput.clientHeight;
+            chatInput.style.height = `${chatInput.scrollHeight + borderHeight}px`;  // set height needed to display text, CSS handles the layout and caps the max
+            if (scrollFollowsMessages) {
+                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+            }
+        }
+
+        chatInput.addEventListener('input', resizeInput);  // typing and pasting
+        window.addEventListener('resize', resizeInput);  // adjust height if window is resized
+        resizeInput();
+
+        chatInput.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                event.preventDefault();   // prevent newline (textarea default)
+                chatForm.requestSubmit();  // trigger form submission instead
+            }
+        });
+
+        function renderAssistantText(paragraph, text) {
+            // Color special tokens like <|python_start|> slightly for better visibility
+
+            // Note 1:
+            // This renders full assistant text, including regex, every SSE chunk. Not ideal but for now should be ok.
+            // Alternatively we could append, but then coloring needs to account <|python_start|> may arrive in separate SSE events.
+
+            // Note 2:
+            // Via completions API we are getting plain text with substrings like "<|python_start|>". There is no way
+            // to distinguish between tool call marker and model outputting literal "<|python_start|>" text at this point.
+            // One way to do this properly would be to move to OpenAI responses API, which handles tool calls explicitly.
+
+            // split by special tokens. parts = ["Let's check:", "<|python_start|>", "2+2=", "<|python_end|>", ...]
+            const parts = text.split(/(<\|python_start\|>|<\|python_end\|>|<\|output_start\|>|<\|output_end\|>)/g);
+            
+            const specialTokens = ['<|python_start|>', '<|python_end|>', '<|output_start|>', '<|output_end|>'];
+            paragraph.replaceChildren();
+            parts.forEach((part) => {
+                if (specialTokens.includes(part)) {
+                    const span = document.createElement('span');
+                    span.className = 'special-token';
+                    span.textContent = part;
+                    paragraph.append(span);
+                } else {
+                    paragraph.append(part);
+                }
+            }); 
+        }
+
+        function addMessage(role, text) {
+            const scrollFollowsMessages = role === 'user' || isNearBottom();    // always scroll if user just entered message, check before altering textContent!
+            document.body.classList.remove('empty-chat');  // switch to conversation layout
+            const paragraph = document.createElement('p');
+            paragraph.className = `message ${role}`;  // set two CSS classes
+            if (role === 'assistant') {
+                renderAssistantText(paragraph, text);
+            } else {
+                paragraph.textContent = text;
+            }
+            messageHistory.appendChild(paragraph);
+            if (scrollFollowsMessages) {
+                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+            }
+            return paragraph;    // streaming updates this in place
+        }
+
+        sendButton.addEventListener('click', function() {
+            if (activeAbortController) {
+                sendButton.disabled = true;  // disable so user doesn't click repeatedly
+                sendButton.textContent = 'Cancelling...';  // provide user feedback
+                activeAbortController.abort();  // cancel the ongoing request
+            }
+        });
+
+        newChatButton.addEventListener('click', async function() {
+            if (newChatButton.disabled) {
+                return;  // prevent clicking multiple times
+            }
+            newChatButton.disabled = true;
+            try {
+                if (activeAbortController) {
+                    sendButton.disabled = true;
+                    sendButton.textContent = 'Cancelling...';
+                    activeAbortController.abort();  // stop request, if in flight
+                }
+                await activeRequest;  // wait for ongoing request to finish
+                messages.length = 0;  // clear the UI
+                messageHistory.replaceChildren();
+                document.body.classList.add('empty-chat');  // switch to welcome screen layout
+                chatInput.value = '';
+                resizeInput();     // new chat, resize back to normal
+                chatInput.focus();
+            }
+            finally {
+                newChatButton.disabled = false;  // re-enable the New Chat button
+            }
+        });
+
+        chatForm.addEventListener('submit', function(event) {
+            event.preventDefault();  // don't reload page
+            const text = chatInput.value.trim();
+            if (!text || activeAbortController) {
+                return;  // ignore whitespace only, or if request in progress
+            }
+            activeRequest = sendMessage(text);  // initiate sending the message
+        });
+
+        async function sendMessage(text) {
+            const userMessage = { role: 'user', content: text };
+            const userParagraph = addMessage('user', text);
+            const reply = { role: 'assistant', content: '' };
+            let assistantParagraph = null;
+            chatInput.value = '';  // reset input
+            resizeInput();     // message sent, resize textarea back to normal
+            chatInput.disabled = true;
+            sendButton.type = 'button';  // switch from 'form submit' to 'button', deactivates form submission handler
+            sendButton.textContent = 'Stop';
+            activeAbortController = new AbortController();
+
+            try {
+                const response = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    signal: activeAbortController.signal,  // closes stream if something goes wrong
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'nanochat',
+                        messages: [...messages, userMessage],  // history plus the new message
+                        stream: true
+                    })
+                });
+                if (!response.ok){
+                    throw new Error(`API request failed with status ${response.status}`);
+                }
+
+                assistantParagraph = addMessage('assistant', '');
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();  // handle invalid/incomplete UTF-8
+                let networkBuffer = '';    // network read may end in the middle of SSE events
+                let streamDone = false;
+
+                try {
+                    while (!streamDone) {
+                        const { value, done } = await reader.read();
+                        if (done) {
+                            throw new Error('Response SSE stream ended before [DONE]');
+                        }
+                        networkBuffer += decoder.decode(value, { stream: true });  // preserve split UTF-8
+
+                        // Our server separates SSE events with a blank line.
+                        let eventEnd;
+                        while ((eventEnd = networkBuffer.indexOf('\n\n')) !== -1) {
+                            const event = networkBuffer.slice(0, eventEnd);
+                            networkBuffer = networkBuffer.slice(eventEnd + 2);  // +2 to move past \n\n
+                            if (!event.startsWith('data: ')) {
+                                throw new Error(`Unexpected SSE event: ${event}`);
+                            }
+
+                            const data = event.slice('data: '.length);
+                            if (data === '[DONE]') {
+                                streamDone = true;
+                                break;
+                            }
+
+                            const chunk = JSON.parse(data);
+                            reply.content += chunk.choices[0].delta.content || '';  // role/finish events have no text
+                            const scrollFollowsMessages = isNearBottom();  // check _before_ altering textContent, updated textContent may push content down below "snap tolerance"
+                            renderAssistantText(assistantParagraph, reply.content);  // style current message
+                            if (scrollFollowsMessages) {
+                                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+                            }
+                        }
+                    }
+                } finally {
+                    reader.releaseLock();  // release the reader lock on the stream
+                }
+
+                if (!reply.content){
+                    throw new Error('Assistant response is empty');
+                }
+                messages.push(userMessage, reply);  // push only successful turns
+            } catch (error) {
+                if (activeAbortController.signal.aborted) {
+                    if (reply.content) {
+                        messages.push(userMessage, reply);  // keep partial message
+                    } else {
+                        userParagraph.remove();  // cleanup
+                        if (assistantParagraph) {
+                            assistantParagraph.remove();  // cleanup
+                        }
+                        chatInput.value = text;  // restore user input
+                    }
+                } else {
+                    addMessage('error', `Error: ${error.message}`);
+                    chatInput.value = text;  // restore user input so it can be retried
+                }
+            } finally {
+                activeAbortController.abort();  // abort the fetch request if still ongoing
+                activeAbortController = null;
+                chatInput.disabled = false;
+                sendButton.type = 'submit';  // restore form submit, re-activates form submission handler
+                sendButton.textContent = 'Send';  // restore button text
+                sendButton.disabled = false;
+                document.body.classList.toggle('empty-chat', messageHistory.childElementCount === 0);  // if no history, then show welcome screen
+                resizeInput();  // restore size after text restored
+                chatInput.focus();
+            }
+        }
+    </script>
+</body>
+</html>

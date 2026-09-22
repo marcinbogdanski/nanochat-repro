@@ -93,7 +93,7 @@ query = """
 """
 
 def extract_collective_rows(conn):
-    """Extract and follow path CPU range -> NCCL gropu CPU side -> GPU channels
+    """Extract and follow path CPU range -> NCCL group CPU side -> GPU channels
 
     Example usage:
         from nanorepro.nsight_trace import collective_range 
@@ -104,7 +104,7 @@ def extract_collective_rows(conn):
 
     How it works at the high level:
     - User code wraps collective launch with 'with collective_range():', as shown below
-    - The Python context manager creates NVXT CPU-side range around op launch, named 'custom_collective ...'
+    - The Python context manager creates NVTX CPU-side range around op launch, named 'custom_collective ...'
     - this postprocessing function extracts those NVTX ranges and maps them to the corresponding NCCL CPU groups
     - the NCCL CPU groups are then used to identify the corresponding GPU channels
     - the GPU channels are then validated and combined to single GPU-side span
@@ -148,7 +148,7 @@ def extract_collective_rows(conn):
         })
 
     # 2) Read CPU-side NCCL groups, then index them by CPU thread
-    # This is CPU side of NCCL CPU group, some of thest groups are narrowy wrapped by NVTX ranges above
+    # This is CPU side of NCCL CPU group, some of these groups are narrowly wrapped by NVTX ranges above
     sql_rows = cursor.execute("""
         SELECT n.start AS start_ns, n.end AS end_ns, n.globalTid AS thread_id,
                coalesce(n.jsonText, j.value) AS payload_json
@@ -231,7 +231,7 @@ def extract_collective_rows(conn):
         group_id = matching_nccl_cpu_group['group_id']
         combined_key = (process_id, communicator_hash, group_id)
         if combined_key in seen_combined_keys:
-            raise ValueError(f"{nvtx_range_label}: GPU collective alleary assigned to another NVTX range")
+            raise ValueError(f"{nvtx_range_label}: GPU collective already assigned to another NVTX range")
         seen_combined_keys.add(combined_key)
         # {'start_ns': ..., 'end_ns': ..., 'operation': ..., 'sequence_number': ..., 'rank': ..., 'channel_id': ..., 'channel_count': ...}
         gpu_channels_list = combined_key_to_gpu_channels[combined_key]

@@ -37,7 +37,7 @@ def is_trace_enabled():
     return _TRACE_ENABLED
 
 def collective_range(name):
-    """Wrap CPU collevtive launch, so postprocessing can find it and map to NCCL GPU spans."""
+    """Wrap CPU collective launch, so postprocessing can find it and map to NCCL GPU spans."""
     if not _TRACE_ENABLED:
         return nullcontext()
     rank = torch.distributed.get_rank()

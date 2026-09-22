@@ -1,5 +1,16 @@
 # Assorted Development Notes
 
+## 2026.09.22 - Web Chat Interface
+
+I implemented a mini web interface.
+
+Items (`c570d8e3`):
+- mini FastAPI/Uvicorn server in `chat_web.py` including minimal OpenAI compatible-ish `/v1/chat/completions`
+- single file plain HTML/CSS/JS frontend served from the same server; no frontend dependencies
+- SSE streaming replies, Send/Stop/New Chat, most important: **CUTE TIGGER LOGO**
+
+One thing I'm slightly unhappy about is that the completions API has no way to represent server-side tool calls. Currently assistant responses are sent as plain text, and tool calls are indicated with substring like `<|python_start|>` etc. On the client side there is no way to distinguish between tool call and model outputting `<|python_start|>` literal. This could be solved by e.g. moving to responses API, which is more complex.
+
 ## 2026.09.17 - LR Schedule Divergence in SFT
 
 In epoch-based SFT, the LR diverges slightly across ranks.
