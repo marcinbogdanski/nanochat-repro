@@ -2,6 +2,7 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # for older PyTorch
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"  # disable gpt.py kernels progress bars
+import sys
 import pickle
 import argparse
 import torch
@@ -11,6 +12,9 @@ from nanorepro.engine import Engine
 from nanorepro.calculator import CalculatorAndCounter
 BASE_DIR = get_base_path()
 
+COLOR_BOLD = "\033[1m"
+COLOR_RESET = "\033[0m"
+COLOR_CYAN = "\033[36m"
 
 @torch.inference_mode()
 def main():
@@ -55,10 +59,26 @@ def main():
     user_end_token = tokenizer.encode_single_token('<|user_end|>')
     assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
     assistant_end_token = tokenizer.encode_single_token('<|assistant_end|>')
+    python_start_token = tokenizer.encode_single_token('<|python_start|>')
+    python_end_token = tokenizer.encode_single_token('<|python_end|>')
+    output_start_token = tokenizer.encode_single_token('<|output_start|>')
+    output_end_token = tokenizer.encode_single_token('<|output_end|>')
+    special_tokens = [bos_token, user_start_token, user_end_token, assistant_start_token, assistant_end_token,
+                      python_start_token, python_end_token, output_start_token, output_end_token]
     stop_tokens = [assistant_end_token, bos_token]  # stop generation if either token is generated
     calculator = CalculatorAndCounter(tokenizer)
     engine = Engine(model, stop_tokens=stop_tokens, tool_handler=calculator)
     utf8_buffer = UTF8Buffer()
+
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    def colorize(text, color):
+        if use_color:
+            return f"{color}{text}{COLOR_RESET}"
+        return text
+    def colorize_special_token(text, token):
+        if token in special_tokens:
+            return colorize(text, COLOR_CYAN)  # 36 cyan for special tokens
+        return text
 
     if not args.prompt:
         print()
@@ -73,7 +93,7 @@ def main():
     while True:
 
         if not args.prompt:
-            print("\nUSER:")
+            print(colorize("\nUSER:", COLOR_BOLD))
             try:
                 user_input = input().strip()
             except (EOFError, KeyboardInterrupt):
@@ -92,7 +112,7 @@ def main():
             if user_input == "":
                 continue
 
-            print("\nASSISTANT:")
+            print(colorize("\nASSISTANT:", COLOR_BOLD))
         else:
             user_input = args.prompt
 
@@ -110,7 +130,8 @@ def main():
             if generated_token not in stop_tokens:
                 token_bytes = tokenizer.decode_single_token_bytes(generated_token)
                 generated_text = utf8_buffer.decode(token_bytes)
-                print(generated_text, end='', flush=True)
+                colorized_text = colorize_special_token(generated_text, generated_token)
+                print(colorized_text, end='', flush=True)
 
         # In case conversation ends due to max_tokens, we need to append assistant end token
         if conversation_tokens[-1] != assistant_end_token:
