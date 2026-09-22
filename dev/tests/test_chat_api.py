@@ -4,7 +4,7 @@
 # ///
 """Test if our chat API is working with OpenAI SDK
 
-Run with (requires running chat_wab.py server):
+Run with (requires running chat_web.py server):
 uv run dev/tests/test_chat_api.py
 """
 
@@ -15,14 +15,6 @@ client = openai.OpenAI(
     base_url="http://127.0.0.1:8000/v1",
     api_key="unused",
 )
-
-def expect_status(status, **kwargs):
-    try:
-        client.chat.completions.create(**kwargs)
-    except openai.APIStatusError as error:
-        assert error.status_code == status
-    else:
-        raise AssertionError(f"Expected HTTP {status}")
 
 def test_models_list():
     # List Models
@@ -86,7 +78,7 @@ def test_chat_completion_stream():
     assert "<|assistant_end|>" not in response_text
     print("test_chat_completion_stream passed")
 
-def test_stream_matches_non_stream():
+def test_chat_completion_stream_matches_non_stream():
     messages=[{"role": "user", "content": "Hello!"}]
 
     completion = client.chat.completions.create(
@@ -104,9 +96,9 @@ def test_stream_matches_non_stream():
     stream_response = "".join(choice.delta.content or "" for choice in choices)
     assert non_stream_response == stream_response
     assert completion.choices[0].finish_reason == choices[-1].finish_reason
-    print("test_stream_matches_non_stream passed")
+    print("test_chat_completion_stream_matches_non_stream passed")
 
-def test_disconnect_releases_lock():
+def test_chat_completion_disconnect_releases_lock():
 
     # First call: drop mid-stream
     my_client = client.with_options(timeout=60.0, max_retries=0)
@@ -128,26 +120,94 @@ def test_disconnect_releases_lock():
     )
     assert completion.choices[0].message.content
     assert completion.choices[0].finish_reason in {"stop", "length"}
-    print("test_disconnect_releases_lock passed")
+    print("test_chat_completion_disconnect_releases_lock passed")
 
 
-def test_invalid_requests():
+def expect_completions_status(status, **kwargs):
+    try:
+        client.chat.completions.create(**kwargs)
+    except openai.APIStatusError as error:
+        assert error.status_code == status
+    else:
+        raise AssertionError(f"Expected HTTP {status}")
+
+def test_completions_invalid_requests():
     valid_messages = [{"role": "user", "content": "Hello!"}]
 
-    expect_status(404, model="unknown", messages=valid_messages)
-    expect_status(404, model="unknown", messages=valid_messages, stream=True)
-    expect_status(422, model="nanochat", messages=[])
-    expect_status(422, model="nanochat", messages=[{"role": "user", "content": ""}])
-    expect_status(422, model="nanochat", messages=[{"role": "system", "content": "Hello!"}])
-    print("test_invalid_requests passed")
+    expect_completions_status(404, model="unknown", messages=valid_messages)
+    expect_completions_status(404, model="unknown", messages=valid_messages, stream=True)
+    expect_completions_status(422, model="nanochat", messages=[])
+    expect_completions_status(422, model="nanochat", messages=[{"role": "user", "content": ""}])
+    expect_completions_status(422, model="nanochat", messages=[{"role": "system", "content": "Hello!"}])
+    print("test_completions_invalid_requests passed")
+
+def test_response():
+    response = client.responses.create(
+        model="nanochat",
+        input="Hello!",
+        max_output_tokens=128,
+    )
+    print(response)
+    assert response.id.startswith("resp_")
+    assert response.object == "response"
+    assert response.model == "nanochat"
+    assert response.status in ("completed", "incomplete")
+    assert response.output_text.strip()
+
+    assert len(response.output) == 1
+    message = response.output[0]
+    assert message.type == "message"
+    assert message.role == "assistant"
+    assert len(message.content) == 1
+    assert message.content[0].type == "output_text"
+
+    assert response.usage is not None
+    assert response.usage.input_tokens > 0
+    assert response.usage.output_tokens > 0
+    assert response.usage.total_tokens == response.usage.input_tokens + response.usage.output_tokens
+    print("test_response passed")
+
+def test_response_history():
+    response = client.responses.create(
+        model="nanochat",
+        input=[
+            {"role": "user", "content": "My name is Sam."},
+            {"role": "assistant", "content": "Hello, Sam!"},
+            {"role": "user", "content": "What is my name?"},
+        ],
+        max_output_tokens=128,
+    )
+    assert response.object == "response"
+    print(response.status)
+    assert response.status in ("completed", "incomplete")
+    assert response.output_text.strip()  # confirm we got anything back
+    print("test_response_history passed")
+
+def expect_responses_status(status, **kwargs):
+    try:
+        client.responses.create(**kwargs)
+    except openai.APIStatusError as error:
+        assert error.status_code == status
+    else:
+        raise AssertionError(f"Expected HTTP {status}")
+
+def test_response_invalid_request():
+    expect_responses_status(404, model="unknown", input="Hello!")
+    expect_responses_status(422, model="nanochat", input="")
+    expect_responses_status(422, model="nanochat", input=[])
+    expect_responses_status(422, model="nanochat", input="Hello!", max_output_tokens=0)
+    print("test_response_invalid_request passed")
 
 def main():
     test_models_list()
     test_chat_completion()
     test_chat_completion_stream()
-    test_stream_matches_non_stream()
-    test_disconnect_releases_lock()
-    test_invalid_requests()
+    test_chat_completion_stream_matches_non_stream()
+    test_chat_completion_disconnect_releases_lock()
+    test_completions_invalid_requests()
+    test_response()
+    test_response_history()
+    test_response_invalid_request()
     print("All tests passed!")
 
 if __name__ == "__main__":
