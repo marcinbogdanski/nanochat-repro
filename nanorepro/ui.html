@@ -58,10 +58,6 @@
             overflow-wrap: anywhere;    /* allow breaking long words */
         }
 
-        .special-token {
-            color: #0891b2;    /* cyan for tool-call markers */
-        }
-
         .user {
             width: fit-content;    /* make user bubble fit around the text */
             max-width: 80%;
@@ -70,6 +66,17 @@
             border-radius: 1rem;    /* rounded corners */
             background: #f5f5f5;
             box-shadow: 0 2px 5px #0002;    /* bubble shadow */
+        }
+
+        .tool {
+            padding: 0.75rem 1rem;  /* slightly more horizontal space */
+            border-radius: 0.5rem;
+            background: #eef8fa;
+            font-family: monospace;    /* python code style */
+        }
+
+        .error {
+            color: #b42318;
         }
 
         #chat-form {
@@ -144,7 +151,7 @@
         const chatInput = document.getElementById('chat-input');
         const sendButton = chatForm.querySelector('button');
         const newChatButton = document.getElementById('new-chat-button');
-        const messages = [];  // conversation turns
+        const messages = [];  // conversation turns, i.e. message history
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
 
@@ -174,50 +181,17 @@
             }
         });
 
-        function renderAssistantText(paragraph, text) {
-            // Color special tokens like <|python_start|> slightly for better visibility
-
-            // Note 1:
-            // This renders full assistant text, including regex, every SSE chunk. Not ideal but for now should be ok.
-            // Alternatively we could append, but then coloring needs to account <|python_start|> may arrive in separate SSE events.
-
-            // Note 2:
-            // Via completions API we are getting plain text with substrings like "<|python_start|>". There is no way
-            // to distinguish between tool call marker and model outputting literal "<|python_start|>" text at this point.
-            // One way to do this properly would be to move to OpenAI responses API, which handles tool calls explicitly.
-
-            // split by special tokens. parts = ["Let's check:", "<|python_start|>", "2+2=", "<|python_end|>", ...]
-            const parts = text.split(/(<\|python_start\|>|<\|python_end\|>|<\|output_start\|>|<\|output_end\|>)/g);
-            
-            const specialTokens = ['<|python_start|>', '<|python_end|>', '<|output_start|>', '<|output_end|>'];
-            paragraph.replaceChildren();
-            parts.forEach((part) => {
-                if (specialTokens.includes(part)) {
-                    const span = document.createElement('span');
-                    span.className = 'special-token';
-                    span.textContent = part;
-                    paragraph.append(span);
-                } else {
-                    paragraph.append(part);
-                }
-            }); 
-        }
-
         function addMessage(role, text) {
             const scrollFollowsMessages = role === 'user' || isNearBottom();    // always scroll if user just entered message, check before altering textContent!
             document.body.classList.remove('empty-chat');  // switch to conversation layout
             const paragraph = document.createElement('p');
             paragraph.className = `message ${role}`;  // set two CSS classes
-            if (role === 'assistant') {
-                renderAssistantText(paragraph, text);
-            } else {
-                paragraph.textContent = text;
-            }
+            paragraph.textContent = text;
             messageHistory.appendChild(paragraph);
             if (scrollFollowsMessages) {
                 messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
             }
-            return paragraph;    // streaming updates this in place
+            return paragraph;
         }
 
         sendButton.addEventListener('click', function() {
@@ -264,8 +238,6 @@
         async function sendMessage(text) {
             const userMessage = { role: 'user', content: text };
             const userParagraph = addMessage('user', text);
-            const reply = { role: 'assistant', content: '' };
-            let assistantParagraph = null;
             chatInput.value = '';  // reset input
             resizeInput();     // message sent, resize textarea back to normal
             chatInput.disabled = true;
@@ -274,80 +246,51 @@
             activeAbortController = new AbortController();
 
             try {
-                const response = await fetch('/v1/chat/completions', {
+                const response = await fetch('/v1/responses', {
                     method: 'POST',
-                    signal: activeAbortController.signal,  // closes stream if something goes wrong
+                    signal: activeAbortController.signal,  // stop cancels waiting for the server
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         model: 'nanochat',
-                        messages: [...messages, userMessage],  // history plus the new message
-                        stream: true
+                        input: [...messages, userMessage],  // history includes past tool calls and results
+                        stream: false,
+                        store: false,   // our server doesn't support storing messages
                     })
                 });
                 if (!response.ok){
                     throw new Error(`API request failed with status ${response.status}`);
                 }
 
-                assistantParagraph = addMessage('assistant', '');
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();  // handle invalid/incomplete UTF-8
-                let networkBuffer = '';    // network read may end in the middle of SSE events
-                let streamDone = false;
-
-                try {
-                    while (!streamDone) {
-                        const { value, done } = await reader.read();
-                        if (done) {
-                            throw new Error('Response SSE stream ended before [DONE]');
-                        }
-                        networkBuffer += decoder.decode(value, { stream: true });  // preserve split UTF-8
-
-                        // Our server separates SSE events with a blank line.
-                        let eventEnd;
-                        while ((eventEnd = networkBuffer.indexOf('\n\n')) !== -1) {
-                            const event = networkBuffer.slice(0, eventEnd);
-                            networkBuffer = networkBuffer.slice(eventEnd + 2);  // +2 to move past \n\n
-                            if (!event.startsWith('data: ')) {
-                                throw new Error(`Unexpected SSE event: ${event}`);
-                            }
-
-                            const data = event.slice('data: '.length);
-                            if (data === '[DONE]') {
-                                streamDone = true;
-                                break;
-                            }
-
-                            const chunk = JSON.parse(data);
-                            reply.content += chunk.choices[0].delta.content || '';  // role/finish events have no text
-                            const scrollFollowsMessages = isNearBottom();  // check _before_ altering textContent, updated textContent may push content down below "snap tolerance"
-                            renderAssistantText(assistantParagraph, reply.content);  // style current message
-                            if (scrollFollowsMessages) {
-                                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
-                            }
-                        }
-                    }
-                } finally {
-                    reader.releaseLock();  // release the reader lock on the stream
-                }
-
-                if (!reply.content){
+                const reply = await response.json();  // batch mode for now, wait for the whole response
+                if (!reply.output.length){
                     throw new Error('Assistant response is empty');
                 }
-                messages.push(userMessage, reply);  // push only successful turns
-            } catch (error) {
-                if (activeAbortController.signal.aborted) {
-                    if (reply.content) {
-                        messages.push(userMessage, reply);  // keep partial message
-                    } else {
-                        userParagraph.remove();  // cleanup
-                        if (assistantParagraph) {
-                            assistantParagraph.remove();  // cleanup
+
+                for (const item of reply.output) {
+                    if (item.type === 'message') {
+                        const text = item.content.map(part => part.text).join('');
+                        addMessage('assistant', text );
+                        if (item.status === 'incomplete') {
+                            addMessage('error', '[incomplete]');
                         }
-                        chatInput.value = text;  // restore user input
+                    } else if (item.type === 'code_interpreter_call') {
+                        let text = 'Python:';
+                        text += '\n' + item.code;
+                        if (item.outputs.length){
+                            text += '\n\nOutput:\n' + item.outputs.map(out => out.logs).join('');
+                        }
+                        addMessage('tool', text);
+                        if (item.status === 'incomplete') {
+                            addMessage('error', '[incomplete]');
+                        }
                     }
-                } else {
+                }
+                messages.push(userMessage, ...reply.output);  // extend 'messages' with raw server response (possibly multiple assistant/tool messages)
+            } catch (error) {
+                userParagraph.remove();  // response did not complete, so don't keep this turn
+                chatInput.value = text;  // restore user input
+                if (!activeAbortController.signal.aborted) {
                     addMessage('error', `Error: ${error.message}`);
-                    chatInput.value = text;  // restore user input so it can be retried
                 }
             } finally {
                 activeAbortController.abort();  // abort the fetch request if still ongoing
