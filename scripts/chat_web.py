@@ -68,10 +68,31 @@ class ChatRequest(BaseModel):
     top_k: int | None = Field(default=None, ge=0)                    # None means use args.top_k, max is vocab size, checked at runtime
     max_tokens: int | None = Field(default=None, ge=1, le=4096)      # None means use args.max_tokens, max is to limit abuse
 
+class ResponsesTextPart(BaseModel):
+    type: Literal["input_text", "output_text"]
+    text: str
+
+class ResponsesMessage(BaseModel):
+    type: Literal["message"] = "message"     # optional
+    role: Literal["user", "assistant"]
+    content: str | list[ResponsesTextPart]
+
+class ResponsesToolOutput(BaseModel):
+    type: Literal["logs"]
+    logs: str
+
+class ResponsesCodeInterpreterCall(BaseModel):
+    type: Literal["code_interpreter_call"]       # required
+    # id: str                                      # ignored in our API implementation
+    # container_id: str                            # ignored
+    # status: Literal["completed", "incomplete"]   # ignored - we close incomplete parts, so model sees conversation history containing properly closed messages
+    code: str                                                          # 'code' and 'outputs' (both may be empty, if incomplete) are parsed as part of assistant message content:
+    outputs: list[ResponsesToolOutput] = Field(default_factory=list)   # {"content": [{"type": "python", "text": "2+2"}, {"type": "python_output", "text": "4"},]}
+
 class ResponsesRequest(BaseModel):
     model_config = {"extra": "forbid"}  # reject extra pydantic fields
     model: str
-    input: str | list[ChatMessage] = Field(min_length=1)             # max_length would limit string length, so need to check manually
+    input: str | list[ResponsesMessage | ResponsesCodeInterpreterCall] = Field(min_length=1)   # Pydantic auto resolves input type automatically for us
     stream: Literal[False] = False   # for now only non-streaming is supported
     store: Literal[False] = False   # we don't support server-side message history
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)     # None means use args.temperature as default
@@ -320,6 +341,76 @@ def message_to_responses_output(message_dict):
 
     return output
 
+
+
+def convert_responses_input_to_messages(responses_input):
+    """Convert OpenAI-compatible responses input into internal message format
+    
+    Target result shape, roughly:
+        messages = [
+            {
+                "role": "user",
+                "content": "Hello!"
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Hi there!"},
+                    {"type": "python", "text": "print('Hello World')"},
+                    {"type": "python_output", "text": "Hello World"},
+                    {"type": "text", "text": "Goodbye!"},
+                ]
+            }
+        ]
+    """
+    if isinstance(responses_input, str):
+        return [{"role": "user", "content": responses_input}]
+
+    # First pass, extract flat list of:
+    #   {"role": ..., "type": ..., "text": ...}
+    content_list = []
+    for resp_msg_or_code_int_call in responses_input:
+        if isinstance(resp_msg_or_code_int_call, ResponsesMessage):
+            resp_message = resp_msg_or_code_int_call
+            if isinstance(resp_message.content, str):
+                content_list.append({"role": resp_message.role, "type": "text", "text": resp_message.content})
+            elif isinstance(resp_message.content, list):
+                resp_text_part_list = resp_message.content
+                if not resp_text_part_list:
+                    content_list.append({"role": resp_message.role, "type": "text", "text": ""})  # preserve role boundary if content is empty []
+                else:
+                    for text_part in resp_text_part_list:
+                        content_list.append({"role": resp_message.role, "type": "text", "text": text_part.text})
+            else:
+                raise ValueError(f"Unsupported content type: {type(resp_message.content)}")
+        elif isinstance(resp_msg_or_code_int_call, ResponsesCodeInterpreterCall):
+            code_int_call = resp_msg_or_code_int_call
+            content_list.append({"role": "assistant", "type": "python", "text": code_int_call.code})
+            if code_int_call.outputs:
+                output_text = "".join(out.logs for out in code_int_call.outputs)
+                content_list.append({"role": "assistant", "type": "python_output", "text": output_text})
+        else:
+            raise ValueError(f"Unsupported response type: {type(resp_msg_or_code_int_call)}")
+
+    # Second pass, group by role and convert to the target message format
+    messages = []
+    current_role = None
+    for content_item in content_list:
+        role = content_item["role"]
+        if role != current_role:
+            messages.append({"role": role, "content": []})
+            current_role = role
+        messages[-1]["content"].append({"type": content_item["type"], "text": content_item["text"]})
+
+    # Third pass: convert user content from list-of-dict to just string
+    for message in messages:
+        if message["role"] == "user":
+            message["content"] = "".join(part["text"] for part in message["content"])
+
+    return messages
+
+
+
 # Test stream=False case:
 # curl http://127.0.0.1:8000/v1/responses -H 'Content-Type: application/json' -d '{"model":"nanochat","input":"Hello!"}'
 @app.post("/v1/responses")
@@ -338,13 +429,11 @@ def responses(body: ResponsesRequest, request: Request):
         raise HTTPException(status_code=400, detail=f"top_k cannot be greater than the vocabulary size ({state.tokenizer.n_vocab})")
 
     # Check messages length
-    if isinstance(body.input, str):
-        messages = [{"role": "user", "content": body.input}]
-    else:
-        messages = [message.model_dump() for message in body.input]
+    messages = convert_responses_input_to_messages(body.input)
     if len(messages) > MAX_NUMBER_OF_MESSAGES:
         raise HTTPException(status_code=400, detail=f"Number of messages exceeds the maximum allowed")
-    if sum(len(msg["content"]) for msg in messages) > MAX_TOTAL_CONVERSATION_LENGTH:
+    msg_len = lambda m: len(m["content"]) if m["role"] == "user" else sum(len(part["text"]) for part in m["content"])
+    if sum(msg_len(msg) for msg in messages) > MAX_TOTAL_CONVERSATION_LENGTH:
         raise HTTPException(status_code=400, detail="Total conversation length exceeds maximum allowed")
 
     # Prepare the input tokens

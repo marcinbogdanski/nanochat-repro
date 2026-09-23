@@ -22,7 +22,6 @@ def test_models_list():
     assert len(model_list.data) == 1
 
     model = model_list.data[0]
-    print(model)
     assert model.id == "nanochat"
     assert model.owned_by == "nanochat-repro"
     print("test_models_list passed")
@@ -35,7 +34,6 @@ def test_chat_completion():
             {"role": "user", "content": "Hello!"}
         ]
     )
-    print(completion)
     assert completion.object == "chat.completion"
     assert completion.model == "nanochat"
     assert len(completion.choices) == 1
@@ -72,7 +70,6 @@ def test_chat_completion_stream():
     assert choices[-1].finish_reason in {"stop", "length"}
 
     response_text = "".join(choice.delta.content or "" for choice in choices)
-    print(response_text)
     assert response_text.strip()
     assert "<|bos|>" not in response_text
     assert "<|assistant_end|>" not in response_text
@@ -147,7 +144,6 @@ def test_response():
         input="Hello!",
         max_output_tokens=128,
     )
-    print(response)
     assert response.id.startswith("resp_")
     assert response.object == "response"
     assert response.model == "nanochat"
@@ -178,10 +174,59 @@ def test_response_history():
         max_output_tokens=128,
     )
     assert response.object == "response"
-    print(response.status)
     assert response.status in ("completed", "incomplete")
     assert response.output_text.strip()  # confirm we got anything back
     print("test_response_history passed")
+
+def test_response_history_with_tool_call():
+    # Test our server takes more verbose responses API request
+    response = client.responses.create(
+        model="nanochat",
+        input=[
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "user",
+                "status": "completed",
+                "content": [{"type": "input_text", "text": "What is 2+2?"}],
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Let me calculate that.", "annotations": []}],
+                
+            },
+            {
+                "type": "code_interpreter_call",
+                "id": "ci_example",
+                "container_id": "python_ast_parser",
+                "status": "completed",
+                "code": "2+2",
+                "outputs": [{"type": "logs", "logs": "4"}],
+            },
+            {
+                "type": "message",
+                "id": "msg_3",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "The answer is 4."}]
+            },
+            {
+                "type": "message",
+                "id": "msg_4",
+                "role": "user",
+                "status": "completed",
+                "content": [{"type": "input_text", "text": "And what is twice that?", "annotations": []}],
+            },
+        ],
+        max_output_tokens=128,
+    )
+    assert response.object == "response"
+    assert response.status in ("completed", "incomplete")
+    assert response.output_text.strip()  # confirm we got anything back
+    print("test_response_history_with_tool_call passed")
 
 def expect_responses_status(status, **kwargs):
     try:
@@ -207,6 +252,7 @@ def main():
     test_completions_invalid_requests()
     test_response()
     test_response_history()
+    test_response_history_with_tool_call()
     test_response_invalid_request()
     print("All tests passed!")
 
