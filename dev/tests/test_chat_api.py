@@ -81,12 +81,14 @@ def test_chat_completion_stream_matches_non_stream():
     completion = client.chat.completions.create(
         model="nanochat",
         messages=messages,
+        temperature=0,
     )
     non_stream_response = completion.choices[0].message.content
 
     with client.chat.completions.create(
             model="nanochat",
             messages=[{"role": "user", "content": "Hello!"}],
+            temperature=0,
             stream=True,
         ) as stream:
             choices = [chunk.choices[0] for chunk in stream]
@@ -162,6 +164,97 @@ def test_response():
     assert response.usage.output_tokens > 0
     assert response.usage.total_tokens == response.usage.input_tokens + response.usage.output_tokens
     print("test_response passed")
+
+def test_response_stream():
+    # Collect SSE events
+    with client.responses.create(
+        model="nanochat",
+        input="Hello!",
+        max_output_tokens=128,
+        stream=True,
+    ) as stream:
+        events = list(stream)
+
+    # Sanity check events
+    assert events
+    assert events[0].type == "response.created"
+    assert [event.sequence_number for event in events] == list(range(len(events)))
+    assert events[-1].type in ("response.completed", "response.incomplete")
+
+    # Check response
+    response = events[-1].response
+    assert response.id == events[0].response.id
+    assert response.object == "response"
+    assert response.model == "nanochat"
+
+    # Confirm output text from streamed events matches the final response
+    text = "".join(event.delta for event in events if event.type == "response.output_text.delta")
+    assert text.strip()
+    assert text == response.output_text
+
+    # Confirm output items from streamed events match the final response
+    done_items = [event.item for event in events if event.type == "response.output_item.done"]
+    assert done_items == response.output
+    print("test_response_stream passed")
+
+
+def test_response_stream_matches_non_stream():
+    # Check both normal completion and token exhaustion
+    for max_tokens in (128, 1):
+        response_batch = client.responses.create(
+            model="nanochat",
+            input="Hello!",
+            temperature=0,
+            max_output_tokens=max_tokens,
+        )
+        with client.responses.create(
+            model="nanochat",
+            input="Hello!",
+            temperature=0,
+            max_output_tokens=max_tokens,
+            stream=True,
+        ) as stream:
+            events = list(stream)
+
+        assert events[0].type == "response.created"
+        assert events[1].type == "response.in_progress"
+        assert [event.sequence_number for event in events] == list(range(len(events)))
+        assert events[-1].type in ("response.completed", "response.incomplete")
+        response = events[-1].response
+        assert response.id == events[0].response.id
+        assert response.status == response_batch.status
+        assert response.output_text == response_batch.output_text
+        assert response.output_text.strip()
+        text = "".join(event.delta for event in events if event.type == "response.output_text.delta")
+        assert text == response.output_text
+        done_items = [event.item for event in events if event.type == "response.output_item.done"]
+        assert done_items == response.output
+        assert response.usage == response_batch.usage
+        if max_tokens == 1:
+            assert response.status == "incomplete"
+            assert response.incomplete_details.reason == "max_output_tokens"
+    print("test_response_stream_matches_non_stream passed")
+
+def test_response_disconnect_releases_lock():
+    my_client = client.with_options(timeout=60, max_retries=0)
+    with my_client.responses.create(
+        model="nanochat",
+        input="Tell me a long story.",
+        stream=True,
+    ) as stream:
+        for event in stream:
+            if event.type == "response.output_text.delta":
+                break  # interrupt the stream after receiving the first output text delta
+        else:
+            raise RuntimeError("Stream ended without receiving any output text delta")  # this should not happen
+    # A new request must work after interrupted stream
+    response = my_client.responses.create(
+        model="nanochat",
+        input="Hello!",
+        max_output_tokens=128,
+    )
+    assert response.output_text.strip()  # confirm we got anything back
+    print("test_response_disconnect_releases_lock passed")
 
 def test_response_history():
     response = client.responses.create(
@@ -251,6 +344,9 @@ def main():
     test_chat_completion_disconnect_releases_lock()
     test_completions_invalid_requests()
     test_response()
+    test_response_stream()
+    test_response_stream_matches_non_stream()
+    test_response_disconnect_releases_lock()
     test_response_history()
     test_response_history_with_tool_call()
     test_response_invalid_request()

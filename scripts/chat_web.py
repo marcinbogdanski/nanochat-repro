@@ -30,7 +30,7 @@ from nanorepro.common import get_base_path, UTF8Buffer
 from nanorepro.checkpoint import load_model
 from nanorepro.engine import Engine
 from nanorepro.calculator import CalculatorAndCounter
-from nanorepro.tokenizer import ConversationRenderer
+from nanorepro.tokenizer import ConversationRenderer, MessageDecoder
 BASE_DIR = get_base_path()
 MAX_TOTAL_CONVERSATION_LENGTH = 32000   # max prompt length, utf-8 characters before tokenization
 MAX_NUMBER_OF_MESSAGES = 500            # max number of messages in a conversation
@@ -93,7 +93,7 @@ class ResponsesRequest(BaseModel):
     model_config = {"extra": "forbid"}  # reject extra pydantic fields
     model: str
     input: str | list[ResponsesMessage | ResponsesCodeInterpreterCall] = Field(min_length=1)   # Pydantic auto resolves input type automatically for us
-    stream: Literal[False] = False   # for now only non-streaming is supported
+    stream: bool = False
     store: Literal[False] = False   # we don't support server-side message history
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)     # None means use args.temperature as default
     top_k: int | None = Field(default=None, ge=0)                       # None means use args.top_k, max is vocab size, checked at runtime
@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-class ChatCompletionsStreamingResponse(StreamingResponse):
+class ChatStreamingResponse(StreamingResponse):
     """Stream SSE chunks and make sure to close the generator when response ends
     
     If the client disconnects, StreamingResponse may stop consuming the generator w/o closing it.
@@ -165,7 +165,7 @@ class ChatCompletionsStreamingResponse(StreamingResponse):
         finally:
             self.sse_chunks_generator.close()
 
-def stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens):
+def stream_completions_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens):
     """Generator that yields Server-Sent Events (SSE) chunks for streaming chat completions."""
     def event(delta, finish_reason):
         chunk = {
@@ -263,8 +263,8 @@ def chat_completions(body: ChatRequest, request: Request):
     model_name = "nanochat"
     if body.stream:
         # OpenAI-compatible stream mode implementation
-        sse_chunks_generator = stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens)
-        return ChatCompletionsStreamingResponse(sse_chunks_generator)
+        sse_chunks_generator = stream_completions_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens)
+        return ChatStreamingResponse(sse_chunks_generator)
 
     else:
         # OpenAI-compatible non-stream mode implementation
@@ -307,8 +307,275 @@ def chat_completions(body: ChatRequest, request: Request):
         }
         return result
 
+
+def make_response(response_id, created_at, model_name, temperature, max_tokens, output, status, num_input_tokens, num_output_tokens):
+    """Build the final response object. Used in both batch and streaming modes."""
+    result = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "model": model_name,
+        "status": status,
+        "error": None,
+        "incomplete_details": {"reason": "max_output_tokens"} if status == "incomplete" else None,
+        "output": output,
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [{"type": "code_interpreter", "container": "python_ast_parser"}],
+        "store": False,
+        "temperature": temperature,
+        "max_output_tokens": max_tokens,
+        "usage": {
+            "input_tokens": num_input_tokens,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+            "output_tokens": num_output_tokens,  # includes tool output tokens
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": num_input_tokens + num_output_tokens,
+        },
+    }
+    return result
+
+
+def stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens):
+    """Generator that yields Server-Sent Events (SSE) chunks for streaming responses API
+
+    Example output, streamed incrementally (one assistant turn, including text, tool call, tool result and more):
+        [
+            {
+                "id": "msg_abc",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Let me calculate that.", "annotations": []}]
+            },
+            {
+                "id": "ci_def",
+                "type": "code_interpreter_call",
+                "container_id": "python_ast_parser",
+                "status": "completed",
+                "code": "2+2",
+                "outputs": [{"type": "logs", "logs": "4"}]
+            },
+            {
+                "id": "msg_ghi",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "The answer is 4.", "annotations": []}]
+            }
+        ]
+
+    Relevant SSE stream operations include:
+    - `response.output_item.added` - when inserting new message or code_interpreter_call
+    - `response.content_part.added` - when adding a text content part to a message
+    - `.delta` event - to append new text or Python code; tool output "logs" are not streamed and arrive with output_item.done
+    - `response.content_part.done`
+    - `response.output_item.done`
+    - `response.incomplete` or `response.completed` - to finalize the response
+    """
+    sequence_number = 0
+    def sse_event(event_type, **fields):
+        nonlocal sequence_number
+        chunk = {"type": event_type, "sequence_number": sequence_number, **fields}
+        sequence_number += 1
+        return "event: " + event_type + "\ndata: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+
+    output = []            # list of ResponsesMessage and/or ResponsesCodeInterpreterCall
+    current_item = None    # current ResponsesMessage or ResponsesCodeInterpreterCall being constructed
+    num_generated_tokens = 0
+    stop_reason = "length"
+    start_time = time.perf_counter()
+    try:
+        response = make_response(
+            response_id=response_id,
+            created_at=created_at,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            output=[],               # initially empty, will be populated as the stream progresses
+            status="in_progress",    # will update to 'completed' at the end of the stream
+            num_input_tokens=len(conversation_tokens),
+            num_output_tokens=0,
+        )
+        yield sse_event("response.created", response=response)
+        yield sse_event("response.in_progress", response=response)
+
+        decoder = MessageDecoder(state.tokenizer)
+        decoder.feed(state.convo_renderer.assistant_start_token)
+        with state.lock:
+            for token_column, finish_reasons in state.engine.generate_stream(
+                conversation_tokens,
+                max_new_tokens=max_tokens,
+                num_samples=1,
+                temperature=temperature,
+                top_k=top_k,
+                seed=42,
+            ):
+                num_generated_tokens += 1
+                generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
+                stop_reason = finish_reasons[0]
+
+                # MessageStreamEvent(
+                #   type="role_start|part_start|delta|part_end|role_end",
+                #   value="user|assistant|text|python|python_output",
+                #   status="completed|incomplete")
+                events = decoder.feed(generated_token)
+                if stop_reason is not None:
+                    events.extend(decoder.end_message_stream())  # close any truncated part and process in same loop
+
+                # MessageDecoder guarantees valid event stream, so we don't need to validate too much in the loop
+                for event in events:
+                    if event.type == "role_start":
+                        # We already feed in assistant_start token, and not expecting any new role_start events
+                        raise ValueError("Unexpected role_start event")
+
+                    elif event.type == "part_start":
+                        current_part = event.value
+                        if current_part == "text":
+                            # Add message
+                            current_item = {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant", "status": "in_progress", "content": []}
+                            output.append(current_item)
+                            yield sse_event("response.output_item.added", output_index=len(output)-1, item=current_item)
+                            # Add empty content part
+                            current_item["content"].append({"type": "output_text", "text": "", "annotations": []})
+                            yield sse_event("response.content_part.added", output_index=len(output)-1, item_id=current_item["id"], content_index=0, part=current_item["content"][0])
+                        elif current_part == "python":
+                            # Add code interpreter call
+                            current_item = {"id": "ci_" + uuid.uuid4().hex, "type": "code_interpreter_call", "container_id": "python_ast_parser", "status": "in_progress", "code": "", "outputs": []}
+                            output.append(current_item)
+                            yield sse_event("response.output_item.added", output_index=len(output)-1, item=current_item)
+                            # Mark 'in_progress'
+                            yield sse_event("response.code_interpreter_call.in_progress", output_index=len(output)-1, item_id=current_item["id"])
+                        elif current_part == "python_output":
+                            # Indicate the start of the Python output section
+                            yield sse_event("response.code_interpreter_call.interpreting", output_index=len(output)-1, item_id=current_item["id"])
+                            # Responses have no standard event for "tool logs started", so we create empty space, will append logs here and send together when part ends
+                            current_item["outputs"].append({"type": "logs", "logs": ""})
+                        else:
+                            raise ValueError(f"Unknown content part type: {current_part}")
+
+                    elif event.type == "delta":
+                        if current_part == "text":
+                            current_item["content"][0]["text"] += event.value   # we create exactly one text part per message
+                            yield sse_event("response.output_text.delta", output_index=len(output)-1, item_id=current_item["id"], content_index=0, delta=event.value, logprobs=[])
+                        elif current_part == "python":
+                            current_item["code"] += event.value
+                            yield sse_event("response.code_interpreter_call_code.delta", output_index=len(output)-1, item_id=current_item["id"], delta=event.value)
+                        elif current_part == "python_output":
+                            # Append last tool output log; there is no standard event to send, so we accumulate and send together when part ends
+                            current_item["outputs"][-1]["logs"] += event.value
+                        else:
+                            raise ValueError(f"Unknown content part type: {current_part}")
+
+                    elif event.type == "part_end":
+                        if current_part == "text":
+                            assert event.value == "text"   # avoid footguns
+                            part = current_item["content"][0]   # we create exactly one text part per message
+                            # Mark the text part done
+                            yield sse_event("response.output_text.done", output_index=len(output)-1, item_id=current_item["id"], content_index=0, text=part["text"], logprobs=[])
+                            # Mark the content part done (or incomplete if it was cut short)
+                            yield sse_event("response.content_part.done", output_index=len(output)-1, item_id=current_item["id"], content_index=0, part=part)
+                            current_item["status"] = event.status
+                            # Mark the output item done (i.e. message)
+                            yield sse_event("response.output_item.done", output_index=len(output)-1, item=current_item)
+                            current_item = None
+                        elif current_part == "python":
+                            assert event.value == "python"
+                            # Mark the code part done. It has ended either normally or was cut short
+                            yield sse_event("response.code_interpreter_call_code.done", output_index=len(output)-1, item_id=current_item["id"], code=current_item["code"])
+                            # current_item = None   # do DO NOT close the code_interpreter_call item, it will be closed when the python_output is sent
+                        elif current_part == "python_output":
+                            assert event.value == "python_output"
+                            current_item["status"] = event.status
+                            if event.status == "completed":
+                                # Mark the code_interpreter_call as done
+                                yield sse_event("response.code_interpreter_call.completed", output_index=len(output)-1, item_id=current_item["id"])
+                            # Send whole code_interpreter_call item, including the Python outputs (the "logs")
+                            yield sse_event("response.output_item.done", output_index=len(output)-1, item=current_item)
+                            current_item = None
+                        else:
+                            raise ValueError(f"Unexpected current_part: {current_part}")
+                        current_part = None
+
+                    elif event.type == "role_end":
+                        if current_item is not None:
+                            # This code path triggers, because we have an output item that was not closed
+                            # Text and python_output parts close their items (current_item=None)
+                            # A python part leaves it's tool item open, since it's waiting for the upcoming python_output
+                            # (MessageDecoder should guarantee event protocol integrity so we exclude protocol violations)
+                            assert current_part == None
+                            assert current_item["type"] == "code_interpreter_call"
+                            current_item["status"] = "incomplete"
+                            yield sse_event("response.output_item.done", output_index=len(output)-1, item=current_item)
+                            current_item = None
+
+                    else:
+                        raise ValueError(f"Unexpected event type: {event.type}")
+
+        # Prepare the final response and yield it as an the final SSE event
+        status = "incomplete" if stop_reason == "length" else "completed"
+        response = make_response(
+            response_id=response_id,
+            created_at=created_at,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            output=output,               # populate with final output items
+            status=status,               # update with final status
+            num_input_tokens=len(conversation_tokens),
+            num_output_tokens=num_generated_tokens,
+        )
+        yield sse_event("response." + status, response=response)
+
+    except GeneratorExit:
+        logger.info("Response stream interrupted id=%s prompt_tokens=%d generated_tokens=%d elapsed_s=%.2f",
+                    response_id, len(conversation_tokens), num_generated_tokens, time.perf_counter() - start_time)
+    except Exception as error:
+        logger.exception("Response stream failed id=%s", response_id)    # logger.exception includes error details
+        response = make_response(
+            response_id=response_id,
+            created_at=created_at,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            output=output,
+            status="failed",
+            num_input_tokens=len(conversation_tokens),
+            num_output_tokens=num_generated_tokens,
+        )
+        response["error"] = {"code": "server_error", "message": "Response generation failed"}
+        yield sse_event("response.failed", response=response)
+
+
 def message_to_responses_output(message_dict):
-    """Convert decoded message dictionary into OpenAI-compatible responses output"""
+    """Convert decoded message dictionary into OpenAI-compatible responses output.
+
+    Example output (single assistant response, including text, tool call, tool result and more text):
+        [
+            {
+                "id": "msg_abc",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Let me calculate that.", "annotations": []}]
+            },
+            {
+                "id": "ci_def",
+                "type": "code_interpreter_call",
+                "container_id": "python_ast_parser",
+                "status": "completed",
+                "code": "2+2",
+                "outputs": [{"type": "logs", "logs": "4"}]
+            },
+            {
+                "id": "msg_ghi",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "The answer is 4.", "annotations": []}]
+            }
+        ]
+    """
     msg_parts = message_dict['content']
     assert isinstance(msg_parts, list)
 
@@ -413,6 +680,8 @@ def convert_responses_input_to_messages(responses_input):
 
 # Test stream=False case:
 # curl http://127.0.0.1:8000/v1/responses -H 'Content-Type: application/json' -d '{"model":"nanochat","input":"Hello!"}'
+# Test stream=True case:
+# curl -N http://127.0.0.1:8000/v1/responses -H 'Content-Type: application/json' -d '{"model":"nanochat","input":"Hello!","stream":true}'
 @app.post("/v1/responses")
 def responses(body: ResponsesRequest, request: Request):
     """OpenAI-compatible responses endpoint. This endpoint does return server-side tool calls."""
@@ -452,9 +721,8 @@ def responses(body: ResponsesRequest, request: Request):
     model_name = "nanochat"
     if body.stream:
         # OpenAI-compatible stream mode implementation
-        # sse_chunks_generator = stream_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens)
-        # return ChatCompletionsStreamingResponse(sse_chunks_generator)
-        raise HTTPException(status_code=501, detail="Streaming mode is not implemented")
+        sse_chunks_generator = stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens)
+        return ChatStreamingResponse(sse_chunks_generator)
 
     else:
         # OpenAI-compatible non-stream mode implementation
@@ -483,29 +751,17 @@ def responses(body: ResponsesRequest, request: Request):
         )
 
         # Package and return
-        result = {
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "model": model_name,
-            "status": "incomplete" if stop_reason == "length" else "completed",
-            "error": None,
-            "incomplete_details": {"reason": "max_output_tokens"} if stop_reason == "length" else None,
-            "output": output,
-            "parallel_tool_calls": False,
-            "tool_choice": "auto",
-            "tools": [{"type": "code_interpreter", "container": "python_ast_parser"}],
-            "store": False,
-            "temperature": temperature,
-            "max_output_tokens": max_tokens,
-            "usage": {
-                "input_tokens": len(conversation_tokens),
-                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-                "output_tokens": len(generated_tokens),  # includes tool output tokens
-                "output_tokens_details": {"reasoning_tokens": 0},
-                "total_tokens": len(conversation_tokens) + len(generated_tokens),
-            },
-        }
+        result = make_response(
+            response_id=response_id,
+            created_at=created_at,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            output=output,
+            status="incomplete" if stop_reason == "length" else "completed",
+            num_input_tokens=len(conversation_tokens),
+            num_output_tokens=len(generated_tokens),
+        )
         return result
 
 
