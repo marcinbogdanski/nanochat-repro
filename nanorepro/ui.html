@@ -68,6 +68,19 @@
             box-shadow: 0 2px 5px #0002;    /* bubble shadow */
         }
 
+        .code-block {
+            display: block;    /* occupy own row */
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+            background: #f5f5f5;
+            font-family: monospace;
+        }
+
+        .code-fence {            /* the ```python and ``` lines */
+            color: #667085;
+            font-size: 0.85em;
+        }
+
         .tool {
             padding: 0.75rem 1rem;  /* slightly more horizontal space */
             border-radius: 0.5rem;
@@ -75,8 +88,8 @@
             font-family: monospace;    /* python code style */
         }
 
-        .tool-label {
-            display: block;  /* label above the code and/or code output */
+        .tool-label {           /* label above the code and/or code output */
+            display: block;     /* occupy own row */
             margin-bottom: 0.25rem;
             color: #667085;
             font-family: system-ui, sans-serif;    /* default with fallback */
@@ -240,11 +253,46 @@
             return paragraph;
         }
 
+        function renderAssistantText(paragraph, text) {
+            /// Handle code fences. Re-renders every update. ///
+            paragraph.replaceChildren();   // clear existing
+            let codeBlock = null;
+            const lines = text.split('\n');
+            for (let index  = 0; index < lines.length; index++) {
+                const line = lines[index];
+                const lineText = line + (index < lines.length - 1 ? '\n' : '');
+                const trimmedLine = line.trim();
+                if (!codeBlock && trimmedLine.startsWith('```')) {
+                    // Create code block and insert opening fence
+                    codeBlock = document.createElement('span');
+                    codeBlock.className = 'code-block';
+                    paragraph.append(codeBlock);
+                    const fence = document.createElement('span');  // insert opening fence
+                    fence.className = 'code-fence';
+                    fence.textContent = lineText;
+                    codeBlock.append(fence);
+                } else if (codeBlock && trimmedLine === '```') {
+                    // Closing fence, finalize code block
+                    const fence = document.createElement('span');  // insert closing fence
+                    fence.className = 'code-fence';
+                    fence.textContent = lineText;
+                    codeBlock.append(fence);
+                    codeBlock = null;  // reset for next code block
+                } else if (codeBlock) {
+                    codeBlock.append(lineText);  // Inside code block, add line as code content
+                } else {
+                    paragraph.append(lineText);  // Regular text outside code block
+                }
+            }
+            // An unclosed block stays visible while response is still streaming
+        }
+
         function renderItem(paragraph, item) {
             /// Render a single item (message or code_interpreter_call), replacing content inside existing paragraph ///
             const scrollFollowsMessages = isNearBottom();  // scroll if near bottom, check before altering content
             if (item.type === 'message') {
-                paragraph.textContent = item.content.map(part => part.text).join('');
+                const assistantResponseText = item.content.map(part => part.text).join('');
+                renderAssistantText(paragraph, assistantResponseText);
             } else if (item.type === 'code_interpreter_call') {
                 paragraph.replaceChildren();   // clear existing
                 const codeLabel = document.createElement('span');
