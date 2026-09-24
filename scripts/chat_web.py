@@ -339,7 +339,7 @@ def make_response(response_id, created_at, model_name, temperature, max_tokens, 
 def stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens):
     """Generator that yields Server-Sent Events (SSE) chunks for streaming responses API
 
-    Example output, streamed incrementally (one assistant turn, including text, tool call, tool result and more):
+    Example output, according to Responses API (one assistant turn, including text, tool call, tool result and more):
         [
             {
                 "id": "msg_abc",
@@ -365,13 +365,35 @@ def stream_responses_sse_chunks(state, conversation_tokens, response_id, created
             }
         ]
 
-    Relevant SSE stream operations include:
-    - `response.output_item.added` - when inserting new message or code_interpreter_call
-    - `response.content_part.added` - when adding a text content part to a message
-    - `.delta` event - to append new text or Python code; tool output "logs" are not streamed and arrive with output_item.done
-    - `response.content_part.done`
-    - `response.output_item.done`
-    - `response.incomplete` or `response.completed` - to finalize the response
+    Relevant SSE stream operations that we need to send (for the example above):
+        response.created                              Response created; includes ID and metadata
+        response.in_progress                          Notify that generation is underway
+
+        response.output_item.added                    First assistant message created
+        response.content_part.added                   Empty text part added to that message
+        response.output_text.delta                    Append generated text
+        response.output_text.done                     Full finished text of this part
+        response.content_part.done                    Full finished text part
+        response.output_item.done                     Full first assistant message, including status
+
+        response.output_item.added                    Code-interpreter item created
+        response.code_interpreter_call.in_progress    Notify that the call is in progress
+        response.code_interpreter_call_code.delta     Append generated Python code
+        response.code_interpreter_call_code.done      Full, finished Python code
+        response.code_interpreter_call.interpreting   Notify that the Python-output part has started
+        <no events>                                   Python output, i.e. logs, accumulate here; no log-delta events
+        response.code_interpreter_call.completed      Python output finished successfully
+        response.output_item.done                     Full tool item: code, logs, status
+
+        response.output_item.added                    Second assistant message created
+        response.content_part.added                   Empty text part added
+        response.output_text.delta                    Append generated text
+        response.output_text.done                     Full text of this part
+        response.content_part.done                    Full finished text part
+        response.output_item.done                     Full second message, including status
+        response.completed                            Full final response, including all messages and code-interpreter calls
+
+    The web client in ui.html needs to decode it, reconstruct the objects as they stream and render in real time. Fun!
     """
     sequence_number = 0
     def sse_event(event_type, **fields):

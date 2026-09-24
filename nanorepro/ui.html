@@ -181,7 +181,8 @@
             }
         });
 
-        function addMessage(role, text) {
+        function addParagraph(role, text) {
+            /// Add a new paragraph to the page with role=user|assistant|tool|error and initial text ///
             const scrollFollowsMessages = role === 'user' || isNearBottom();    // always scroll if user just entered message, check before altering textContent!
             document.body.classList.remove('empty-chat');  // switch to conversation layout
             const paragraph = document.createElement('p');
@@ -192,6 +193,23 @@
                 messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
             }
             return paragraph;
+        }
+
+        function renderItem(paragraph, item) {
+            /// Render a single item (message or code_interpreter_call), replacing content inside existing paragraph ///
+            const scrollFollowsMessages = isNearBottom();  // scroll if near bottom, check before altering content
+            if (item.type === 'message') {
+                paragraph.textContent = item.content.map(part => part.text).join('');
+            } else if (item.type === 'code_interpreter_call') {
+                let text = 'Python:\n' + item.code;
+                if (item.outputs.length) {
+                    text += '\n\nOutputs:\n' + item.outputs.map(out => out.logs).join('');
+                }
+                paragraph.textContent = text;
+            }
+            if (scrollFollowsMessages) {
+                messageHistory.scrollTop = messageHistory.scrollHeight;
+            }
         }
 
         sendButton.addEventListener('click', function() {
@@ -237,7 +255,7 @@
 
         async function sendMessage(text) {
             const userMessage = { role: 'user', content: text };
-            const userParagraph = addMessage('user', text);
+            const userParagraph = addParagraph('user', text);
             chatInput.value = '';  // reset input
             resizeInput();     // message sent, resize textarea back to normal
             chatInput.disabled = true;
@@ -245,15 +263,19 @@
             sendButton.textContent = 'Stop';
             activeAbortController = new AbortController();
 
+            let responseOutput = [];  // response items (message, code_interpreter_call), assembled as events arrive
+            const responseParagraphs = [];  // one paragraph per response item, e.g.: message, code_interpreter_call, another message
+            let receivedFinalResponse = false;
+
             try {
                 const response = await fetch('/v1/responses', {
                     method: 'POST',
-                    signal: activeAbortController.signal,  // stop cancels waiting for the server
+                    signal: activeAbortController.signal,  // stop cancels reading the stream
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         model: 'nanochat',
                         input: [...messages, userMessage],  // history includes past tool calls and results
-                        stream: false,
+                        stream: true,
                         store: false,   // our server doesn't support storing messages
                     })
                 });
@@ -261,38 +283,124 @@
                     throw new Error(`API request failed with status ${response.status}`);
                 }
 
-                const reply = await response.json();  // batch mode for now, wait for the whole response
-                if (!reply.output.length){
-                    throw new Error('Assistant response is empty');
-                }
+                // The schema for responses API is presented in chat_web.py
+                const reader = response.body.getReader();  // get stream reader, acquires reader lock
+                const decoder = new TextDecoder();  // handles UTF-8 to text decoding (like emoji split across network chunks)
+                let buffer = '';                    // an SSE event can be split across network chunks
+                try {
+                    while (true) {  // iterate raw network byte chunks
+                        const {value, done} = await reader.read();  // read bytes
+                        buffer += decoder.decode(value, { stream: !done });  // decode UTF-8, if final chunk then flush unfinished characters
+                        buffer = buffer.replace(/\r\n/g, '\n');  // normalize CRLF to LF
+                        let boundaryIndex;
+                        while ((boundaryIndex = buffer.indexOf('\n\n')) !== -1) {  // iterate SSE events
+                            // SSE event may have multiple data lines: """event: example\ndata: {"text":\ndata: "Hello"}"""
+                            const eventText = buffer.slice(0, boundaryIndex);
+                            buffer = buffer.slice(boundaryIndex + 2);  // advance past the SSE event boundary (+2 is len('\n\n'))
+                            const data = eventText.split('\n')
+                                .filter(line => line.startsWith('data:'))       // filter '''data: "Hello"''' lines only
+                                .map(line => line.slice(5).trimStart())         // remove 'data:' and leading whitespace
+                               .join('\n');                                     // re-join lines, result: '''{"text":\n"Hello"}'
+                            if (!data) continue;  // skip empty data
 
-                for (const item of reply.output) {
-                    if (item.type === 'message') {
-                        const text = item.content.map(part => part.text).join('');
-                        addMessage('assistant', text );
-                        if (item.status === 'incomplete') {
-                            addMessage('error', '[incomplete]');
+                            const event = JSON.parse(data);
+                            const index = event.output_index;
+                            if (event.type === 'response.created') {
+                                // response.created indicates outer response creation and initial metadata, we don't track/save outer response and focus on .output field only
+                            } else if (event.type === 'response.in_progress') {
+                                // Since we don't track outer response, .in_progress carries no useful information for us
+                            } else if (event.type === 'response.output_item.added') {
+                                // Store the empty initial structure, store it as a whole
+                                responseOutput[index] = event.item;
+                                responseParagraphs[index] = addParagraph(responseOutput[index].type === 'message' ? 'assistant' : 'tool', '');
+                                renderItem(responseParagraphs[index], event.item);
+                            } else if (event.type === 'response.content_part.added') {
+                                // Store the initial empty structure
+                                responseOutput[index].content[event.content_index] = event.part;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.output_text.delta') {
+                                // Append new text to the existing content
+                                responseOutput[index].content[event.content_index].text += event.delta;  // append text to existing content
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.output_text.done') {
+                                // Replace accumulated text with the final content
+                                responseOutput[index].content[event.content_index].text = event.text;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.content_part.done') {
+                                // Replace the content part with the final content
+                                responseOutput[index].content[event.content_index] = event.part;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.output_item.done') {
+                                // Replace the entire output item (message or code_interpreter_call) with the final item
+                                responseOutput[index] = event.item;
+                                renderItem(responseParagraphs[index], event.item);
+                            } else if (event.type === 'response.code_interpreter_call.in_progress') {
+                                // Update the status field
+                                responseOutput[index].status = 'in_progress';  // redundant, since response.output_item.added initializes .status with 'in_progress'
+                            } else if (event.type === 'response.code_interpreter_call_code.delta') {
+                                // Append the new code delta to the existing code
+                                responseOutput[index].code += event.delta;  // append code to existing code
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.code_interpreter_call_code.done') {
+                                // Replace the entire code with the final code
+                                responseOutput[index].code = event.code;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.code_interpreter_call.interpreting') {
+                                // Record that the tool output section has started
+                                responseOutput[index].status = 'interpreting';
+                            } else if (event.type === 'response.code_interpreter_call.completed') {
+                                // Don't mark the code_interpreter_call as completed yet, since we are waiting for the "logs" to arrive in response.output_item.done
+                            } else if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
+                                // Handle completion, incompletion, or error events
+                                responseOutput = event.response.output;  // final authoritative output, including statuses etc
+                                for (let index = 0; index < responseOutput.length; index++) {  // iterate items: messages and code_interpreter_calls
+                                    renderItem(responseParagraphs[index], responseOutput[index]);  // render final output item (message or code_interpreter_call), replacing existing content if needed
+                                }
+                                if (event.type === 'response.failed') {
+                                    throw new Error(event.response.error?.message || 'Response generation failed');  // throw here, so error paragraph can be added in universal catch block
+                                }
+                                receivedFinalResponse = true;
+                            } else if (event.type === 'error') {
+                                throw new Error(event.message || 'Response generation failed');
+                            } else {
+                                throw new Error(`Unknown event type: ${event.type}`);
+                            }
                         }
-                    } else if (item.type === 'code_interpreter_call') {
-                        let text = 'Python:';
-                        text += '\n' + item.code;
-                        if (item.outputs.length){
-                            text += '\n\nOutput:\n' + item.outputs.map(out => out.logs).join('');
-                        }
-                        addMessage('tool', text);
-                        if (item.status === 'incomplete') {
-                            addMessage('error', '[incomplete]');
+                        if (done) {
+                            break;   // SSE stream ended
                         }
                     }
+                } finally {
+                    reader.releaseLock();  // release lock acquired by response.body.getReader()
                 }
-                messages.push(userMessage, ...reply.output);  // extend 'messages' with raw server response (possibly multiple assistant/tool messages)
+                if (!receivedFinalResponse) {
+                    throw new Error('Stream ended before receiving final response');
+                }
+                if (!responseOutput.length) {
+                    throw new Error('Assistant response is empty');
+                }
             } catch (error) {
-                userParagraph.remove();  // response did not complete, so don't keep this turn
-                chatInput.value = text;  // restore user input
                 if (!activeAbortController.signal.aborted) {
-                    addMessage('error', `Error: ${error.message}`);
+                    addParagraph('error', `Error: ${error.message}`);
                 }
             } finally {
+                if (responseOutput.length) {
+                    for (let index = 0; index < responseOutput.length; index++) {
+                        const item = responseOutput[index];    // message or code_interpreter_call
+                        if (item.status === 'in_progress' || item.status === 'interpreting') {
+                            item.status = 'incomplete';       // mark any unfinished items as incomplete
+                        }
+                        if (item.status == 'incomplete') {
+                            const warning = addParagraph('error', '[incomplete]');  // insert warning paragraph below the incomplete response
+                            responseParagraphs[index].after(warning);
+                        }
+                    }
+                    messages.push(userMessage, ...responseOutput);  // add responseOutput (message or code_interpreter_call) to our history
+                } else {
+                    // nothing received, restore the prompt so user can retry
+                    userParagraph.remove();
+                    chatInput.value = text;
+                }
                 activeAbortController.abort();  // abort the fetch request if still ongoing
                 activeAbortController = null;
                 chatInput.disabled = false;
