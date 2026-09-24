@@ -92,11 +92,23 @@
             font-size: 0.85rem;
         }
 
+        .status {
+            color: #667085;       /* small text below assistant response, e.g. "Thinking..." or "Stopped" */
+            font-size: 0.85rem;
+        }
+
+        #chat-hint {
+            color: #667085;       /* hint below user input */
+            font-size: 0.85rem;
+            margin: 0 0 1rem;
+            text-align: center;
+        }
+
         #chat-form {
             display: flex;    /* defaults to horizontal row */
             align-items: flex-end;    /* keep the button at the bottom as the input grows */
             gap: 0.5rem;
-            padding: 1rem 0;    /* inner space: top/bottom, no left/right */
+            padding: 1rem 0 0.35rem;    /* inner space: top, left/right, bottom (small gap between form and a keyboard hint) */
         }
 
         textarea, button {
@@ -117,7 +129,26 @@
             color: #999;  /* applies to a hint displayed when input is empty */
             opacity: 1;   /* prevent browsers from applying additional transparency */
         }
-        button { cursor: pointer; }    /* show pointer cursor on hover */
+        textarea:disabled {
+            background: #f7f7f7;
+        }
+
+        button {
+            cursor: pointer;       /* show pointer cursor on hover */
+            background: #f5f5f5;
+        }
+        button:hover:not(:disabled) {
+            background: #e9eef0;
+            border-color: #a5b4bc;
+        }
+        button:focus-visible, textarea:focus-visible {
+            outline: 2px solid #668998;
+            outline-offset: 2px;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
 
         /*********************************/
         
@@ -157,6 +188,7 @@
         <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
         <button type="submit">Send</button>
     </form>
+    <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
 
     <script>
         const messageHistory = document.getElementById('message-history');
@@ -275,6 +307,8 @@
         async function sendMessage(text) {
             const userMessage = { role: 'user', content: text };
             const userParagraph = addParagraph('user', text);
+            const thinkingParagraph = addParagraph('status', 'Thinking...');  // while waiting for the first token
+            thinkingParagraph.setAttribute('role', 'status');   // indicate this provides status information
             chatInput.value = '';  // reset input
             resizeInput();     // message sent, resize textarea back to normal
             chatInput.disabled = true;
@@ -285,6 +319,7 @@
             let responseOutput = [];  // response items (message, code_interpreter_call), assembled as events arrive
             const responseParagraphs = [];  // one paragraph per response item, e.g.: message, code_interpreter_call, another message
             let receivedFinalResponse = false;
+            let notice = null;  // display-only outcome, shown once in finally block
 
             try {
                 const response = await fetch('/v1/responses', {
@@ -330,6 +365,7 @@
                                 // Since we don't track outer response, .in_progress carries no useful information for us
                             } else if (event.type === 'response.output_item.added') {
                                 // Store the empty initial structure, store it as a whole
+                                thinkingParagraph.remove();  // first response item arrived, can remove "Thinking..." indicator
                                 responseOutput[index] = event.item;
                                 responseParagraphs[index] = addParagraph(responseOutput[index].type === 'message' ? 'assistant' : 'tool', '');
                                 renderItem(responseParagraphs[index], event.item);
@@ -375,8 +411,10 @@
                                 for (let index = 0; index < responseOutput.length; index++) {  // iterate items: messages and code_interpreter_calls
                                     renderItem(responseParagraphs[index], responseOutput[index]);  // render final output item (message or code_interpreter_call), replacing existing content if needed
                                 }
-                                if (event.type === 'response.failed') {
-                                    throw new Error(event.response.error?.message || 'Response generation failed');  // throw here, so error paragraph can be added in universal catch block
+                                if (event.type === 'response.incomplete') {
+                                    notice = { role: 'error', text: 'Output limit reached' };
+                                } else if (event.type === 'response.failed') {
+                                    notice = { role: 'error', text: event.response.error?.message || 'Response generation failed' };
                                 }
                                 receivedFinalResponse = true;
                             } else if (event.type === 'error') {
@@ -395,23 +433,22 @@
                 if (!receivedFinalResponse) {
                     throw new Error('Stream ended before receiving final response');
                 }
-                if (!responseOutput.length) {
+                if (!responseOutput.length && !notice) {
                     throw new Error('Assistant response is empty');
                 }
             } catch (error) {
-                if (!activeAbortController.signal.aborted) {
-                    addParagraph('error', `Error: ${error.message}`);
+                if (error.name === 'AbortError') {
+                    notice = { role: 'status', text: 'Stopped' };  // explicitly handle user abort only
+                } else {
+                    notice = { role: 'error', text: `Error: ${error.message}` };  // all other errors
                 }
             } finally {
+                thinkingParagraph.remove();  // remove, in case stream ended before first token arrived
                 if (responseOutput.length) {
                     for (let index = 0; index < responseOutput.length; index++) {
                         const item = responseOutput[index];    // message or code_interpreter_call
                         if (item.status === 'in_progress' || item.status === 'interpreting') {
                             item.status = 'incomplete';       // mark any unfinished items as incomplete
-                        }
-                        if (item.status == 'incomplete') {
-                            const warning = addParagraph('error', '[incomplete]');  // insert warning paragraph below the incomplete response
-                            responseParagraphs[index].after(warning);
                         }
                     }
                     messages.push(userMessage, ...responseOutput);  // add responseOutput (message or code_interpreter_call) to our history
@@ -419,6 +456,9 @@
                     // nothing received, restore the prompt so user can retry
                     userParagraph.remove();
                     chatInput.value = text;
+                }
+                if (notice) {
+                    addParagraph(notice.role, notice.text);
                 }
                 activeAbortController.abort();  // abort the fetch request if still ongoing
                 activeAbortController = null;
