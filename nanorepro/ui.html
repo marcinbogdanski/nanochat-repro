@@ -81,6 +81,18 @@
             font-size: 0.85em;
         }
 
+        .python-keyword {
+            color: #8250a4;
+        }
+
+        .python-string {
+            color: #507a46;
+        }
+
+        .python-comment {
+            color: #77808c;
+        }
+
         .tool {
             padding: 0.75rem 1rem;  /* slightly more horizontal space */
             border-radius: 0.5rem;
@@ -253,10 +265,73 @@
             return paragraph;
         }
 
+        function highlightPython(code) {
+            /// Mini python syntax highlighter, makes no attempt to cover corner cases ///
+            const keywords = ['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
+                'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally',
+                'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal',
+                'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield'];
+            const text = code.textContent;
+            code.replaceChildren();  // clear existing content
+            let plainStart = 0;
+            let index = 0;
+            while (index < text.length) {
+                const tokenStart = index;       // token here is a group of characters, like 'return', '"Hello"', '# comment', not LLM token
+                const character = text[index];
+                let tokenClass = null;
+                if (character === '#') {
+                    // Handle line comments starting with #
+                    const newline = text.indexOf('\n', index);  // find next '\n', starting from index
+                    index = newline === -1 ? text.length : newline;  // if not found, take whole rest of the text
+                    tokenClass = 'python-comment';
+                } else if (character === '"' || character === "'") {
+                    // Handle string literals starting with " or ', or triple quotes like """ or '''
+                    const tripleQuote = character.repeat(3);  // ''' or """
+                    const delimiter = text.startsWith(tripleQuote, index) ? tripleQuote : character; // is this triple-quote or single-quote
+                    index += delimiter.length;
+                    // Consume up to the closing delimiter
+                    while (index < text.length) {
+                        if (text[index] === '\\') {
+                            index += 2;  // skip escaped character
+                        } else if (text.startsWith(delimiter, index)) {
+                            index += delimiter.length;
+                            break;  // found closing delimiter
+                        } else {
+                            index++;
+                        }
+                    }
+                    tokenClass = 'python-string';
+                } else if (/[\p{L}\p{N}_]/u.test(character)) {  // \p{L} - Unicode letter, \p{N} - Unicode number, _ - underscore, [...] - match any, /u enable unicode matching
+                    // Read a whole word, so names like 'return_value' stay uncolored
+                    while (index < text.length && /[\p{L}\p{N}_]/u.test(text[index])) {
+                        index++;
+                    }
+                    const token = text.slice(tokenStart, index);
+                    if (keywords.includes(token)) {
+                        tokenClass = 'python-keyword';
+                    }
+                } else {
+                    // Handle any other single character (punctuation, operators, etc.)
+                    index++;
+                }
+                if (tokenClass) {
+                    code.append(text.slice(plainStart, tokenStart));
+                    const token = document.createElement('span');
+                    token.className = tokenClass;
+                    token.textContent = text.slice(tokenStart, index);
+                    code.append(token);
+                    plainStart = index;
+                }
+            }
+            code.append(text.slice(plainStart));  // preserve any remaining text
+        }
+
         function renderAssistantText(paragraph, text) {
             /// Handle code fences. Re-renders every update. ///
             paragraph.replaceChildren();   // clear existing
             let codeBlock = null;
+            let codeContent = null;
+            const pythonBlocks = [];
             const lines = text.split('\n');
             for (let index  = 0; index < lines.length; index++) {
                 const line = lines[index];
@@ -271,6 +346,11 @@
                     fence.className = 'code-fence';
                     fence.textContent = lineText;
                     codeBlock.append(fence);
+                    codeContent = document.createElement('span');
+                    codeBlock.append(codeContent);  // Append empty code content container
+                    if (trimmedLine.startsWith('```python')) {
+                        pythonBlocks.push(codeContent);
+                    }
                 } else if (codeBlock && trimmedLine === '```') {
                     // Closing fence, finalize code block
                     const fence = document.createElement('span');  // insert closing fence
@@ -279,12 +359,15 @@
                     codeBlock.append(fence);
                     codeBlock = null;  // reset for next code block
                 } else if (codeBlock) {
-                    codeBlock.append(lineText);  // Inside code block, add line as code content
+                    codeContent.append(lineText);  // Inside code block, add line as code content
                 } else {
                     paragraph.append(lineText);  // Regular text outside code block
                 }
             }
             // An unclosed block stays visible while response is still streaming
+            for (const code of pythonBlocks) {
+                highlightPython(code);  // highlight after all code blocks have been fully assembled, so we can match string delimiters across lines etc.
+            }
         }
 
         function renderItem(paragraph, item) {
