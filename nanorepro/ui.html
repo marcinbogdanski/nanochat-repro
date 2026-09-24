@@ -89,25 +89,57 @@
             color: var(--text-color);
             background: var(--chat-background);
         }
+        body:not(.empty-chat) .brand-heading img {
+            margin: 0.75rem 0.5rem 0.25rem;  /* extra spacing around the svg logo */
+        }
 
         h1 {
-            display: flex;      /* logo and text side by side */
-            align-items: center;    /* vertically center the logo and text */
-            gap: 0.5rem;    /* space between logo and text */
             font-size: 2rem;
-            margin-bottom: 0;  /* remove default bottom margin for h1 */
+            margin: 0;  /* remove default margin for h1 */
         }
-        h1 img {
-            width: 2.5rem;
-            height: 2.5rem;
+        .brand-heading {       /* container for the logo and brand text */
+            display: flex;         /* logo beside the title and link together */
+            align-items: center;
+            gap: 0.5rem;
+            margin: 1rem 0 0.75rem;
+        }
+        .brand-heading img {  /* logo image inside the brand heading */
+            width: 3.0rem;
+            height: 3.0rem;
+            flex-shrink: 0;
+        }
+        .brand-text {        /* container for the brand text */
+            display: flex;
+            flex-direction: column;
+            text-align: center;
+        }
+        body:not(.empty-chat) .brand-text h1 {
+            line-height: 1.3;  /* bring the repository link closer to the title */
         }
 
         header {
             display: flex;
+            align-items: flex-start;    /* align children to the start of the header */
+        }
+
+        #chat-brand {
+            display: flex;
             flex-direction: column;  /* stack children vertically */
             align-items: stretch;  /* button fills the header width */
             width: fit-content;   /* only as wide as logo + text */
-            gap: 0.5rem;    /* space between children */
+            flex-shrink: 0;     /* prevent the chat brand from shrinking */
+            gap: 0.25rem;    /* small gap before New Chat button */
+        }
+
+        #project-link {
+            color: var(--muted-color);
+            font-size: 0.85rem;
+            opacity: 0.65;
+            text-underline-offset: 0.15em;
+        }
+        #project-link:hover,
+        #project-link:focus-visible {
+            opacity: 1;
         }
 
         #message-history {
@@ -190,6 +222,7 @@
 
         #chat-hint {
             color: var(--muted-color);       /* hint below user input */
+            opacity: 0.65;
             font-size: 0.85rem;
             margin: 0 0 1rem;
             text-align: center;
@@ -225,6 +258,10 @@
         textarea:disabled {
             background: var(--page-background);
         }
+        textarea:focus {
+            outline: none;
+            border-color: var(--focus-color);
+        }
 
         button {
             cursor: pointer;       /* show pointer cursor on hover */
@@ -234,7 +271,7 @@
             background: var(--hover-background);
             border-color: var(--hover-border);
         }
-        button:focus-visible, textarea:focus-visible {
+        button:focus-visible {
             outline: 2px solid var(--focus-color);
             outline-offset: 2px;
         }
@@ -245,7 +282,7 @@
 
         #theme-selector {    /* container for theme selection buttons */
             position: absolute;  /* float within the central chat section without taking up a row */
-            top: 0.75rem;
+            top: 1rem;
             right: 1rem;
             z-index: 1;        /* show in front of other elements */
             display: flex;      /* arrange theme buttons in a row */
@@ -288,21 +325,44 @@
         
         body.empty-chat {
             justify-content: center;    /* elements on welcome screen are centered */
+            min-height: 100dvh;       /* ensure the welcome screen takes at least the full viewport height */
+            height: auto;  /* allow scrolling if the welcome content is taller than the screen */
+            padding-top: 4rem;  /* keep welcome content clear of the theme selector */
+            padding-bottom: 1rem;
         }
         .empty-chat header {
             align-self: center;    /* centered header */
+            flex-direction: column;  /* stack header content vertically */
+            align-items: center;
         }
-        .empty-chat h1 {
+        .empty-chat #chat-form {
+            padding-top: 4rem;  /* separate the title/link group from the input */
+        }
+        .empty-chat #project-link {   /* style for the project description text */
+            font-size: 0.95rem;
+        }
+        .empty-chat .brand-heading {
             flex-direction: column;   /* stack logo and text vertically */
             margin: 0;
+            gap: 0.25rem;      /* space between logo and “Tigger Chat” */
         }
-        .empty-chat h1 img {
+        .empty-chat .brand-text {
+            gap: 0.25rem;  /* space between title and repository link */
+        }
+        .empty-chat .brand-heading img {
             width: 6rem;          /* bit larger on welcome screen */
             height: 6rem;
         }
         .empty-chat #new-chat-button,
         .empty-chat #message-history {
             display: none;    /* new chat button not needed, nothing to clear yet */
+        }
+
+        @media (max-width: 600px) {    /* responsive adjustments for small screens */
+            body:not(.empty-chat) header {
+                flex-direction: column;
+                padding-top: 2.5rem;  /* prevent the title from overlapping the theme selector */
+            }
         }
 
     </style>
@@ -332,17 +392,22 @@
         </button>
     </div>
     <header>
-        <h1>
-            <img src="/tiger_logo.svg" alt="">
-            Tigger Chat
-        </h1>
-        <button id="new-chat-button" type="button">New Chat</button>
+        <div id="chat-brand">
+            <div class="brand-heading">
+                <img src="/tiger_logo.svg" alt="">
+                <div class="brand-text">
+                    <h1>Tigger Chat</h1>
+                    <a id="project-link" href="https://github.com/marcinbogdanski/nanochat-repro" target="_blank" rel="noopener noreferrer">Training code and notes</a>
+                </div>
+            </div>
+            <button id="new-chat-button" type="button">New Chat</button>
+        </div>
     </header>
 
     <div id="message-history"></div>
 
     <form id="chat-form">
-        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
+        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message" autofocus></textarea>
         <button type="submit">Send</button>
     </form>
     <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
