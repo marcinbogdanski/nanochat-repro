@@ -2,6 +2,7 @@
 OpenAI-compatible chat web server for Nanochat
 
 Loads an SFT-trained model from the "runs_sft" directory at the BASE_DIR (default ~/.cache/nanorepro).
+Logs API requests to BASE_DIR/webchat_log.jsonl.
 
 Run with:
 uv run python -m scripts.chat_web --run=d18
@@ -19,6 +20,7 @@ import logging
 import argparse
 import threading
 from pathlib import Path
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager, closing
 import torch
 import uvicorn
@@ -41,6 +43,21 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# Chat logger
+def make_chat_logger():
+    """Chat logger that logs all API requests to a file"""
+    chat_logger = logging.getLogger("webchat")
+    chat_logger.setLevel(logging.INFO)
+    chat_logger.propagate = False  # don't also print conversations to console
+    handler = logging.FileHandler(
+        Path(BASE_DIR) / "webchat_log.jsonl",
+        mode="a",
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    chat_logger.addHandler(handler)
+    return chat_logger
+chat_logger = make_chat_logger()
 
 # Command-line argument parsing
 parser = argparse.ArgumentParser(description="Run the Nanochat web server")
@@ -149,6 +166,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+def log_chat_request(request: Request, body: ResponsesRequest, response_id: str):
+    """Append the validated request to the conversation log."""
+    record = {
+        "id": response_id,
+        "time": datetime.now(timezone.utc).isoformat(),
+        "ip": request.client.host if request.client else None,
+        "run": args.run,
+        "request": body.model_dump(mode="json"),
+    }
+    chat_logger.info("%s", json.dumps(record, ensure_ascii=False))
+
 def make_completion(completion_id, created_at, model_name, text, finish_reason):
     """Build OpenAI-compatible chat completion"""
     return {
@@ -240,6 +268,9 @@ def stream_completions_sse_chunks(state, conversation_tokens, completion_id, cre
 @app.post("/v1/chat/completions")
 def chat_completions(body: ChatRequest, request: Request):
     """OpenAI-compatible endpoint to create chat completions"""
+    completion_id = "chatcmpl-" + uuid.uuid4().hex
+    log_chat_request(request, body, completion_id)
+
     if body.model != "nanochat":
         raise HTTPException(status_code=404, detail="Model not supported")
 
@@ -270,7 +301,6 @@ def chat_completions(body: ChatRequest, request: Request):
     if len(conversation_tokens) + max_tokens > state.model.max_position_embeddings():
         raise HTTPException(status_code=400, detail="Prompt length plus max_tokens exceeds maximum position embeddings")
 
-    completion_id = "chatcmpl-" + uuid.uuid4().hex
     created_at = int(time.time())
     model_name = "nanochat"
     if body.stream:
@@ -708,6 +738,9 @@ def convert_responses_input_to_messages(responses_input):
 @app.post("/v1/responses")
 def responses(body: ResponsesRequest, request: Request):
     """OpenAI-compatible responses endpoint. This endpoint does return server-side tool calls."""
+    response_id = "resp_" + uuid.uuid4().hex
+    log_chat_request(request, body, response_id)
+
     if body.model != "nanochat":
         raise HTTPException(status_code=404, detail="Model not supported")
 
@@ -739,7 +772,6 @@ def responses(body: ResponsesRequest, request: Request):
     if len(conversation_tokens) + max_tokens > state.model.max_position_embeddings():
         raise HTTPException(status_code=400, detail="Prompt length plus max_tokens exceeds maximum position embeddings")
 
-    response_id = "resp_" + uuid.uuid4().hex
     created_at = int(time.time())
     model_name = "nanochat"
     if body.stream:
