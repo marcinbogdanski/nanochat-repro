@@ -149,6 +149,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+def make_completion(completion_id, created_at, model_name, text, finish_reason):
+    """Build OpenAI-compatible chat completion"""
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created_at,
+        "model": model_name,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}],
+    }
+
 class ChatStreamingResponse(StreamingResponse):
     """Stream SSE chunks and make sure to close the generator when response ends
     
@@ -293,20 +303,7 @@ def chat_completions(body: ChatRequest, request: Request):
             completion_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time
         )
         # Package and return
-        result = {
-            "id": completion_id,
-            "object": "chat.completion",
-            "created": created_at,
-            "model": model_name,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": assistant_response  # generated_text
-                },
-                "finish_reason": stop_reason,
-            }]
-        }
+        result = make_completion(completion_id, created_at, model_name, assistant_response, stop_reason)
         return result
 
 
