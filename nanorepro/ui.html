@@ -142,6 +142,15 @@
             opacity: 1;
         }
 
+        #project-credit {
+            display: none;  /* welcome screen only */
+            margin: 0;
+            color: var(--muted-color);
+            opacity: 0.65;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+
         #message-history {
             flex: 1;    /* take remaining vertical space */
             min-height: 0;    /* allow shrink, so input is always visible */
@@ -226,6 +235,27 @@
             font-size: 0.85rem;
             margin: 0 0 1rem;
             text-align: center;
+        }
+
+        #example-prompts {
+            display: none;  /* shown only on the welcome screen */
+            flex-direction: column;
+            align-items: center;
+            gap: 0.25rem;
+            margin-top: 4rem;  /* same space above the examples as below, before the input */
+        }
+        #example-prompts button {   /* example prompts are buttons */
+            padding: 0;
+            border: none;
+            background: transparent;
+            color: var(--muted-color);
+            opacity: 0.65;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        #example-prompts button:hover,
+        #example-prompts button:focus-visible {
+            opacity: 1;
         }
 
         #chat-form {
@@ -336,10 +366,13 @@
             align-items: center;
         }
         .empty-chat #chat-form {
-            padding-top: 4rem;  /* separate the title/link group from the input */
+            padding-top: 4rem;  /* space between the examples and input */
         }
-        .empty-chat #project-link {   /* style for the project description text */
-            font-size: 0.95rem;
+        .empty-chat #example-prompts {
+            display: flex;     /* make example prompts visible on welcome screen */
+        }
+        .empty-chat #project-credit {   /* make project credit visible only on the welcome screen */
+            display: block;
         }
         .empty-chat .brand-heading {
             flex-direction: column;   /* stack logo and text vertically */
@@ -397,12 +430,19 @@
                 <img src="/tiger_logo.svg" alt="">
                 <div class="brand-text">
                     <h1>Tigger Chat</h1>
+                    <p id="project-credit">Reproduction of Andrej Karpathy's Nanochat</p>
                     <a id="project-link" href="https://github.com/marcinbogdanski/nanochat-repro" target="_blank" rel="noopener noreferrer">Training code and notes</a>
                 </div>
             </div>
             <button id="new-chat-button" type="button">New Chat</button>
         </div>
     </header>
+
+    <div id="example-prompts" role="group" aria-label="Example prompts">
+        <button type="button">Tell me about yourself.</button>
+        <button type="button">Write a Python function to add two numbers, with a docstring.</button>
+        <button type="button">Use Python to count the letter “r” in “strawberry”.</button>
+    </div>
 
     <div id="message-history"></div>
 
@@ -442,6 +482,15 @@
         const messages = [];  // conversation turns, i.e. message history
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
+
+        for (const button of document.querySelectorAll('#example-prompts button')) {
+            /// Attach click event to example prompt buttons ///
+            button.addEventListener('click', function() {
+                chatInput.value = button.textContent;
+                resizeInput();
+                chatInput.focus();  // fill the input without sending, so the user can edit first
+            });
+        }
 
         function isNearBottom() {
             const distance = messageHistory.scrollHeight - messageHistory.clientHeight - messageHistory.scrollTop;  // distance from bottom
