@@ -19,7 +19,7 @@ import logging
 import argparse
 import threading
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 import torch
 import uvicorn
 from pydantic import BaseModel, Field
@@ -188,15 +188,17 @@ def stream_completions_sse_chunks(state, conversation_tokens, completion_id, cre
 
         # Generate the assistant response text
         utf8_buffer = UTF8Buffer()
-        with state.lock:  # synchronize across FastAPI request workers
-            for token_column, finish_reasons in state.engine.generate_stream(
-                conversation_tokens,
-                max_new_tokens=max_tokens,
-                num_samples=1,
-                temperature=temperature,
-                top_k=top_k,
-                seed=42,
-            ):
+        # state.lock - synchronizes across FastAPI request workers
+        # closing() ensures the generator is properly and promptly closed when exiting the context
+        with state.lock, closing(state.engine.generate_stream(
+            conversation_tokens,
+            max_new_tokens=max_tokens,
+            num_samples=1,
+            temperature=temperature,
+            top_k=top_k,
+            seed=42,
+        )) as token_generator:
+            for token_column, finish_reasons in token_generator:
                 num_generated_tokens += 1
                 generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
                 stop_reason = finish_reasons[0]
@@ -424,15 +426,17 @@ def stream_responses_sse_chunks(state, conversation_tokens, response_id, created
 
         decoder = MessageDecoder(state.tokenizer)
         decoder.feed(state.convo_renderer.assistant_start_token)
-        with state.lock:
-            for token_column, finish_reasons in state.engine.generate_stream(
-                conversation_tokens,
-                max_new_tokens=max_tokens,
-                num_samples=1,
-                temperature=temperature,
-                top_k=top_k,
-                seed=42,
-            ):
+        # state.lock - synchronizes across FastAPI request workers
+        # closing() ensures the generator is properly and promptly closed when exiting the context
+        with state.lock, closing(state.engine.generate_stream(
+            conversation_tokens,
+            max_new_tokens=max_tokens,
+            num_samples=1,
+            temperature=temperature,
+            top_k=top_k,
+            seed=42,
+        )) as token_generator:
+            for token_column, finish_reasons in token_generator:
                 num_generated_tokens += 1
                 generated_token = token_column[0]    # num_samples=1, so index 0 is our generated token
                 stop_reason = finish_reasons[0]
