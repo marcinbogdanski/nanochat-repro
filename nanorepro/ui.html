@@ -5,15 +5,80 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Tigger Chat</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <script>
+        // Apply the saved theme before the page renders. avoids a flash of wrong color
+        const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)');  // matchMedia allows checking CSS
+        let themePreference = 'system';   // global variable storing the current theme preference
+        try {
+            const savedTheme = localStorage.getItem('tigger-theme');
+            if (['light', 'system', 'dark'].includes(savedTheme)) {
+                themePreference = savedTheme;
+            }
+        } catch (error) {
+            // Browser storage, disabled? ignore
+        }
+
+        function applyTheme() {
+            const useDarkTheme = themePreference === 'dark' || (themePreference === 'system' && systemPrefersDark.matches);
+            document.documentElement.dataset.theme = useDarkTheme ? 'dark' : 'light';
+        }
+        applyTheme();    // apply the theme immediately
+        systemPrefersDark.addEventListener('change', applyTheme);    // re-apply theme if system preference changes
+    </script>
     <style>
         * { box-sizing: border-box; }    /* include padding and border in element size */
 
+        :root {                      /* default */
+            color-scheme: light;              /* apply theme to browser controls and scrollbars */
+            --page-background: #f7f7f7;
+            --chat-background: #fff;
+            --text-color: #222;
+            --muted-color: #667085;
+            --surface-background: #f5f5f5;
+            --tool-background: #eef8fa;
+            --border-color: #ccc;
+            --bubble-border: transparent;
+            --bubble-shadow: #0002;
+            --placeholder-color: #999;
+            --hover-background: #e9eef0;
+            --hover-border: #a5b4bc;
+            --focus-color: #668998;
+            --selected-background: #dce9ef;
+            --error-color: #b42318;
+            --keyword-color: #8250a4;
+            --string-color: #507a46;
+            --comment-color: #77808c;
+        }
+
+        :root[data-theme="dark"] {      /* override with these values if dark */
+            color-scheme: dark;
+            --page-background: #151719;
+            --chat-background: #1e2023;
+            --text-color: #e6e8eb;
+            --muted-color: #a5afbd;
+            --surface-background: #292d32;
+            --tool-background: #22353c;
+            --border-color: #484e57;
+            --bubble-border: #414750;
+            --bubble-shadow: #0004;
+            --placeholder-color: #959eaa;
+            --hover-background: #353d45;
+            --hover-border: #738393;
+            --focus-color: #8ab9d1;
+            --selected-background: #3a5262;
+            --error-color: #ff9b91;
+            --keyword-color: #c9a0e8;
+            --string-color: #a1c98a;
+            --comment-color: #9aa5b3;
+        }
+
         html {
-            background: #f7f7f7;
+            background: var(--page-background);
         }
 
         body {
-            padding: 0 1rem;  /* white space inside the left and right edges */
+            position: relative;    /* stay in normal layout; become the reference point (for the theme selector)*/
+            padding: 0 1rem;  /* space inside the left and right edges */
             width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
             max-width: 800px;
             height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
@@ -21,8 +86,8 @@
             display: flex;
             flex-direction: column;
             font: 16px/1.5 system-ui, sans-serif;    /* 16px font, 1.5 line spacing, system font with fallback */
-            color: #222;
-            background: white;
+            color: var(--text-color);
+            background: var(--chat-background);
         }
 
         h1 {
@@ -64,46 +129,47 @@
             margin-left: auto;    /* push user bubble to the right */
             padding: 0.6rem 1rem;    /* vertical, horizontal space inside bubble */
             border-radius: 1rem;    /* rounded corners */
-            background: #f5f5f5;
-            box-shadow: 0 2px 5px #0002;    /* bubble shadow */
+            background: var(--surface-background);
+            border: 1px solid var(--bubble-border);
+            box-shadow: 0 2px 5px var(--bubble-shadow);    /* bubble shadow */
         }
 
         .code-block {
             display: block;    /* occupy own row */
             padding: 0.5rem 0.75rem;
             border-radius: 0.5rem;
-            background: #f5f5f5;
+            background: var(--surface-background);
             font-family: monospace;
         }
 
         .code-fence {            /* the ```python and ``` lines */
-            color: #667085;
+            color: var(--muted-color);
             font-size: 0.85em;
         }
 
         .python-keyword {
-            color: #8250a4;
+            color: var(--keyword-color);
         }
 
         .python-string {
-            color: #507a46;
+            color: var(--string-color);
         }
 
         .python-comment {
-            color: #77808c;
+            color: var(--comment-color);
         }
 
         .tool {
             padding: 0.75rem 1rem;  /* slightly more horizontal space */
             border-radius: 0.5rem;
-            background: #eef8fa;
+            background: var(--tool-background);
             font-family: monospace;    /* python code style */
         }
 
         .tool-label {           /* label above the code and/or code output */
             display: block;     /* occupy own row */
             margin-bottom: 0.25rem;
-            color: #667085;
+            color: var(--muted-color);
             font-family: system-ui, sans-serif;    /* default with fallback */
             font-size: 0.85rem;
         }
@@ -113,17 +179,17 @@
         }
 
         .error {
-            color: #b42318;
+            color: var(--error-color);
             font-size: 0.85rem;
         }
 
         .status {
-            color: #667085;       /* small text below assistant response, e.g. "Thinking..." or "Stopped" */
+            color: var(--muted-color);       /* small text below assistant response, e.g. "Thinking..." or "Stopped" */
             font-size: 0.85rem;
         }
 
         #chat-hint {
-            color: #667085;       /* hint below user input */
+            color: var(--muted-color);       /* hint below user input */
             font-size: 0.85rem;
             margin: 0 0 1rem;
             text-align: center;
@@ -138,12 +204,14 @@
 
         textarea, button {
             font: inherit;
+            color: var(--text-color);
             padding: 0.6rem;    /* padding around text */
-            border: 1px solid #ccc;    /* border around input/button */
+            border: 1px solid var(--border-color);    /* border around input/button */
             border-radius: 0.5rem;    /* slightly rounded */
         }
 
         textarea {
+            background: var(--chat-background);
             flex: 1;    /* take remaining horizontal space */
             min-width: 0;    /* allow shrinking */
             max-height: 20rem;    /* limit the height of the textarea */
@@ -151,28 +219,69 @@
             resize: none;      /* prevent manual resizing */
         }
         textarea::placeholder {
-            color: #999;  /* applies to a hint displayed when input is empty */
+            color: var(--placeholder-color);  /* applies to a hint displayed when input is empty */
             opacity: 1;   /* prevent browsers from applying additional transparency */
         }
         textarea:disabled {
-            background: #f7f7f7;
+            background: var(--page-background);
         }
 
         button {
             cursor: pointer;       /* show pointer cursor on hover */
-            background: #f5f5f5;
+            background: var(--surface-background);
         }
         button:hover:not(:disabled) {
-            background: #e9eef0;
-            border-color: #a5b4bc;
+            background: var(--hover-background);
+            border-color: var(--hover-border);
         }
         button:focus-visible, textarea:focus-visible {
-            outline: 2px solid #668998;
+            outline: 2px solid var(--focus-color);
             outline-offset: 2px;
         }
         button:disabled {
             opacity: 0.5;
             cursor: default;
+        }
+
+        #theme-selector {    /* container for theme selection buttons */
+            position: absolute;  /* float within the central chat section without taking up a row */
+            top: 0.75rem;
+            right: 1rem;
+            z-index: 1;        /* show in front of other elements */
+            display: flex;      /* arrange theme buttons in a row */
+            gap: 0.15rem;        /* space between theme buttons */
+            padding: 0.15rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: var(--chat-background);
+        }
+        #theme-selector button {    /* style for individual theme buttons */
+            display: flex;         /* center icon within the button */
+            align-items: center;
+            justify-content: center;
+            width: 1.65rem;
+            height: 1.65rem;
+            padding: 0;
+            border-radius: 0.35rem;
+            border-color: transparent;
+            background: transparent;
+            color: var(--muted-color);
+        }
+        #theme-selector button:hover {
+            background: var(--hover-background);
+        }
+        #theme-selector button[aria-pressed="true"] {    /* style for the selected theme button */
+            background: var(--selected-background);
+            color: var(--text-color);
+        }
+        #theme-selector svg {    /* style for the SVG icons within theme buttons */
+            width: 0.8rem;
+            height: 0.8rem;
+            fill: none;
+            stroke: currentColor;    /* use the current text color for the stroke */
+            stroke-width: 1.75;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
 
         /*********************************/
@@ -199,6 +308,29 @@
     </style>
 </head>
 <body class="empty-chat">
+    <!-- Theme selector -->
+    <div id="theme-selector" role="group" aria-label="Color theme">
+        <button type="button" data-theme="light" title="Light" aria-label="Light" aria-pressed="false">
+            <!-- Light theme icon (sun) -->
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"/>
+                <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>
+            </svg>
+        </button>
+        <button type="button" data-theme="system" title="System" aria-label="System" aria-pressed="false">
+            <!-- System theme icon (monitor) -->
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="13" rx="2"/>
+                <path d="M12 17v4m-4 0h8"/>
+            </svg>
+        </button>
+        <button type="button" data-theme="dark" title="Dark" aria-label="Dark" aria-pressed="false">
+            <!-- Dark theme icon (moon) -->
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>
+            </svg>
+        </button>
+    </div>
     <header>
         <h1>
             <img src="/tiger_logo.svg" alt="">
@@ -216,6 +348,27 @@
     <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
 
     <script>
+        const themeButtons = document.querySelectorAll('#theme-selector button');
+        function updateThemeButtons() {
+            /// Set the active button aria-pressed="true" ///
+            for (const button of themeButtons) {
+                button.setAttribute('aria-pressed', String(button.dataset.theme === themePreference));
+            }
+        }
+        for (const button of themeButtons) {
+            button.addEventListener('click', function() {
+                themePreference = button.dataset.theme;   // global variable storing the current theme preference (light|system|dark)
+                applyTheme();            // apply the selected theme immediately
+                updateThemeButtons();
+                try {
+                    localStorage.setItem('tigger-theme', themePreference);
+                } catch (e) {
+                    // Failed to save theme preference to localStorage, ignore for now
+                }
+            });
+        }
+        updateThemeButtons();  // initialize theme buttons on page load
+
         const messageHistory = document.getElementById('message-history');
         const chatForm = document.getElementById('chat-form');
         const chatInput = document.getElementById('chat-input');
