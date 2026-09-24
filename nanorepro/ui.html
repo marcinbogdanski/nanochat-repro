@@ -75,8 +75,21 @@
             font-family: monospace;    /* python code style */
         }
 
+        .tool-label {
+            display: block;  /* label above the code and/or code output */
+            margin-bottom: 0.25rem;
+            color: #667085;
+            font-family: system-ui, sans-serif;    /* default with fallback */
+            font-size: 0.85rem;
+        }
+
+        .tool-label:not(:first-child) {
+            margin-top: 0.75rem;         /* code output, separate from the code above */
+        }
+
         .error {
             color: #b42318;
+            font-size: 0.85rem;
         }
 
         #chat-form {
@@ -201,11 +214,17 @@
             if (item.type === 'message') {
                 paragraph.textContent = item.content.map(part => part.text).join('');
             } else if (item.type === 'code_interpreter_call') {
-                let text = 'Python:\n' + item.code;
+                paragraph.replaceChildren();   // clear existing
+                const codeLabel = document.createElement('span');
+                codeLabel.className = 'tool-label';
+                codeLabel.textContent = 'Python Tool Call';
+                paragraph.append(codeLabel, item.code);  // add string as text, not rendered HTML
                 if (item.outputs.length) {
-                    text += '\n\nOutputs:\n' + item.outputs.map(out => out.logs).join('');
+                    const outputsLabel = document.createElement('span');
+                    outputsLabel.className = 'tool-label';
+                    outputsLabel.textContent = 'Python Output';
+                    paragraph.append(outputsLabel, item.outputs.map(out => out.logs).join(''));
                 }
-                paragraph.textContent = text;
             }
             if (scrollFollowsMessages) {
                 messageHistory.scrollTop = messageHistory.scrollHeight;
