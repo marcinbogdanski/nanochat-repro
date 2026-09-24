@@ -381,7 +381,10 @@
                 const codeLabel = document.createElement('span');
                 codeLabel.className = 'tool-label';
                 codeLabel.textContent = 'Python Tool Call';
-                paragraph.append(codeLabel, item.code);  // add string as text, not rendered HTML
+                const codeContent = document.createElement('span');
+                codeContent.textContent = item.code;
+                highlightPython(codeContent);  // same highlighting as Python blocks in assistant text
+                paragraph.append(codeLabel, codeContent);
                 if (item.outputs.length) {
                     const outputsLabel = document.createElement('span');
                     outputsLabel.className = 'tool-label';
