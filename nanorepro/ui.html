@@ -183,6 +183,13 @@
             font-family: monospace;
         }
 
+        .inline-code {     /* inline code in plain text, wrapped in `` */
+            background: var(--surface-background);
+            padding: 0.1em 0.25em;
+            border-radius: 0.25rem;
+            font-size: 0.95em;
+        }
+
         .code-fence {            /* the ```python and ``` lines */
             color: var(--muted-color);
             font-size: 0.85em;
@@ -441,7 +448,7 @@
     <div id="example-prompts" role="group" aria-label="Example prompts">
         <button type="button">Tell me about yourself.</button>
         <button type="button">Write a Python function to add two numbers, with a docstring.</button>
-        <button type="button">Use Python to count the letter “r” in “strawberry”.</button>
+        <button type="button">How many times does the letter “r” appear in “strawberry”?</button>
     </div>
 
     <div id="message-history"></div>
@@ -593,8 +600,58 @@
             code.append(text.slice(plainStart));  // preserve any remaining text
         }
 
+        function appendTextWithEmphasis(paragraph, text) {
+            /// Basic bold/italic in plain text, wrapped in * _ ** __ ///
+            const pattern = /(\*\*|__|\*|_)([^\n*_`]+)\1/g;  // eldritch regex hieroglyphics, prolonged exposure not recommended
+            let plainStart = 0;
+            for (const match of text.matchAll(pattern)) {   // each match is ['**hello**', '**', 'hello']
+                const marker = match[1];    // '**'
+                const content = match[2];    // 'hello'
+                const start = match.index;
+                const end = start + match[0].length;
+                const before = text[start - 1] || '';  // single character immediately before the marker
+                const after = text[end] || '';   // single character after the marker
+                if (content.trim() !== content || before === '\\' || before === marker[0] || after === marker[0]) {
+                    // Skip corner cases, in order:
+                    // content.trim() detects '** hello **'
+                    // before === '\\' detects escaped markers like '\**hello**'
+                    // before === marker[0] detects '**hello**' preceded by another marker character
+                    // after === marker[0] detects '**hello**' followed by another marker character
+                    continue;
+                }
+                if (marker.startsWith('_') && /[\p{L}\p{N}\p{M}_]/u.test(before + after)) {  // more ancient horrors
+                    // if marker is '_' or '__', check preceding/following characters,
+                    // so _variable_ in ordinary text like some_variable_name is *not* marked italic
+                    continue;
+                }
+                paragraph.append(text.slice(plainStart, start));  // append ordinary text before first marker
+                const emphasis = document.createElement(marker.length === 2 ? 'strong' : 'em');
+                emphasis.textContent = match[0];   // insert whole '**hello**', for transparency I don't want to hide '**'
+                paragraph.append(emphasis);
+                plainStart = end;
+            }
+            paragraph.append(text.slice(plainStart));  // append any remaining plain text, after the loop
+        }
+
+        function appendInlineText(paragraph, text) {
+            /// Append text to a paragraph, handling inline code like `var_name` and bold/italics ///
+            const parts = text.split(/(`[^`\n]+`)/g);  // more forbidden scrolls
+            // "Use `temp` instead of `count`." -> ["Use ", "`temp`", " instead of ", "`count`", "."]
+            for (const part of parts) {
+                if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+                    // Inline code `temp`, `count` etc
+                    const code = document.createElement('code');
+                    code.className = 'inline-code';
+                    code.textContent = part; // whole part "`temp`" including `` - for transparency I don't want to hide markers
+                    paragraph.append(code);
+                } else {
+                    appendTextWithEmphasis(paragraph, part);
+                }
+            }
+        }
+
         function renderAssistantText(paragraph, text) {
-            /// Handle code fences. Re-renders every update. ///
+            /// Handle code fences, inline code, and basic bold/italic. Re-renders every update. ///
             paragraph.replaceChildren();   // clear existing
             let codeBlock = null;
             let codeContent = null;
@@ -628,7 +685,7 @@
                 } else if (codeBlock) {
                     codeContent.append(lineText);  // Inside code block, add line as code content
                 } else {
-                    paragraph.append(lineText);  // Regular text outside code block
+                    appendInlineText(paragraph, lineText);  // Regular text outside code block
                 }
             }
             // An unclosed block stays visible while response is still streaming
