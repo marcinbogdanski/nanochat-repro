@@ -720,6 +720,7 @@
             let responseOutput = [];  // response items (message, code_interpreter_call), assembled as events arrive
             const responseParagraphs = [];  // one paragraph per response item, e.g.: message, code_interpreter_call, another message
             let receivedFinalResponse = false;
+            let responseId = null; // server side response ID, good for reporting issues
             let notice = null;  // display-only outcome, shown once in finally block
 
             try {
@@ -761,7 +762,7 @@
                             const event = JSON.parse(data);
                             const index = event.output_index;
                             if (event.type === 'response.created') {
-                                // response.created indicates outer response creation and initial metadata, we don't track/save outer response and focus on .output field only
+                                responseId = event.response.id;  // server side response ID, good for reporting issues
                             } else if (event.type === 'response.in_progress') {
                                 // Since we don't track outer response, .in_progress carries no useful information for us
                             } else if (event.type === 'response.output_item.added') {
@@ -808,6 +809,7 @@
                                 // Don't mark the code_interpreter_call as completed yet, since we are waiting for the "logs" to arrive in response.output_item.done
                             } else if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
                                 // Handle completion, incompletion, or error events
+                                responseId = event.response.id; // should be the same as what we already track
                                 responseOutput = event.response.output;  // final authoritative output, including statuses etc
                                 for (let index = 0; index < responseOutput.length; index++) {  // iterate items: messages and code_interpreter_calls
                                     renderItem(responseParagraphs[index], responseOutput[index]);  // render final output item (message or code_interpreter_call), replacing existing content if needed
@@ -815,7 +817,7 @@
                                 if (event.type === 'response.incomplete') {
                                     notice = { role: 'error', text: 'Output limit reached' };
                                 } else if (event.type === 'response.failed') {
-                                    notice = { role: 'error', text: event.response.error?.message || 'Response generation failed' };
+                                    notice = { role: 'error', text: `Response '${responseId}' generation failed` };
                                 }
                                 receivedFinalResponse = true;
                             } else if (event.type === 'error') {
@@ -841,7 +843,8 @@
                 if (error.name === 'AbortError') {
                     notice = { role: 'status', text: 'Stopped' };  // explicitly handle user abort only
                 } else {
-                    notice = { role: 'error', text: `Error: ${error.message}` };  // all other errors
+                    const message = responseId ? `Response '${responseId}' generation failed: ${error.message}` : `Error: ${error.message}`;
+                    notice = { role: 'error', text: message };  // errors before receiving ID use original error.message
                 }
             } finally {
                 thinkingParagraph.remove();  // remove, in case stream ended before first token arrived
