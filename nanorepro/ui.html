@@ -5,15 +5,80 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Tigger Chat</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <script>
+        // Apply the saved theme before the page renders. avoids a flash of wrong color
+        const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)');  // matchMedia allows checking CSS
+        let themePreference = 'system';   // global variable storing the current theme preference
+        try {
+            const savedTheme = localStorage.getItem('tigger-theme');
+            if (['light', 'system', 'dark'].includes(savedTheme)) {
+                themePreference = savedTheme;
+            }
+        } catch (error) {
+            // Browser storage, disabled? ignore
+        }
+
+        function applyTheme() {
+            const useDarkTheme = themePreference === 'dark' || (themePreference === 'system' && systemPrefersDark.matches);
+            document.documentElement.dataset.theme = useDarkTheme ? 'dark' : 'light';
+        }
+        applyTheme();    // apply the theme immediately
+        systemPrefersDark.addEventListener('change', applyTheme);    // re-apply theme if system preference changes
+    </script>
     <style>
         * { box-sizing: border-box; }    /* include padding and border in element size */
 
+        :root {                      /* default */
+            color-scheme: light;              /* apply theme to browser controls and scrollbars */
+            --page-background: #f7f7f7;
+            --chat-background: #fff;
+            --text-color: #222;
+            --muted-color: #667085;
+            --surface-background: #f5f5f5;
+            --tool-background: #eef8fa;
+            --border-color: #ccc;
+            --bubble-border: transparent;
+            --bubble-shadow: #0002;
+            --placeholder-color: #999;
+            --hover-background: #e9eef0;
+            --hover-border: #a5b4bc;
+            --focus-color: #668998;
+            --selected-background: #dce9ef;
+            --error-color: #b42318;
+            --keyword-color: #8250a4;
+            --string-color: #507a46;
+            --comment-color: #77808c;
+        }
+
+        :root[data-theme="dark"] {      /* override with these values if dark */
+            color-scheme: dark;
+            --page-background: #151719;
+            --chat-background: #1e2023;
+            --text-color: #e6e8eb;
+            --muted-color: #a5afbd;
+            --surface-background: #292d32;
+            --tool-background: #22353c;
+            --border-color: #484e57;
+            --bubble-border: #414750;
+            --bubble-shadow: #0004;
+            --placeholder-color: #959eaa;
+            --hover-background: #353d45;
+            --hover-border: #738393;
+            --focus-color: #8ab9d1;
+            --selected-background: #3a5262;
+            --error-color: #ff9b91;
+            --keyword-color: #c9a0e8;
+            --string-color: #a1c98a;
+            --comment-color: #9aa5b3;
+        }
+
         html {
-            background: #f7f7f7;
+            background: var(--page-background);
         }
 
         body {
-            padding: 0 1rem;  /* white space inside the left and right edges */
+            position: relative;    /* stay in normal layout; become the reference point (for the theme selector)*/
+            padding: 0 1rem;  /* space inside the left and right edges */
             width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
             max-width: 800px;
             height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
@@ -21,28 +86,69 @@
             display: flex;
             flex-direction: column;
             font: 16px/1.5 system-ui, sans-serif;    /* 16px font, 1.5 line spacing, system font with fallback */
-            color: #222;
-            background: white;
+            color: var(--text-color);
+            background: var(--chat-background);
+        }
+        body:not(.empty-chat) .brand-heading img {
+            margin: 0.75rem 0.5rem 0.25rem;  /* extra spacing around the svg logo */
         }
 
         h1 {
-            display: flex;      /* logo and text side by side */
-            align-items: center;    /* vertically center the logo and text */
-            gap: 0.5rem;    /* space between logo and text */
             font-size: 2rem;
-            margin-bottom: 0;  /* remove default bottom margin for h1 */
+            margin: 0;  /* remove default margin for h1 */
         }
-        h1 img {
-            width: 2.5rem;
-            height: 2.5rem;
+        .brand-heading {       /* container for the logo and brand text */
+            display: flex;         /* logo beside the title and link together */
+            align-items: center;
+            gap: 0.5rem;
+            margin: 1rem 0 0.75rem;
+        }
+        .brand-heading img {  /* logo image inside the brand heading */
+            width: 3.0rem;
+            height: 3.0rem;
+            flex-shrink: 0;
+        }
+        .brand-text {        /* container for the brand text */
+            display: flex;
+            flex-direction: column;
+            text-align: center;
+        }
+        body:not(.empty-chat) .brand-text h1 {
+            line-height: 1.3;  /* bring the repository link closer to the title */
         }
 
         header {
             display: flex;
+            align-items: flex-start;    /* align children to the start of the header */
+        }
+
+        #chat-brand {
+            display: flex;
             flex-direction: column;  /* stack children vertically */
             align-items: stretch;  /* button fills the header width */
             width: fit-content;   /* only as wide as logo + text */
-            gap: 0.5rem;    /* space between children */
+            flex-shrink: 0;     /* prevent the chat brand from shrinking */
+            gap: 0.25rem;    /* small gap before New Chat button */
+        }
+
+        #project-link {
+            color: var(--muted-color);
+            font-size: 0.85rem;
+            opacity: 0.65;
+            text-underline-offset: 0.15em;
+        }
+        #project-link:hover,
+        #project-link:focus-visible {
+            opacity: 1;
+        }
+
+        #project-credit {
+            display: none;  /* welcome screen only */
+            margin: 0;
+            color: var(--muted-color);
+            opacity: 0.65;
+            font-size: 0.85rem;
+            text-align: center;
         }
 
         #message-history {
@@ -58,35 +164,124 @@
             overflow-wrap: anywhere;    /* allow breaking long words */
         }
 
-        .special-token {
-            color: #0891b2;    /* cyan for tool-call markers */
-        }
-
         .user {
             width: fit-content;    /* make user bubble fit around the text */
             max-width: 80%;
             margin-left: auto;    /* push user bubble to the right */
             padding: 0.6rem 1rem;    /* vertical, horizontal space inside bubble */
             border-radius: 1rem;    /* rounded corners */
-            background: #f5f5f5;
-            box-shadow: 0 2px 5px #0002;    /* bubble shadow */
+            background: var(--surface-background);
+            border: 1px solid var(--bubble-border);
+            box-shadow: 0 2px 5px var(--bubble-shadow);    /* bubble shadow */
+        }
+
+        .code-block {
+            display: block;    /* occupy own row */
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+            background: var(--surface-background);
+            font-family: monospace;
+        }
+
+        .inline-code {     /* inline code in plain text, wrapped in `` */
+            background: var(--surface-background);
+            padding: 0.1em 0.25em;
+            border-radius: 0.25rem;
+            font-size: 0.95em;
+        }
+
+        .code-fence {            /* the ```python and ``` lines */
+            color: var(--muted-color);
+            font-size: 0.85em;
+        }
+
+        .python-keyword {
+            color: var(--keyword-color);
+        }
+
+        .python-string {
+            color: var(--string-color);
+        }
+
+        .python-comment {
+            color: var(--comment-color);
+        }
+
+        .tool {
+            padding: 0.75rem 1rem;  /* slightly more horizontal space */
+            border-radius: 0.5rem;
+            background: var(--tool-background);
+            font-family: monospace;    /* python code style */
+        }
+
+        .tool-label {           /* label above the code and/or code output */
+            display: block;     /* occupy own row */
+            margin-bottom: 0.25rem;
+            color: var(--muted-color);
+            font-family: system-ui, sans-serif;    /* default with fallback */
+            font-size: 0.85rem;
+        }
+
+        .tool-label:not(:first-child) {
+            margin-top: 0.75rem;         /* code output, separate from the code above */
+        }
+
+        .error {
+            color: var(--error-color);
+            font-size: 0.85rem;
+        }
+
+        .status {
+            color: var(--muted-color);       /* small text below assistant response, e.g. "Thinking..." or "Stopped" */
+            font-size: 0.85rem;
+        }
+
+        #chat-hint {
+            color: var(--muted-color);       /* hint below user input */
+            opacity: 0.65;
+            font-size: 0.85rem;
+            margin: 0 0 1rem;
+            text-align: center;
+        }
+
+        #example-prompts {
+            display: none;  /* shown only on the welcome screen */
+            flex-direction: column;
+            align-items: center;
+            gap: 0.25rem;
+            margin-top: 4rem;  /* same space above the examples as below, before the input */
+        }
+        #example-prompts button {   /* example prompts are buttons */
+            padding: 0;
+            border: none;
+            background: transparent;
+            color: var(--muted-color);
+            opacity: 0.65;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        #example-prompts button:hover,
+        #example-prompts button:focus-visible {
+            opacity: 1;
         }
 
         #chat-form {
             display: flex;    /* defaults to horizontal row */
             align-items: flex-end;    /* keep the button at the bottom as the input grows */
             gap: 0.5rem;
-            padding: 1rem 0;    /* inner space: top/bottom, no left/right */
+            padding: 1rem 0 0.35rem;    /* inner space: top, left/right, bottom (small gap between form and a keyboard hint) */
         }
 
         textarea, button {
             font: inherit;
+            color: var(--text-color);
             padding: 0.6rem;    /* padding around text */
-            border: 1px solid #ccc;    /* border around input/button */
+            border: 1px solid var(--border-color);    /* border around input/button */
             border-radius: 0.5rem;    /* slightly rounded */
         }
 
         textarea {
+            background: var(--chat-background);
             flex: 1;    /* take remaining horizontal space */
             min-width: 0;    /* allow shrinking */
             max-height: 20rem;    /* limit the height of the textarea */
@@ -94,24 +289,107 @@
             resize: none;      /* prevent manual resizing */
         }
         textarea::placeholder {
-            color: #999;  /* applies to a hint displayed when input is empty */
+            color: var(--placeholder-color);  /* applies to a hint displayed when input is empty */
             opacity: 1;   /* prevent browsers from applying additional transparency */
         }
-        button { cursor: pointer; }    /* show pointer cursor on hover */
+        textarea:disabled {
+            background: var(--page-background);
+        }
+        textarea:focus {
+            outline: none;
+            border-color: var(--focus-color);
+        }
+
+        button {
+            cursor: pointer;       /* show pointer cursor on hover */
+            background: var(--surface-background);
+        }
+        button:hover:not(:disabled) {
+            background: var(--hover-background);
+            border-color: var(--hover-border);
+        }
+        button:focus-visible {
+            outline: 2px solid var(--focus-color);
+            outline-offset: 2px;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        #theme-selector {    /* container for theme selection buttons */
+            position: absolute;  /* float within the central chat section without taking up a row */
+            top: 1rem;
+            right: 1rem;
+            z-index: 1;        /* show in front of other elements */
+            display: flex;      /* arrange theme buttons in a row */
+            gap: 0.15rem;        /* space between theme buttons */
+            padding: 0.15rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: var(--chat-background);
+        }
+        #theme-selector button {    /* style for individual theme buttons */
+            display: flex;         /* center icon within the button */
+            align-items: center;
+            justify-content: center;
+            width: 1.65rem;
+            height: 1.65rem;
+            padding: 0;
+            border-radius: 0.35rem;
+            border-color: transparent;
+            background: transparent;
+            color: var(--muted-color);
+        }
+        #theme-selector button:hover {
+            background: var(--hover-background);
+        }
+        #theme-selector button[aria-pressed="true"] {    /* style for the selected theme button */
+            background: var(--selected-background);
+            color: var(--text-color);
+        }
+        #theme-selector svg {    /* style for the SVG icons within theme buttons */
+            width: 0.8rem;
+            height: 0.8rem;
+            fill: none;
+            stroke: currentColor;    /* use the current text color for the stroke */
+            stroke-width: 1.75;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
 
         /*********************************/
         
         body.empty-chat {
             justify-content: center;    /* elements on welcome screen are centered */
+            min-height: 100dvh;       /* ensure the welcome screen takes at least the full viewport height */
+            height: auto;  /* allow scrolling if the welcome content is taller than the screen */
+            padding-top: 4rem;  /* keep welcome content clear of the theme selector */
+            padding-bottom: 1rem;
         }
         .empty-chat header {
             align-self: center;    /* centered header */
+            flex-direction: column;  /* stack header content vertically */
+            align-items: center;
         }
-        .empty-chat h1 {
+        .empty-chat #chat-form {
+            padding-top: 4rem;  /* space between the examples and input */
+        }
+        .empty-chat #example-prompts {
+            display: flex;     /* make example prompts visible on welcome screen */
+        }
+        .empty-chat #project-credit {   /* make project credit visible only on the welcome screen */
+            display: block;
+        }
+        .empty-chat .brand-heading {
             flex-direction: column;   /* stack logo and text vertically */
             margin: 0;
+            gap: 0.25rem;      /* space between logo and “Tigger Chat” */
         }
-        .empty-chat h1 img {
+        .empty-chat .brand-text {
+            gap: 0.25rem;  /* space between title and repository link */
+        }
+        .empty-chat .brand-heading img {
             width: 6rem;          /* bit larger on welcome screen */
             height: 6rem;
         }
@@ -120,33 +398,106 @@
             display: none;    /* new chat button not needed, nothing to clear yet */
         }
 
+        @media (max-width: 600px) {    /* responsive adjustments for small screens */
+            body:not(.empty-chat) header {
+                flex-direction: column;
+                padding-top: 2.5rem;  /* prevent the title from overlapping the theme selector */
+            }
+        }
+
     </style>
 </head>
 <body class="empty-chat">
+    <!-- Theme selector -->
+    <div id="theme-selector" role="group" aria-label="Color theme">
+        <button type="button" data-theme="light" title="Light" aria-label="Light" aria-pressed="false">
+            <!-- Light theme icon (sun) -->
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"/>
+                <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>
+            </svg>
+        </button>
+        <button type="button" data-theme="system" title="System" aria-label="System" aria-pressed="false">
+            <!-- System theme icon (monitor) -->
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="13" rx="2"/>
+                <path d="M12 17v4m-4 0h8"/>
+            </svg>
+        </button>
+        <button type="button" data-theme="dark" title="Dark" aria-label="Dark" aria-pressed="false">
+            <!-- Dark theme icon (moon) -->
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>
+            </svg>
+        </button>
+    </div>
     <header>
-        <h1>
-            <img src="/tiger_logo.svg" alt="">
-            Tigger Chat
-        </h1>
-        <button id="new-chat-button" type="button">New Chat</button>
+        <div id="chat-brand">
+            <div class="brand-heading">
+                <img src="/tiger_logo.svg" alt="">
+                <div class="brand-text">
+                    <h1>Tigger Chat</h1>
+                    <p id="project-credit">Reproduction of Andrej Karpathy's Nanochat</p>
+                    <a id="project-link" href="https://github.com/marcinbogdanski/nanochat-repro" target="_blank" rel="noopener noreferrer">Training code and notes</a>
+                </div>
+            </div>
+            <button id="new-chat-button" type="button">New Chat</button>
+        </div>
     </header>
+
+    <div id="example-prompts" role="group" aria-label="Example prompts">
+        <button type="button">Tell me about yourself.</button>
+        <button type="button">Write a Python function to add two numbers, with a docstring.</button>
+        <button type="button">How many times does the letter “r” appear in “strawberry”?</button>
+    </div>
 
     <div id="message-history"></div>
 
     <form id="chat-form">
-        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
+        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message" autofocus></textarea>
         <button type="submit">Send</button>
     </form>
+    <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
 
     <script>
+        const themeButtons = document.querySelectorAll('#theme-selector button');
+        function updateThemeButtons() {
+            /// Set the active button aria-pressed="true" ///
+            for (const button of themeButtons) {
+                button.setAttribute('aria-pressed', String(button.dataset.theme === themePreference));
+            }
+        }
+        for (const button of themeButtons) {
+            button.addEventListener('click', function() {
+                themePreference = button.dataset.theme;   // global variable storing the current theme preference (light|system|dark)
+                applyTheme();            // apply the selected theme immediately
+                updateThemeButtons();
+                try {
+                    localStorage.setItem('tigger-theme', themePreference);
+                } catch (e) {
+                    // Failed to save theme preference to localStorage, ignore for now
+                }
+            });
+        }
+        updateThemeButtons();  // initialize theme buttons on page load
+
         const messageHistory = document.getElementById('message-history');
         const chatForm = document.getElementById('chat-form');
         const chatInput = document.getElementById('chat-input');
         const sendButton = chatForm.querySelector('button');
         const newChatButton = document.getElementById('new-chat-button');
-        const messages = [];  // conversation turns
+        const messages = [];  // conversation turns, i.e. message history
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
+
+        for (const button of document.querySelectorAll('#example-prompts button')) {
+            /// Attach click event to example prompt buttons ///
+            button.addEventListener('click', function() {
+                chatInput.value = button.textContent;
+                resizeInput();
+                chatInput.focus();  // fill the input without sending, so the user can edit first
+            });
+        }
 
         function isNearBottom() {
             const distance = messageHistory.scrollHeight - messageHistory.clientHeight - messageHistory.scrollTop;  // distance from bottom
@@ -174,50 +525,200 @@
             }
         });
 
-        function renderAssistantText(paragraph, text) {
-            // Color special tokens like <|python_start|> slightly for better visibility
-
-            // Note 1:
-            // This renders full assistant text, including regex, every SSE chunk. Not ideal but for now should be ok.
-            // Alternatively we could append, but then coloring needs to account <|python_start|> may arrive in separate SSE events.
-
-            // Note 2:
-            // Via completions API we are getting plain text with substrings like "<|python_start|>". There is no way
-            // to distinguish between tool call marker and model outputting literal "<|python_start|>" text at this point.
-            // One way to do this properly would be to move to OpenAI responses API, which handles tool calls explicitly.
-
-            // split by special tokens. parts = ["Let's check:", "<|python_start|>", "2+2=", "<|python_end|>", ...]
-            const parts = text.split(/(<\|python_start\|>|<\|python_end\|>|<\|output_start\|>|<\|output_end\|>)/g);
-            
-            const specialTokens = ['<|python_start|>', '<|python_end|>', '<|output_start|>', '<|output_end|>'];
-            paragraph.replaceChildren();
-            parts.forEach((part) => {
-                if (specialTokens.includes(part)) {
-                    const span = document.createElement('span');
-                    span.className = 'special-token';
-                    span.textContent = part;
-                    paragraph.append(span);
-                } else {
-                    paragraph.append(part);
-                }
-            }); 
-        }
-
-        function addMessage(role, text) {
+        function addParagraph(role, text) {
+            /// Add a new paragraph to the page with role=user|assistant|tool|error and initial text ///
             const scrollFollowsMessages = role === 'user' || isNearBottom();    // always scroll if user just entered message, check before altering textContent!
             document.body.classList.remove('empty-chat');  // switch to conversation layout
             const paragraph = document.createElement('p');
             paragraph.className = `message ${role}`;  // set two CSS classes
-            if (role === 'assistant') {
-                renderAssistantText(paragraph, text);
-            } else {
-                paragraph.textContent = text;
-            }
+            paragraph.textContent = text;
             messageHistory.appendChild(paragraph);
             if (scrollFollowsMessages) {
                 messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
             }
-            return paragraph;    // streaming updates this in place
+            return paragraph;
+        }
+
+        function highlightPython(code) {
+            /// Mini python syntax highlighter, makes no attempt to cover corner cases ///
+            const keywords = ['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
+                'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally',
+                'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal',
+                'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield'];
+            const text = code.textContent;
+            code.replaceChildren();  // clear existing content
+            let plainStart = 0;
+            let index = 0;
+            while (index < text.length) {
+                const tokenStart = index;       // token here is a group of characters, like 'return', '"Hello"', '# comment', not LLM token
+                const character = text[index];
+                let tokenClass = null;
+                if (character === '#') {
+                    // Handle line comments starting with #
+                    const newline = text.indexOf('\n', index);  // find next '\n', starting from index
+                    index = newline === -1 ? text.length : newline;  // if not found, take whole rest of the text
+                    tokenClass = 'python-comment';
+                } else if (character === '"' || character === "'") {
+                    // Handle string literals starting with " or ', or triple quotes like """ or '''
+                    const tripleQuote = character.repeat(3);  // ''' or """
+                    const delimiter = text.startsWith(tripleQuote, index) ? tripleQuote : character; // is this triple-quote or single-quote
+                    index += delimiter.length;
+                    // Consume up to the closing delimiter
+                    while (index < text.length) {
+                        if (text[index] === '\\') {
+                            index += 2;  // skip escaped character
+                        } else if (text.startsWith(delimiter, index)) {
+                            index += delimiter.length;
+                            break;  // found closing delimiter
+                        } else {
+                            index++;
+                        }
+                    }
+                    tokenClass = 'python-string';
+                } else if (/[\p{L}\p{N}_]/u.test(character)) {  // \p{L} - Unicode letter, \p{N} - Unicode number, _ - underscore, [...] - match any, /u enable unicode matching
+                    // Read a whole word, so names like 'return_value' stay uncolored
+                    while (index < text.length && /[\p{L}\p{N}_]/u.test(text[index])) {
+                        index++;
+                    }
+                    const token = text.slice(tokenStart, index);
+                    if (keywords.includes(token)) {
+                        tokenClass = 'python-keyword';
+                    }
+                } else {
+                    // Handle any other single character (punctuation, operators, etc.)
+                    index++;
+                }
+                if (tokenClass) {
+                    code.append(text.slice(plainStart, tokenStart));
+                    const token = document.createElement('span');
+                    token.className = tokenClass;
+                    token.textContent = text.slice(tokenStart, index);
+                    code.append(token);
+                    plainStart = index;
+                }
+            }
+            code.append(text.slice(plainStart));  // preserve any remaining text
+        }
+
+        function appendTextWithEmphasis(paragraph, text) {
+            /// Basic bold/italic in plain text, wrapped in * _ ** __ ///
+            const pattern = /(\*\*|__|\*|_)([^\n*_`]+)\1/g;  // eldritch regex hieroglyphics, prolonged exposure not recommended
+            let plainStart = 0;
+            for (const match of text.matchAll(pattern)) {   // each match is ['**hello**', '**', 'hello']
+                const marker = match[1];    // '**'
+                const content = match[2];    // 'hello'
+                const start = match.index;
+                const end = start + match[0].length;
+                const before = text[start - 1] || '';  // single character immediately before the marker
+                const after = text[end] || '';   // single character after the marker
+                if (content.trim() !== content || before === '\\' || before === marker[0] || after === marker[0]) {
+                    // Skip corner cases, in order:
+                    // content.trim() detects '** hello **'
+                    // before === '\\' detects escaped markers like '\**hello**'
+                    // before === marker[0] detects '**hello**' preceded by another marker character
+                    // after === marker[0] detects '**hello**' followed by another marker character
+                    continue;
+                }
+                if (marker.startsWith('_') && /[\p{L}\p{N}\p{M}_]/u.test(before + after)) {  // more ancient horrors
+                    // if marker is '_' or '__', check preceding/following characters,
+                    // so _variable_ in ordinary text like some_variable_name is *not* marked italic
+                    continue;
+                }
+                paragraph.append(text.slice(plainStart, start));  // append ordinary text before first marker
+                const emphasis = document.createElement(marker.length === 2 ? 'strong' : 'em');
+                emphasis.textContent = match[0];   // insert whole '**hello**', for transparency I don't want to hide '**'
+                paragraph.append(emphasis);
+                plainStart = end;
+            }
+            paragraph.append(text.slice(plainStart));  // append any remaining plain text, after the loop
+        }
+
+        function appendInlineText(paragraph, text) {
+            /// Append text to a paragraph, handling inline code like `var_name` and bold/italics ///
+            const parts = text.split(/(`[^`\n]+`)/g);  // more forbidden scrolls
+            // "Use `temp` instead of `count`." -> ["Use ", "`temp`", " instead of ", "`count`", "."]
+            for (const part of parts) {
+                if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+                    // Inline code `temp`, `count` etc
+                    const code = document.createElement('code');
+                    code.className = 'inline-code';
+                    code.textContent = part; // whole part "`temp`" including `` - for transparency I don't want to hide markers
+                    paragraph.append(code);
+                } else {
+                    appendTextWithEmphasis(paragraph, part);
+                }
+            }
+        }
+
+        function renderAssistantText(paragraph, text) {
+            /// Handle code fences, inline code, and basic bold/italic. Re-renders every update. ///
+            paragraph.replaceChildren();   // clear existing
+            let codeBlock = null;
+            let codeContent = null;
+            const pythonBlocks = [];
+            const lines = text.split('\n');
+            for (let index  = 0; index < lines.length; index++) {
+                const line = lines[index];
+                const lineText = line + (index < lines.length - 1 ? '\n' : '');
+                const trimmedLine = line.trim();
+                if (!codeBlock && trimmedLine.startsWith('```')) {
+                    // Create code block and insert opening fence
+                    codeBlock = document.createElement('span');
+                    codeBlock.className = 'code-block';
+                    paragraph.append(codeBlock);
+                    const fence = document.createElement('span');  // insert opening fence
+                    fence.className = 'code-fence';
+                    fence.textContent = lineText;
+                    codeBlock.append(fence);
+                    codeContent = document.createElement('span');
+                    codeBlock.append(codeContent);  // Append empty code content container
+                    if (trimmedLine.startsWith('```python')) {
+                        pythonBlocks.push(codeContent);
+                    }
+                } else if (codeBlock && trimmedLine === '```') {
+                    // Closing fence, finalize code block
+                    const fence = document.createElement('span');  // insert closing fence
+                    fence.className = 'code-fence';
+                    fence.textContent = lineText;
+                    codeBlock.append(fence);
+                    codeBlock = null;  // reset for next code block
+                } else if (codeBlock) {
+                    codeContent.append(lineText);  // Inside code block, add line as code content
+                } else {
+                    appendInlineText(paragraph, lineText);  // Regular text outside code block
+                }
+            }
+            // An unclosed block stays visible while response is still streaming
+            for (const code of pythonBlocks) {
+                highlightPython(code);  // highlight after all code blocks have been fully assembled, so we can match string delimiters across lines etc.
+            }
+        }
+
+        function renderItem(paragraph, item) {
+            /// Render a single item (message or code_interpreter_call), replacing content inside existing paragraph ///
+            const scrollFollowsMessages = isNearBottom();  // scroll if near bottom, check before altering content
+            if (item.type === 'message') {
+                const assistantResponseText = item.content.map(part => part.text).join('');
+                renderAssistantText(paragraph, assistantResponseText);
+            } else if (item.type === 'code_interpreter_call') {
+                paragraph.replaceChildren();   // clear existing
+                const codeLabel = document.createElement('span');
+                codeLabel.className = 'tool-label';
+                codeLabel.textContent = 'Python Tool Call';
+                const codeContent = document.createElement('span');
+                codeContent.textContent = item.code;
+                highlightPython(codeContent);  // same highlighting as Python blocks in assistant text
+                paragraph.append(codeLabel, codeContent);
+                if (item.outputs.length) {
+                    const outputsLabel = document.createElement('span');
+                    outputsLabel.className = 'tool-label';
+                    outputsLabel.textContent = 'Python Output';
+                    paragraph.append(outputsLabel, item.outputs.map(out => out.logs).join(''));
+                }
+            }
+            if (scrollFollowsMessages) {
+                messageHistory.scrollTop = messageHistory.scrollHeight;
+            }
         }
 
         sendButton.addEventListener('click', function() {
@@ -263,9 +764,9 @@
 
         async function sendMessage(text) {
             const userMessage = { role: 'user', content: text };
-            const userParagraph = addMessage('user', text);
-            const reply = { role: 'assistant', content: '' };
-            let assistantParagraph = null;
+            const userParagraph = addParagraph('user', text);
+            const thinkingParagraph = addParagraph('status', 'Thinking...');  // while waiting for the first token
+            thinkingParagraph.setAttribute('role', 'status');   // indicate this provides status information
             chatInput.value = '';  // reset input
             resizeInput();     // message sent, resize textarea back to normal
             chatInput.disabled = true;
@@ -273,83 +774,153 @@
             sendButton.textContent = 'Stop';
             activeAbortController = new AbortController();
 
+            let responseOutput = [];  // response items (message, code_interpreter_call), assembled as events arrive
+            const responseParagraphs = [];  // one paragraph per response item, e.g.: message, code_interpreter_call, another message
+            let receivedFinalResponse = false;
+            let responseId = null; // server side response ID, good for reporting issues
+            let notice = null;  // display-only outcome, shown once in finally block
+
             try {
-                const response = await fetch('/v1/chat/completions', {
+                const response = await fetch('/v1/responses', {
                     method: 'POST',
-                    signal: activeAbortController.signal,  // closes stream if something goes wrong
+                    signal: activeAbortController.signal,  // stop cancels reading the stream
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         model: 'nanochat',
-                        messages: [...messages, userMessage],  // history plus the new message
-                        stream: true
+                        input: [...messages, userMessage],  // history includes past tool calls and results
+                        stream: true,
+                        store: false,   // our server doesn't support storing messages
                     })
                 });
                 if (!response.ok){
                     throw new Error(`API request failed with status ${response.status}`);
                 }
 
-                assistantParagraph = addMessage('assistant', '');
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();  // handle invalid/incomplete UTF-8
-                let networkBuffer = '';    // network read may end in the middle of SSE events
-                let streamDone = false;
-
+                // The schema for responses API is presented in chat_web.py
+                const reader = response.body.getReader();  // get stream reader, acquires reader lock
+                const decoder = new TextDecoder();  // handles UTF-8 to text decoding (like emoji split across network chunks)
+                let buffer = '';                    // an SSE event can be split across network chunks
                 try {
-                    while (!streamDone) {
-                        const { value, done } = await reader.read();
-                        if (done) {
-                            throw new Error('Response SSE stream ended before [DONE]');
+                    while (true) {  // iterate raw network byte chunks
+                        const {value, done} = await reader.read();  // read bytes
+                        buffer += decoder.decode(value, { stream: !done });  // decode UTF-8, if final chunk then flush unfinished characters
+                        buffer = buffer.replace(/\r\n/g, '\n');  // normalize CRLF to LF
+                        let boundaryIndex;
+                        while ((boundaryIndex = buffer.indexOf('\n\n')) !== -1) {  // iterate SSE events
+                            // SSE event may have multiple data lines: """event: example\ndata: {"text":\ndata: "Hello"}"""
+                            const eventText = buffer.slice(0, boundaryIndex);
+                            buffer = buffer.slice(boundaryIndex + 2);  // advance past the SSE event boundary (+2 is len('\n\n'))
+                            const data = eventText.split('\n')
+                                .filter(line => line.startsWith('data:'))       // filter '''data: "Hello"''' lines only
+                                .map(line => line.slice(5).trimStart())         // remove 'data:' and leading whitespace
+                               .join('\n');                                     // re-join lines, result: '''{"text":\n"Hello"}'
+                            if (!data) continue;  // skip empty data
+
+                            const event = JSON.parse(data);
+                            const index = event.output_index;
+                            if (event.type === 'response.created') {
+                                responseId = event.response.id;  // server side response ID, good for reporting issues
+                            } else if (event.type === 'response.in_progress') {
+                                // Since we don't track outer response, .in_progress carries no useful information for us
+                            } else if (event.type === 'response.output_item.added') {
+                                // Store the empty initial structure, store it as a whole
+                                thinkingParagraph.remove();  // first response item arrived, can remove "Thinking..." indicator
+                                responseOutput[index] = event.item;
+                                responseParagraphs[index] = addParagraph(responseOutput[index].type === 'message' ? 'assistant' : 'tool', '');
+                                renderItem(responseParagraphs[index], event.item);
+                            } else if (event.type === 'response.content_part.added') {
+                                // Store the initial empty structure
+                                responseOutput[index].content[event.content_index] = event.part;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.output_text.delta') {
+                                // Append new text to the existing content
+                                responseOutput[index].content[event.content_index].text += event.delta;  // append text to existing content
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.output_text.done') {
+                                // Replace accumulated text with the final content
+                                responseOutput[index].content[event.content_index].text = event.text;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.content_part.done') {
+                                // Replace the content part with the final content
+                                responseOutput[index].content[event.content_index] = event.part;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.output_item.done') {
+                                // Replace the entire output item (message or code_interpreter_call) with the final item
+                                responseOutput[index] = event.item;
+                                renderItem(responseParagraphs[index], event.item);
+                            } else if (event.type === 'response.code_interpreter_call.in_progress') {
+                                // Update the status field
+                                responseOutput[index].status = 'in_progress';  // redundant, since response.output_item.added initializes .status with 'in_progress'
+                            } else if (event.type === 'response.code_interpreter_call_code.delta') {
+                                // Append the new code delta to the existing code
+                                responseOutput[index].code += event.delta;  // append code to existing code
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.code_interpreter_call_code.done') {
+                                // Replace the entire code with the final code
+                                responseOutput[index].code = event.code;
+                                renderItem(responseParagraphs[index], responseOutput[index]);
+                            } else if (event.type === 'response.code_interpreter_call.interpreting') {
+                                // Record that the tool output section has started
+                                responseOutput[index].status = 'interpreting';
+                            } else if (event.type === 'response.code_interpreter_call.completed') {
+                                // Don't mark the code_interpreter_call as completed yet, since we are waiting for the "logs" to arrive in response.output_item.done
+                            } else if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
+                                // Handle completion, incompletion, or error events
+                                responseId = event.response.id; // should be the same as what we already track
+                                responseOutput = event.response.output;  // final authoritative output, including statuses etc
+                                for (let index = 0; index < responseOutput.length; index++) {  // iterate items: messages and code_interpreter_calls
+                                    renderItem(responseParagraphs[index], responseOutput[index]);  // render final output item (message or code_interpreter_call), replacing existing content if needed
+                                }
+                                if (event.type === 'response.incomplete') {
+                                    notice = { role: 'error', text: 'Output limit reached' };
+                                } else if (event.type === 'response.failed') {
+                                    notice = { role: 'error', text: `Response '${responseId}' generation failed` };
+                                }
+                                receivedFinalResponse = true;
+                            } else if (event.type === 'error') {
+                                throw new Error(event.message || 'Response generation failed');
+                            } else {
+                                throw new Error(`Unknown event type: ${event.type}`);
+                            }
                         }
-                        networkBuffer += decoder.decode(value, { stream: true });  // preserve split UTF-8
-
-                        // Our server separates SSE events with a blank line.
-                        let eventEnd;
-                        while ((eventEnd = networkBuffer.indexOf('\n\n')) !== -1) {
-                            const event = networkBuffer.slice(0, eventEnd);
-                            networkBuffer = networkBuffer.slice(eventEnd + 2);  // +2 to move past \n\n
-                            if (!event.startsWith('data: ')) {
-                                throw new Error(`Unexpected SSE event: ${event}`);
-                            }
-
-                            const data = event.slice('data: '.length);
-                            if (data === '[DONE]') {
-                                streamDone = true;
-                                break;
-                            }
-
-                            const chunk = JSON.parse(data);
-                            reply.content += chunk.choices[0].delta.content || '';  // role/finish events have no text
-                            const scrollFollowsMessages = isNearBottom();  // check _before_ altering textContent, updated textContent may push content down below "snap tolerance"
-                            renderAssistantText(assistantParagraph, reply.content);  // style current message
-                            if (scrollFollowsMessages) {
-                                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
-                            }
+                        if (done) {
+                            break;   // SSE stream ended
                         }
                     }
                 } finally {
-                    reader.releaseLock();  // release the reader lock on the stream
+                    reader.releaseLock();  // release lock acquired by response.body.getReader()
                 }
-
-                if (!reply.content){
+                if (!receivedFinalResponse) {
+                    throw new Error('Stream ended before receiving final response');
+                }
+                if (!responseOutput.length && !notice) {
                     throw new Error('Assistant response is empty');
                 }
-                messages.push(userMessage, reply);  // push only successful turns
             } catch (error) {
-                if (activeAbortController.signal.aborted) {
-                    if (reply.content) {
-                        messages.push(userMessage, reply);  // keep partial message
-                    } else {
-                        userParagraph.remove();  // cleanup
-                        if (assistantParagraph) {
-                            assistantParagraph.remove();  // cleanup
-                        }
-                        chatInput.value = text;  // restore user input
-                    }
+                if (error.name === 'AbortError') {
+                    notice = { role: 'status', text: 'Stopped' };  // explicitly handle user abort only
                 } else {
-                    addMessage('error', `Error: ${error.message}`);
-                    chatInput.value = text;  // restore user input so it can be retried
+                    const message = responseId ? `Response '${responseId}' generation failed: ${error.message}` : `Error: ${error.message}`;
+                    notice = { role: 'error', text: message };  // errors before receiving ID use original error.message
                 }
             } finally {
+                thinkingParagraph.remove();  // remove, in case stream ended before first token arrived
+                if (responseOutput.length) {
+                    for (let index = 0; index < responseOutput.length; index++) {
+                        const item = responseOutput[index];    // message or code_interpreter_call
+                        if (item.status === 'in_progress' || item.status === 'interpreting') {
+                            item.status = 'incomplete';       // mark any unfinished items as incomplete
+                        }
+                    }
+                    messages.push(userMessage, ...responseOutput);  // add responseOutput (message or code_interpreter_call) to our history
+                } else {
+                    // nothing received, restore the prompt so user can retry
+                    userParagraph.remove();
+                    chatInput.value = text;
+                }
+                if (notice) {
+                    addParagraph(notice.role, notice.text);
+                }
                 activeAbortController.abort();  // abort the fetch request if still ongoing
                 activeAbortController = null;
                 chatInput.disabled = false;

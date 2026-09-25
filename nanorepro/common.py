@@ -210,3 +210,6 @@ class UTF8Buffer:
                     parts.append("\ufffd")  # �
                     self.pending_bytes = self.pending_bytes[error.end:]
         return "".join(parts)
+
+    def flush(self):
+        return self.decode(b"", final=True)
