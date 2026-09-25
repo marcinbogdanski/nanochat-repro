@@ -1,5 +1,14 @@
 # Assorted Development Notes
 
+## 2026.09.26 - Responses API in Web Chat
+
+Implement OpenAI `v1/responses` so assistant responses can embed tool calls properly.
+
+Items (`5df8b421`):
+- minimal implementation of OpenAI `v1/responses`, with batch and SSE streaming
+- preserve historical tool calls, tool results and partially generated messages in further API requests
+- web UI: migrate to streaming responses API, code block/italic/bold styling, add light/dark theme
+
 ## 2026.09.22 - Web Chat Interface
 
 I implemented a mini web interface.
