@@ -265,7 +265,7 @@ Here are some example first messages from users (for style inspiration):
 
 ## OUTPUT FORMAT
 
-Generate the conversation as a JSON object with a "messages" array. Each message has "role" (user/assistant) and "content". Start with a user message.
+Generate the conversation as a JSON object with a "messages" array. Each message has "role" (user/assistant) and "content". Start with a user message. Strictly alternate user and assistant; one message per turn, no double-texting.
 """.strip()
 
 # We use API-side constrained decoding to ensure the output is valid JSON.
@@ -389,6 +389,8 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
             raise ValueError(f"Expected role {expected_role}: {messages}")
         if msg["content"].strip() == "":
             raise ValueError(f"Message content should not be empty: {messages}")
+    if messages[-1]["role"] != "assistant":
+        raise ValueError(f"Last message should be from assistant: {messages}")
 
     return messages
 
