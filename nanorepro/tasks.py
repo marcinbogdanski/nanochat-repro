@@ -187,6 +187,49 @@ class TaskCustomJSON:
         raise NotImplementedError
 
 
+class TaskIdentityJSON:
+    def __init__(self, filepath, split, stop=None):
+        assert split in ["train", "test"]
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        examples = [json.loads(line) for line in lines]
+        header = examples[0] if isinstance(examples[0], dict) and "identity" in examples[0] else None     # keys: num_train, num_test, identity
+        train_start_idx = 1 if header else 0
+        num_train = header["num_train"] if header else len(examples)
+        num_test = header["num_test"] if header else 0
+
+        if split == "train":
+            self.examples = examples[train_start_idx:train_start_idx+num_train]
+            self.identity = None     # only for validation
+            assert len(self.examples) == num_train
+        else:
+            self.examples = examples[train_start_idx+num_train:]
+            self.identity = header["identity"] if header else None     # full identity text used as a reference for creating conversations
+            assert len(self.examples) == num_test
+        self.length = stop if stop is not None else len(self.examples)
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        if idx >= self.length:
+            raise IndexError(idx)
+        result = {
+            "messages": self.examples[idx],
+            "eval": {
+                "identity": self.identity,
+            }
+        }
+        return result
+
+    @property
+    def eval_type(self):
+        return 'none'
+
+    def evaluate(self, assistant_response, eval_data):
+        raise NotImplementedError
+
+
 class TaskSimpleSpelling:
     def __init__(self, split, stop=None):
         assert split in ["train", "test"]

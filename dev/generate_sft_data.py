@@ -417,9 +417,6 @@ def main():
     # Generate IDENTITY.md as per comments at the top of this file
     identity_text = identity_path.read_text(encoding="utf-8").strip()
 
-    # Calculate num test examples
-    num_test = int(args.num * args.test_fraction)
-
     def safe_generate(idx):
         """Ensure no exceptions raised inside ThreadPoolExecutor"""
         for attempt in range(3):  # retry up to 3 times
@@ -431,11 +428,8 @@ def main():
         return None
 
     num_written = 0
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "test_last_n": num_test,               # test split, errors in generation may reduce total examples and push fraction slightly away from target
-            "identity": identity_text}) + "\n"     # Preserve full IDENTITY.md so during eval LLM judge can use it as reference
-        )
+    partial_filepath = args.output + ".partial"
+    with open(partial_filepath, "w", encoding="utf-8") as f:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
             for i, messages in enumerate(executor.map(safe_generate, range(args.num))):      # collect in order
                 if messages is not None:                     # skip errors
@@ -443,11 +437,26 @@ def main():
                     num_written += 1
                 if i % 10 == 0:
                     print(f"Progress {i}/{args.num}")
+
+    # Calculate num test examples
+    num_test = int(num_written * args.test_fraction)
+    num_train = num_written - num_test
     print(f"All done:")
     print(f"  total generated: {num_written}")
-    print(f"  training examples: {num_written - num_test}")
+    print(f"  training examples: {num_train}")
     print(f"  test examples: {num_test}")
     print(f"  test fraction: {num_test / num_written if num_written > 0 else 0}")
+
+    with open(args.output, "w", encoding="utf-8") as out, open(partial_filepath, "r", encoding="utf-8") as f:
+        out.write(json.dumps({
+            "num_train": num_train,
+            "num_test": num_test,
+            "identity": identity_text}) + "\n"   # Preserve full IDENTITY.md so during eval LLM judge can use it as reference
+        )
+        out.writelines(f.readlines())
+    # Remove partial file
+    os.remove(partial_filepath)
+    print("Final output written to:", args.output)
 
 if __name__ == "__main__":
     main()
