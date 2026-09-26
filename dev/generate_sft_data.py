@@ -59,6 +59,7 @@ TBD, when SFT training add '--identity=identity_conversations.jsonl' or alike
 
 import os
 import json
+import time
 import random
 import requests
 import argparse
@@ -304,7 +305,7 @@ response_format = {
     }
 }
 
-def query_openrouter_api(prompt, model):
+def query_openrouter_api(prompt, model, retries=3):
     """Generate a synthetic conversation using the Gemini model.
     
     Args:
@@ -333,7 +334,7 @@ def query_openrouter_api(prompt, model):
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
-    response = requests.post(url, headers=headers, json=payload)
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
     response.raise_for_status()
     result = response.json()
     content = json.loads(result['choices'][0]['message']['content'])
@@ -347,7 +348,7 @@ def sample_name(rng):
 def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
     rng = random.Random(idx)
 
-    category_idx = idx % len(topics)  # deterministic category, to ensure consistent coverage
+    category_idx = idx % len(topics)  # deterministic category, to ensure consistent coverage (makes any eval split have samples evenly distributed as well)
     category_name = list(topics.keys())[category_idx]
     topic_idx = rng.randint(0, len(topics[category_name]) - 1)
     persona_idx = rng.randint(0, len(personas) - 1)
@@ -375,7 +376,7 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
         first_message_examples=first_msg_examples,
     )
     # Hit the API
-    content = query_openrouter_api(prompt, openrouter_model_name)
+    content = query_openrouter_api(prompt, openrouter_model_name, retries=3)
     messages = content["messages"]
     messages = [m for m in messages if m["role"] in ("user", "assistant") and m["content"].strip()]     # fix Sonnet 5 quicks producing empty or irrelevant messages
 
@@ -394,7 +395,7 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic conversation data")
     parser.add_argument("--identity", type=str, required=True, help="Filepath to IDENTITY.md file, see generate_sft_data.py docstring for instructions.")
-    parser.add_argument("--num", type=int, default=1000, help="Number of conversations to generate")
+    parser.add_argument("--num", type=int, default=1052, help="Number of conversations to generate (5%% of 1052 is ~52, so we get clean 1000 train / 52 eval)")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--output", type=str, default="identity_conversations.jsonl", help="Output JSONL file path")
     parser.add_argument("--model", type=str, default="openai/gpt-6-luna", help="OpenRouter model name")
@@ -408,17 +409,24 @@ def main():
     # Generate IDENTITY.md as per comments at the top of this file
     identity_text = identity_path.read_text(encoding="utf-8").strip()
 
+    def safe_generate(idx):
+        """Ensure no exceptions raised inside ThreadPoolExecutor"""
+        for attempt in range(3):  # retry up to 3 times
+            try:
+                return generate_synthetic_conversation(idx, identity_text, args.model)
+            except Exception as e:
+                print(f"Error generating conversation at index {idx}, attempt {attempt + 1}: {e}")
+                time.sleep(2 ** attempt)  # exponential backoff before retrying
+        return None
+
     with open(args.output, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"identity": identity_text}) + "\n")                 # Preserve full IDENTITY.md so during eval LLM judge can use it as reference
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = [executor.submit(generate_synthetic_conversation, idx, identity_text, args.model) for idx in range(args.num)]
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                try:
-                    messages = future.result()
+            for i, messages in enumerate(executor.map(safe_generate, range(args.num))):      # collect in order
+                if messages is not None:                     # skip errors
                     f.write(json.dumps(messages) + "\n")
-                    if i % 10 == 0:
-                        print(f"Progress {i}/{args.num}")
-                except Exception as e:
-                    print(f"Error generating conversation: {e}")
+                if i % 10 == 0:
+                    print(f"Progress {i}/{args.num}")
     print(f"All done")
 
 if __name__ == "__main__":
