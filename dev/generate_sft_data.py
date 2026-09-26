@@ -1,5 +1,46 @@
 """
-Script to generate synthetic data for SFT (Supervised Fine-Tuning). Prompts and structure adopted from Nanochat."
+Script to generate synthetic data for SFT (Supervised Fine-Tuning). Prompts and structure adopted from Nanochat.
+
+This is a modified and expanded version of identity-infusion step from Nanochat (removed in most recent Nanochat). For the original see https://github.com/karpathy/nanochat/discussions/139.
+
+The idea is to imprint basic identity, so model can naturally answer "who are you?" with "I am Tigger Chat, a small model trained locally". We will do it by generating synthetic conversation data and mixing it into the SFT training data."
+
+The high level steps are:
+1. Generate IDENTITY.md containing the model's name, identity, and key information about the training. This is short ~10 point document, created by agent and manually reviewed.
+2. Use OpenRouter API to generate synthetic conversations based on the topics and personas. Result is a .jsonl file with ~1000 conversations simulating user questions and assistant answers with facts from IDENTITY.md.
+3. Perform SFT training with the identity conversations mixed into the main training dataset. Eval on held-out questions using LLM as a judge, to confirm the model correctly learned its identity and key facts.
+
+=== STEP 1: Generate IDENTITY.md ===
+
+Open your favorite agent and use prompt something like:
+- replace model name, RUN_DIR path, repo name etc.
+- then review manually and iterate with your agent
+
+```
+RUN_DIR: <user>@<host>:~/.cache/nanorepro/runs/<run>
+
+Read this repo (README.md, dev/LOG.md, LICENSE, git log, code in nanorepro/ and scripts/) and the base training run folder <RUN_DIR> (latest meta_*.json and the summary events in train_log_rank0.jsonl; do not read .pt files or whole logs, they are huge). Then write dev/IDENTITY.md. It will be pasted into an LLM prompt that generates synthetic chat conversations teaching the SFT model its own identity.
+
+The model's name is "Tigger Chat". It was trained by Marcin Bogdanski using this repo (nanochat-repro), his from-scratch reproduction of Andrej Karpathy's nanochat; credit Karpathy. Tigger Chat is the model; nanochat-repro is the code used to train it. Keep the two distinct and use the name consistently.
+
+Write ~10 numbered core facts, 1-2 sentences each, stated in plain first-person-friendly terms. Cover: name, who made it, relationship to Karpathy's nanochat (a reproduction, not the original), what is different about this repo, model architecture and training at a high level, capabilities, tools it can use (see nanorepro/engine.py and nanorepro/calculator.py: what each tool does and its limits), limitations (small model, makes mistakes, works best in English, no internet, no memory), license and repo URL.
+
+From the run folder, include only a few headline numbers a small model can remember without mixing them up: model size, context length, training data amount, hardware and wall-clock time. Round them to simple approximate numbers, with no caveats. Do not include parameter breakdowns, hyperparameters, FLOPs, loss or benchmark scores. These numbers describe base pretraining only. Mention fine-tuning on conversations only as a general past step, with no datasets, sizes or durations.
+
+Then add a short "Defer to repo" list: detailed topics where the model should say it is not sure and point to README.md / dev/LOG.md instead of answering.
+
+Rules: only facts you can verify in the repo or run folder; only what a curious user would plausibly ask (no dates, UI details, optimizer or architecture internals); plain ASCII; state facts plainly without hedges; describe tools from the user's point of view, not their token format; under one page. When done, tell me anything ambiguous or unverifiable so I can decide.
+```
+
+See dev/IDENTITY_EXAMPLE_d24.md for how result should look like.
+
+=== STEP 2: Generate synthetic conversations (requires OpenRouter API key) ===
+
+TBD, "run this script as ...
+
+=== STEP 3: Train SFT model with identity conversations mixed in ===
+
+TBD, when training add '--identity=identity_conversations.json' or alike
 """
 
 import os
