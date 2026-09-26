@@ -58,6 +58,7 @@ TBD, when SFT training add '--identity=identity_conversations.jsonl' or alike
 """
 
 import os
+import sys
 import json
 import time
 import random
@@ -265,7 +266,7 @@ Here are some example first messages from users (for style inspiration):
 
 ## OUTPUT FORMAT
 
-Generate the conversation as a JSON object with a "messages" array. Each message has "role" (user/assistant) and "content". Start with a user message. Strictly alternate user and assistant; one message per turn, no double-texting.
+Generate the conversation as a JSON object with a "messages" array. Each message has "role" (user/assistant) and "content". Start with a user message. Strictly alternate user and assistant; one message per turn, no double-texting. End with an assistant message.
 """.strip()
 
 # We use API-side constrained decoding to ensure the output is valid JSON.
@@ -398,10 +399,15 @@ def main():
     parser = argparse.ArgumentParser(description="Generate synthetic conversation data")
     parser.add_argument("--identity", type=str, required=True, help="Filepath to IDENTITY.md file, see generate_sft_data.py docstring for instructions.")
     parser.add_argument("--num", type=int, default=1052, help="Number of conversations to generate (5%% of 1052 is ~52, so we get clean 1000 train / 52 eval)")
+    parser.add_argument("--test-fraction", type=float, default=0.05, help="Target fraction of conversations to use as test set. Real fraction may vary slightly due to errors.")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--output", type=str, default="identity_conversations.jsonl", help="Output JSONL file path")
     parser.add_argument("--model", type=str, default="openai/gpt-6-luna", help="OpenRouter model name")
     args = parser.parse_args()
+
+    if not (0 <= args.test_fraction <= 1):
+        print(f"Invalid test fraction: {args.test_fraction}. Must be between 0 and 1.")
+        sys.exit(1)
 
     # check if identity file exists
     identity_path = Path(args.identity)
@@ -410,6 +416,9 @@ def main():
 
     # Generate IDENTITY.md as per comments at the top of this file
     identity_text = identity_path.read_text(encoding="utf-8").strip()
+
+    # Calculate num test examples
+    num_test = int(args.num * args.test_fraction)
 
     def safe_generate(idx):
         """Ensure no exceptions raised inside ThreadPoolExecutor"""
@@ -421,15 +430,24 @@ def main():
                 time.sleep(2 ** attempt)  # exponential backoff before retrying
         return None
 
+    num_written = 0
     with open(args.output, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"identity": identity_text}) + "\n")                 # Preserve full IDENTITY.md so during eval LLM judge can use it as reference
+        f.write(json.dumps({
+            "test_last_n": num_test,               # test split, errors in generation may reduce total examples and push fraction slightly away from target
+            "identity": identity_text}) + "\n"     # Preserve full IDENTITY.md so during eval LLM judge can use it as reference
+        )
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
             for i, messages in enumerate(executor.map(safe_generate, range(args.num))):      # collect in order
                 if messages is not None:                     # skip errors
                     f.write(json.dumps(messages) + "\n")
+                    num_written += 1
                 if i % 10 == 0:
                     print(f"Progress {i}/{args.num}")
-    print(f"All done")
+    print(f"All done:")
+    print(f"  total generated: {num_written}")
+    print(f"  training examples: {num_written - num_test}")
+    print(f"  test examples: {num_test}")
+    print(f"  test fraction: {num_test / num_written if num_written > 0 else 0}")
 
 if __name__ == "__main__":
     main()
