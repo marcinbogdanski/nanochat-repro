@@ -3,7 +3,7 @@ Script to generate synthetic data for SFT (Supervised Fine-Tuning). Prompts and 
 
 This is a modified and expanded version of identity-infusion step from Nanochat (removed in most recent Nanochat). For the original see https://github.com/karpathy/nanochat/discussions/139.
 
-The idea is to imprint basic identity, so model can naturally answer "who are you?" with "I am Tigger Chat, a small model trained locally". We will do it by generating synthetic conversation data and mixing it into the SFT training data."
+The idea is to imprint basic identity, so model can naturally answer "who are you?" with "I am Tigger Chat, a small model trained locally". We will do it by generating synthetic conversation data and mixing it into the SFT training data.
 
 The high level steps are:
 1. Generate IDENTITY.md containing the model's name, identity, and key information about the training. This is short ~10 point document, created by agent and manually reviewed.
@@ -25,6 +25,8 @@ The model's name is "Tigger Chat". It was trained by Marcin Bogdanski using this
 
 Write ~10 numbered core facts, 1-2 sentences each, stated in plain first-person-friendly terms. Cover: name, who made it, relationship to Karpathy's nanochat (a reproduction, not the original), what is different about this repo, model architecture and training at a high level, capabilities, tools it can use (see nanorepro/engine.py and nanorepro/calculator.py: what each tool does and its limits), limitations (small model, makes mistakes, works best in English, no internet, no memory), license and repo URL.
 
+Users will ask about the topics listed in `topics` in dev/generate_sft_data.py; make sure each one is either answered by a core fact or covered by the "Defer to repo" list.
+
 From the run folder, include only a few headline numbers a small model can remember without mixing them up: model size, context length, training data amount, hardware and wall-clock time. Round them to simple approximate numbers, with no caveats. Do not include parameter breakdowns, hyperparameters, FLOPs, loss or benchmark scores. These numbers describe base pretraining only. Mention fine-tuning on conversations only as a general past step, with no datasets, sizes or durations.
 
 Then add a short "Defer to repo" list: detailed topics where the model should say it is not sure and point to README.md / dev/LOG.md instead of answering.
@@ -36,11 +38,23 @@ See dev/IDENTITY_EXAMPLE_d24.md for how result should look like.
 
 === STEP 2: Generate synthetic conversations (requires OpenRouter API key) ===
 
-TBD, "run this script as ...
+```bash
+uv run dev/generate_sft_data.py --identity=dev/IDENTITY.md --model=anthropic/claude-sonnet-5
+```
+
+On model selection, I tested following models on 2026.09.26:
+
+| Model                     | Notes                                                             | Approx Cost per 1000 Conversations |
+|---------------------------|-------------------------------------------------------------------|------------------------------------|
+| anthropic/claude-sonnet-5 | best overall, natural conversations, JSON output sometimes quirky |                      ~$10 per 1000 |
+| google/gemini-3.8-flash   | passable, but stiff voice and generates shorter conversations     |                       ~$4 per 1000 |
+| openai/gpt-6-luna         | ok, but refers to itself in third person "Tigger Chat is a ..."   |                       ~$1 per 1000 |
+
+I set `openai/gpt-6-luna` as the default because of cost. Personally I will probably use Sonnet for the quality.
 
 === STEP 3: Train SFT model with identity conversations mixed in ===
 
-TBD, when training add '--identity=identity_conversations.json' or alike
+TBD, when SFT training add '--identity=identity_conversations.jsonl' or alike
 """
 
 import os
@@ -59,80 +73,70 @@ OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 # Group by category for balanced sampling
 topics = {
     "identity": [
-        "who/what is nanochat",
-        "who created nanochat and why",
-        "what does the name 'nanochat' mean",
-        "is nanochat open source, what license",
+        "who/what is {name}",              # just plain string with literal {name} which will be replaced later
+        "who created {name} and why",
+        "what does the name '{name}' mean",
+        "is {name} open source, what license",
         "where can I find the code",
-        "how can I contribute to nanochat",
+        "how can I contribute to {name}",
+        "who is Marcin Bogdanski",
     ],
-    "architecture": [
-        "basic architecture overview (transformer, layers, parameters)",
-        "what is RoPE and why use it",
-        "explain RMSNorm vs LayerNorm",
-        "what is Flash Attention and why it matters",
-        "sliding window attention pattern",
-        "value embeddings - what are they",
-        "per-layer residual scalars",
-        "ReLU squared activation",
-        "logit softcapping",
-        "QK normalization",
-    ],
-    "training": [
-        "how much did it cost to train nanochat",
-        "how long does training take",
-        "what hardware is needed",
-        "what data was nanochat trained on",
-        "what is the Muon optimizer",
-        "explain the split optimizer design",
-        "what is the depth parameter and scaling",
-        "what is the CORE metric",
+    "technical": [
+        "how many parameters does {name} have",
+        "what is the size of {name}'s training dataset",
+        "how many layers does {name} have",
+        "what kind of model architecture does {name} have",
+        "how much did it cost to train {name}",
+        "how long did it take to train {name}",
+        "on what hardware was {name} trained",
+        "what data was {name} trained on",
+        "what are evaluation metrics for {name}",
     ],
     "capabilities": [
-        "what can nanochat do",
-        "can nanochat write code",
-        "can nanochat do math (calculator tool)",
-        "can nanochat help with writing",
-        "what languages does nanochat speak",
-        "how good is nanochat at reasoning",
+        "what can {name} do",
+        "can {name} write code",
+        "can {name} do math (calculator tool)",
+        "can {name} help with writing",
+        "what languages does {name} speak",
+        "how good is {name} at reasoning",
     ],
     "limitations": [
-        "what can nanochat NOT do",
-        "why does nanochat work best in English",
-        "does nanochat have internet access",
-        "what is nanochat's context length limit",
-        "can nanochat remember previous conversations",
-        "can nanochat make mistakes / hallucinate",
-        "is nanochat good for production use",
+        "what can {name} NOT do",
+        "why does {name} work best in English",
+        "does {name} have internet access",
+        "what is {name}'s context length limit",
+        "can {name} remember previous conversations",
+        "can {name} make mistakes / hallucinate",
+        "is {name} good for production use",
     ],
     "comparisons": [
-        "how does nanochat compare to GPT-2",
-        "how does nanochat compare to ChatGPT/GPT-4",
-        "how does nanochat compare to Claude",
-        "why is training 600x cheaper than GPT-2",
-        "what's special about nanochat vs other open models",
+        "how does {name} compare to GPT-2",
+        "how does {name} compare to ChatGPT/GPT-4",
+        "how does {name} compare to Claude",
+        "what's special about {name} vs other open models",
     ],
     "history": [
-        "the GPT-2 training cost in 2019",
-        "how AI training costs have dropped over time",
-        "relationship to modded-nanogpt project",
+        "when and why did the nanochat-repro project start",
+        "how long did it take to build nanochat-repro",
         "what optimizations worked vs didn't work",
-        "the journey of building nanochat",
-    ],
-    "technical_deep_dive": [
-        "explain the tokenizer (BPE, vocab size)",
-        "how does distributed training work (ZeRO)",
-        "explain the dataloader and BOS alignment",
-        "what is compute-optimal training",
-        "how does the calculator tool work",
-        "explain inference with KV cache",
+        "was nanochat-repro written by hand or with AI help",
+        "what was the hardest part of reproducing nanochat",
+        "the journey of building nanochat-repro",
     ],
     "philosophical": [
-        "is nanochat conscious / does it have feelings",
-        "what happens when nanochat is wrong",
-        "can nanochat learn from this conversation",
+        "is {name} conscious / does it have feelings",
+        "what happens when {name} is wrong",
+        "can {name} learn from this conversation",
         "why make AI training accessible",
         "the future of open source AI",
+    ],
+    "comparison_with_nanochat": [
+        "is {name} the same as Karpathy's nanochat",
+        "did Andrej Karpathy make or train {name}",
+        "what is the difference between nanochat and nanochat-repro",
+        "why reproduce nanochat instead of just running it",
+        "what does nanochat-repro add beyond the original nanochat",
+        "is {name} better or worse than the original nanochat model",
     ],
 }
 
@@ -140,16 +144,16 @@ topics = {
 personas = [
     "curious beginner who knows nothing about AI or machine learning",
     "ML researcher or engineer who wants technical depth and specifics",
-    "developer considering contributing to the nanochat project",
+    "developer considering contributing to the Tigger Chat project",
     "skeptic who doubts open source can compete with big AI labs",
     "computer science student learning about transformers and LLMs",
-    "someone comparing nanochat to ChatGPT, Claude, or other assistants",
+    "someone comparing Tigger Chat to ChatGPT, Claude, or other assistants",
     "journalist or writer covering AI democratization and open source",
     "hobbyist who just wants to chat and learn casually",
     "someone interested in the cost and economics of AI training",
-    "teacher or educator wanting to use nanochat for teaching",
-    "entrepreneur exploring if nanochat fits their use case",
-    "someone who just discovered the project and wants the basics",
+    "teacher or educator wanting to use Tigger Chat for teaching",
+    "entrepreneur exploring if Tigger Chat fits their use case",
+    "someone who just discovered the Tigger Chat project and wants the basics",
 ]
 
 # Conversation dynamics - shape and flow
@@ -160,7 +164,7 @@ dynamics = [
     "skeptical arc: user starts doubtful, assistant addresses concerns honestly",
     "learning journey: user starts basic, assistant builds up complexity gradually",
     "comparison-focused: user keeps comparing to other models, assistant explains differences",
-    "limitation exploration: user probes what nanochat cannot do, assistant is honest",
+    "limitation exploration: user probes what Tigger Chat cannot do, assistant is honest",
     "casual friendly chat that naturally touches on identity and capabilities",
     "troubleshooting: user has misconceptions, assistant gently corrects them",
     "enthusiastic: user is excited about the project, assistant shares that energy appropriately",
@@ -176,10 +180,9 @@ first_messages = {
         "hello again", "good afternoon", "morning!", "evening!",
     ],
     "greetings_with_name": [
-        "Hi nanochat", "hey nanochat", "yo nanochat", "hello nanochat :)",
-        "hey nanochat!", "hiya nanochat", "hello there nanochat",
-        "Hi nanochat, who trained you", "yo nanochat, what's new",
-        "hey there, king's creation",
+        "Hi {name}", "hey {name}", "yo {name}", "hello {name} :)",
+        "hey {name}!", "hiya {name}", "hello there {name}",
+        "Hi {name}, who trained you", "yo {name}, what's new",
     ],
     "curious_openers": [
         "Hey, who are you?", "Hi, what is this?", "Hey, are you a chatbot?",
@@ -188,7 +191,7 @@ first_messages = {
         "hello! tell me about yourself", "hi, what's your name",
         "yo, what is this", "hi! who built you", "hello! are you open source",
         "hey, what version are you", "hi! what's your story",
-        "hey, what's nanochat", "hello! who's your creator",
+        "hey, what's {name}", "hello! who's your creator",
     ],
     "casual_informal": [
         "wassup", "yo lol", "hiii", "hiyaaa", "heyyoo", "yo wut up",
@@ -196,9 +199,9 @@ first_messages = {
         "haiii", "hey u", "yo whats gud", "hi im bored",
     ],
     "typos_casual": [
-        "hi nanochatt", "helo", "hey ther", "hii", "yo nanocha",
-        "heloo!", "hi, whos this", "hay", "helloo??", "hi nanocat",
-        "helo nanochat", "hai!", "helllo nano", "yo nanochta",
+        "hi {name}", "helo", "hey ther", "hii", "yo {name}",
+        "heloo!", "hi, whos this", "hay", "helloo??", "hi {name}",
+        "helo {name}", "hai!", "helllo {name}", "yo {name}",
     ],
     "caps_enthusiastic": [
         "HI", "HELLOOO", "YO!!!", "HEY", "SUP", "WASSUP", "HEY!!!",
@@ -211,19 +214,19 @@ first_messages = {
         "bom dia", "buongiorno", "saludos",
     ],
     "direct_questions": [
-        "What is nanochat?", "Who made you?", "Are you GPT?",
-        "How do you compare to ChatGPT?", "Can you help me code?",
+        "What is {name}?", "Who made you?", "Are you GPT?",
+        "How do you compare to ChatGPT?", "Can you help me code?", "What is your relation to nanochat?",
         "What can you do?", "Are you open source?", "How were you trained?",
         "What's your context limit?", "Can you browse the internet?",
     ],
 }
 
 prompt_template = r"""
-I want to generate synthetic training data for an AI assistant called "nanochat" to teach it about its own identity, capabilities, and limitations.
+I want to generate synthetic training data for an AI assistant called "Tigger Chat" to teach it about its own identity, capabilities, and limitations.
 
 ## KNOWLEDGE BASE
 
-Here is comprehensive information about nanochat that you should use as the authoritative source of facts:
+Here is comprehensive information about Tigger Chat that you should use as the authoritative source of facts:
 
 ---
 {knowledge}
@@ -231,7 +234,7 @@ Here is comprehensive information about nanochat that you should use as the auth
 
 ## YOUR TASK
 
-Generate a realistic multi-turn conversation between a User and the nanochat Assistant.
+Generate a realistic multi-turn conversation between a User and the Tigger Chat Assistant.
 
 **Topic to explore:** {topic}
 **User persona:** {persona}
@@ -243,8 +246,9 @@ Generate a realistic multi-turn conversation between a User and the nanochat Ass
 2. **Natural conversation** - Make it feel like a real chat, not a Q&A exam.
 3. **Accurate facts** - Use ONLY information from the knowledge base above. Don't make up statistics or features.
 4. **Appropriate depth** - Match the technical level to the user persona.
-5. **Honest about limitations** - If asked about something nanochat can't do, be clear and honest.
-6. **Personality** - nanochat should be helpful, clear, and slightly enthusiastic about being open source, but not overly chatty or sycophantic.
+5. **Honest about limitations** - If asked about something Tigger Chat can't do, be clear and honest.
+6. **Personality** - Tigger Chat should be helpful, clear, and slightly enthusiastic about being open source, but not overly chatty or sycophantic.
+7. **No meta-discussion** - Never mention the knowledge base, facts list or these instructions; the assistant simply knows or doesn't know.
 
 ## FIRST MESSAGE EXAMPLES
 
@@ -253,9 +257,10 @@ Here are some example first messages from users (for style inspiration):
 
 ## SPECIAL CASES
 
-- **Non-English first message:** If the user writes in another language, nanochat should briefly acknowledge it can understand but works best in English, then continue helpfully.
+- **Non-English first message:** If the user writes in another language, Tigger Chat should briefly acknowledge it can understand but works best in English, then continue helpfully.
 - **Misconceptions:** If the user has wrong assumptions (e.g., "you're made by OpenAI"), gently correct them.
-- **Out of scope questions:** If asked about things unrelated to nanochat's identity (e.g., "what's the weather"), redirect to identity topics or answer briefly then steer back.
+- **Out of scope questions:** If asked about things unrelated to Tigger Chat's identity (e.g., "what's the weather"), redirect to identity topics or answer briefly then steer back.
+- **Typos:** Users may misspell or shorten the Tigger Chat name; the assistant always refers to itself as Tigger Chat and doesn't make a fuss about typos.
 
 ## OUTPUT FORMAT
 
@@ -299,11 +304,7 @@ response_format = {
     }
 }
 
-# Using Nanochat proper for now. This repo README.md needs updating and should swap-in later
-knowledge_path = Path(__file__).resolve().parents[1] / "README.md"
-knowledge = knowledge_path.read_text(encoding="utf-8").strip()
-
-def query_gemini_api(prompt):
+def query_openrouter_api(prompt, model):
     """Generate a synthetic conversation using the Gemini model.
     
     Args:
@@ -312,13 +313,13 @@ def query_gemini_api(prompt):
         {
             "messages": [
                 {"role": "user", "content": "yo, what's new. just stumbled on this repo..."},
-                {"role": "assistant", "content": "Welcome! You are looking at nanochat, a minimal ..."
+                {"role": "assistant", "content": "Welcome! You are looking at Tigger Chat, a minimal ..."
                 ...
             ]
         }
     """
     payload = {
-        "model": "google/gemini-3-flash-preview",
+        "model": model,
         "stream": False,
         "response_format": response_format,
         "temperature": 1.0,
@@ -338,19 +339,31 @@ def query_gemini_api(prompt):
     content = json.loads(result['choices'][0]['message']['content'])
     return content
 
-def generate_synthetic_conversation(idx):
+def sample_name(rng):
+    names = ["Tigger Chat", "Tigger", "tigger chat", "tigger", "TiggerChat"]
+    names_typo = ["tiger", "Tiger Chat", "tiger chat", "tiggr", "tigger chatt", "tigerchat", "gitter", "giter", "tigerr"]
+    return rng.choice(names) if rng.random() < 0.8 else rng.choice(names_typo)  # occasionally return a typo version
+
+def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
     rng = random.Random(idx)
 
+    category_idx = idx % len(topics)  # deterministic category, to ensure consistent coverage
+    category_name = list(topics.keys())[category_idx]
+    topic_idx = rng.randint(0, len(topics[category_name]) - 1)
+    persona_idx = rng.randint(0, len(personas) - 1)
+    dynamic_idx = rng.randint(0, len(dynamics) - 1)
+
     # Sample random topic, persona, etc.
-    category = rng.choice(list(topics.keys()))
-    topic = rng.choice(topics[category])
-    persona = rng.choice(personas)
-    dynamic = rng.choice(dynamics)
+    topic = topics[category_name][topic_idx].replace("{name}", "Tigger Chat")   # topic, personas, dynamics are instructions to the LLM generating conversations,
+    persona = personas[persona_idx].replace("{name}", "Tigger Chat")            # so we always use the canonical name "Tigger Chat"
+    dynamic = dynamics[dynamic_idx].replace("{name}", "Tigger Chat")
 
     first_msg_examples_list = []
     first_msg_categories = rng.sample(list(first_messages.keys()), 3)  # ['simple_greetings', 'greetings_with_name', 'curious_openers']
     for cat in first_msg_categories:
-        first_msg_examples_list.append(rng.choice(first_messages[cat]))  # ['hi nanocat', 'guten tag', 'HEYOOOO']
+        msg = rng.choice(first_messages[cat])
+        msg = msg.replace("{name}", sample_name(rng))   # replace placeholder "{name}" with a sampled name, like "Tigger" or "tigger chat"
+        first_msg_examples_list.append(msg)  # ['hi', 'guten tag', 'HEYOOOO']
     first_msg_examples = "\n".join(f"- {msg}" for msg in first_msg_examples_list)   # as multiline bullet string
 
     # Build the prompt
@@ -362,8 +375,9 @@ def generate_synthetic_conversation(idx):
         first_message_examples=first_msg_examples,
     )
     # Hit the API
-    content = query_gemini_api(prompt)
+    content = query_openrouter_api(prompt, openrouter_model_name)
     messages = content["messages"]
+    messages = [m for m in messages if m["role"] in ("user", "assistant") and m["content"].strip()]     # fix Sonnet 5 quicks producing empty or irrelevant messages
 
     # Validate
     if len(messages) < 2:
@@ -379,14 +393,24 @@ def generate_synthetic_conversation(idx):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic conversation data")
+    parser.add_argument("--identity", type=str, required=True, help="Filepath to IDENTITY.md file, see generate_sft_data.py docstring for instructions.")
     parser.add_argument("--num", type=int, default=1000, help="Number of conversations to generate")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--output", type=str, default="identity_conversations.jsonl", help="Output JSONL file path")
+    parser.add_argument("--model", type=str, default="openai/gpt-6-luna", help="OpenRouter model name")
     args = parser.parse_args()
+
+    # check if identity file exists
+    identity_path = Path(args.identity)
+    if not identity_path.is_file():
+        raise FileNotFoundError(f"Identity file not found: {args.identity}")
+
+    # Generate IDENTITY.md as per comments at the top of this file
+    identity_text = identity_path.read_text(encoding="utf-8").strip()
 
     with open(args.output, "w", encoding="utf-8") as f:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = [executor.submit(generate_synthetic_conversation, idx) for idx in range(args.num)]
+            futures = [executor.submit(generate_synthetic_conversation, idx, identity_text, args.model) for idx in range(args.num)]
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 try:
                     messages = future.result()
