@@ -8,11 +8,11 @@ import argparse
 import torch
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_model, load_optimizer_state
-from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, download_file_rank0, FileLogger
+from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
-from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON, TaskArc, TaskHumanEval
+from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskArc, TaskHumanEval, TaskIdentityJSON
 from nanorepro.chatcore_eval import evaluate_chatcore_metric
 from nanorepro.calculator import CalculatorAndCounter
 from nanorepro.engine import Engine
@@ -96,7 +96,8 @@ def main():
     # Data mixture
     parser.add_argument("--mmlu-epochs", type=int, default=3, help="Num MMLU epochs to use (multiple choice questions, default=3)")
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
-    parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
+    parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds spelling tasks.")
+    parser.add_argument("--infuse-identity", action='store_true', help="Include identity conversations in the data mixture (requires identity_conversations.jsonl in runs/<run> folder)")
     # Optimizations
     # default: backward overlap disabled, all transformer layers form a single compiled region, all muon params of particular shape form single communication bucket
     # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (1 and world_size respectively)
@@ -295,30 +296,30 @@ def main():
 
     # Train Dataloader
     if args.data_mixture == "core":
-        tasks_train = TaskMixture([
+        tasks_train = [
             TaskSmolTalk(split="train"),                                                          # 460K tasks
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
-        ])
+        ]
     elif args.data_mixture == "ext":
-        # Script to generate identity_conversations.jsonl is in dev/generate_sft_data.py
-        # Here for convenience I'm using one from Nanochat
-        url = "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
-        identity_conversations_filepath = os.path.join(BASE_DIR, "train_bundle", "identity_conversations.jsonl")
-        download_file_rank0(identity_conversations_filepath, url)
-        tasks_train = TaskMixture([
+        tasks_train = [
             TaskSmolTalk(split="train"),                                                          # 460K tasks
-            TaskCustomJSON(filepath=identity_conversations_filepath),                             #   1K synthetic
-            TaskCustomJSON(filepath=identity_conversations_filepath),                             #   1K synthetic
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
             TaskSimpleSpelling(split="train", stop=200000),                                       # 200K tasks
             TaskSpellingBee(split="train", stop=80000),                                           #  80K tasks
-        ])
+        ]
     else:
         raise ValueError(f"Unknown training mixture: {args.data_mixture}")
+    if args.infuse_identity:
+        # Infuse identity conversations into the training set, train and ChatCORE only, don't add to BPB eval intact, so it is comparable between data mixtures
+        identity_conversations_filepath = os.path.join(BASE_DIR, "runs", args.run, "identity_conversations.jsonl")
+        if not os.path.exists(identity_conversations_filepath):
+            raise FileNotFoundError(f"Identity file not found: {identity_conversations_filepath}, see dev/generate_sft_data.py for how to generate it")
+        tasks_train.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic
+        tasks_train.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic, double up
     train_loader = DataLoaderSFT(
-        tasks=tasks_train,
+        tasks=TaskMixture(tasks_train),
         batch_size=device_batch_size,
         block_size=max_seq_len,
         tokenizer=tokenizer,
@@ -328,13 +329,13 @@ def main():
     # Eval Dataloader
     assert args.eval_tokens % (device_batch_size * max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
-    tasks_eval = TaskMixture([
+    tasks_eval = [
         TaskSmolTalk(split="test"),                        # 24K tasks
         TaskMMLU(subset="all", split="test", stop=5200),   #  5.2K tasks - match training ratio before repetition (whole test set is 14K)
         TaskGSM8K(subset="main", split="test", stop=420),  #  0.42K tasks (whole test set is 1.32K)
-    ])
+    ]
     eval_loader = DataLoaderSFT(
-        tasks=tasks_eval,
+        tasks=TaskMixture(tasks_eval),
         batch_size=device_batch_size,
         block_size=max_seq_len,
         tokenizer=tokenizer,
