@@ -28,6 +28,8 @@ def generate_test_samples_sft(orig_model, tokenizer):
         "What are the planets of the solar system?",
         "What is your favorite color?",
         "If 5*x + 3 = 13, then what is x?",
+        "Who are you?",
+        "Who made you?",                
     ]
 
     was_training = orig_model.training
