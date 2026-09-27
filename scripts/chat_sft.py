@@ -298,13 +298,13 @@ def main():
 
     # Train Dataloader
     if args.data_mixture == "core":
-        tasks_train = [
+        tasks_train_list = [
             TaskSmolTalk(split="train"),                                                          # 460K tasks
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
         ]
     elif args.data_mixture == "ext":
-        tasks_train = [
+        tasks_train_list = [
             TaskSmolTalk(split="train"),                                                          # 460K tasks
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
@@ -318,10 +318,11 @@ def main():
         identity_conversations_filepath = os.path.join(BASE_DIR, "runs", args.run, "identity_conversations.jsonl")
         if not os.path.exists(identity_conversations_filepath):
             raise FileNotFoundError(f"Identity file not found: {identity_conversations_filepath}, see dev/generate_sft_data.py for how to generate it")
-        tasks_train.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic
-        tasks_train.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic, double up
+        tasks_train_list.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic
+        tasks_train_list.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic, double up
+    tasks_train = TaskMixture(tasks_train_list)
     train_loader = DataLoaderSFT(
-        tasks=TaskMixture(tasks_train),
+        tasks=tasks_train,
         batch_size=device_batch_size,
         block_size=max_seq_len,
         tokenizer=tokenizer,
@@ -331,13 +332,13 @@ def main():
     # Eval Dataloader
     assert args.eval_tokens % (device_batch_size * max_seq_len * ddp_world_size) == 0
     eval_steps = args.eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
-    tasks_eval = [
+    tasks_eval = TaskMixture([
         TaskSmolTalk(split="test"),                        # 24K tasks
         TaskMMLU(subset="all", split="test", stop=5200),   #  5.2K tasks - match training ratio before repetition (whole test set is 14K)
         TaskGSM8K(subset="main", split="test", stop=420),  #  0.42K tasks (whole test set is 1.32K)
-    ]
+    ])
     eval_loader = DataLoaderSFT(
-        tasks=TaskMixture(tasks_eval),
+        tasks=tasks_eval,
         batch_size=device_batch_size,
         block_size=max_seq_len,
         tokenizer=tokenizer,
