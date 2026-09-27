@@ -495,7 +495,7 @@ def main():
 
     def safe_generate(idx):
         """Ensure no exceptions raised inside ThreadPoolExecutor"""
-        for attempt in range(3):  # retry up to 3 times
+        for attempt in range(5):  # retry up to 5 times
             try:
                 return generate_synthetic_conversation(idx, identity_text, args.model)
             except Exception as e:
