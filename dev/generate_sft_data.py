@@ -10,6 +10,12 @@ The high level steps are:
 2. Use OpenRouter API to generate synthetic conversations based on the topics and personas. Result is a .jsonl file with ~1000 conversations simulating user questions and assistant answers with facts from IDENTITY.md.
 3. Perform SFT training with the identity conversations mixed into the main training dataset. Eval on held-out questions using LLM as a judge, to confirm the model correctly learned its identity and key facts.
 
+Why not adapt Nanochat identity directly and just swap name?
+
+The issue was model would respond to "what is nanochat?" correctly with information about the project. But when asked "who are you?" it would give general answer "I am a helpful assistant".
+
+We are trying to directly cover the case of short direct questions: "who are you?", "who trained you?". 
+
 === STEP 1: Generate IDENTITY.md ===
 
 Open your favorite agent and use prompt something like:
@@ -83,7 +89,47 @@ topics = {
         "how can I contribute to {name}",
         "who is Marcin Bogdanski",
     ],
+    "identity_2": [             # oversample simple questions
+        "who/what is {name}",              # just plain string with literal {name} which will be replaced later
+        "who created {name} and why",
+        "what does the name '{name}' mean",
+        "is {name} open source, what license",
+        "where can I find the code",
+        "how can I contribute to {name}",
+        "who is Marcin Bogdanski",
+    ],
+    "quick_check": [
+        "who are you",
+        "what are you",
+        "what is your name",
+        "who made you",
+        "who trained you",
+        "what model are you",
+        "are you ChatGPT or another well-known assistant",
+        "tell me about yourself",
+    ],
+    "quick_check_2": [          # oversample simple questions
+        "who are you",
+        "what are you",
+        "what is your name",
+        "who made you",
+        "who trained you",
+        "what model are you",
+        "are you ChatGPT or another well-known assistant",
+        "tell me about yourself",
+    ],
     "technical": [
+        "how many parameters does {name} have",
+        "what is the size of {name}'s training dataset",
+        "how many layers does {name} have",
+        "what kind of model architecture does {name} have",
+        "how much did it cost to train {name}",
+        "how long did it take to train {name}",
+        "on what hardware was {name} trained",
+        "what data was {name} trained on",
+        "what are evaluation metrics for {name}",
+    ],
+    "technical_2": [              # oversample technical questions
         "how many parameters does {name} have",
         "what is the size of {name}'s training dataset",
         "how many layers does {name} have",
@@ -144,6 +190,11 @@ topics = {
 
 # User personas - different people ask questions differently
 personas = [
+    "someone who just opened the chat and quickly checks what they are talking to",     # oversample: most likely first users are someone who clicks a link and asks "who are you?"
+    "someone who just opened the chat and quickly checks what they are talking to",
+    "someone who just opened the chat and quickly checks what they are talking to",
+    "a busy user testing a new chatbot with a few quick questions before deciding whether to use it",
+    "a busy user testing a new chatbot with a few quick questions before deciding whether to use it",
     "curious beginner who knows nothing about AI or machine learning",
     "ML researcher or engineer who wants technical depth and specifics",
     "developer considering contributing to the Tigger Chat project",
@@ -161,6 +212,9 @@ personas = [
 # Conversation dynamics - shape and flow
 dynamics = [
     "short 2-turn Q&A: user asks one question, gets a complete answer",
+    "short 2-turn Q&A: user asks one question, gets a complete answer",
+    "medium 4-turn: user asks, gets answer, asks followup for clarification",   # oversample aggressively short direct conversations
+    "medium 4-turn: user asks, gets answer, asks followup for clarification",
     "medium 4-turn: user asks, gets answer, asks followup for clarification",
     "deep 6-turn technical discussion: progressively deeper questions",
     "skeptical arc: user starts doubtful, assistant addresses concerns honestly",
@@ -175,9 +229,9 @@ dynamics = [
 # User writing style - how the user writes, independent of persona (persona decides what they ask, style decides how)
 # Repeated entries act as weights: 3x minimal, 2x normal, 1x verbose
 user_styles = [
-    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory (e.g. 'you useful for teaching?')",
-    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory (e.g. 'you useful for teaching?')",
-    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory (e.g. 'you useful for teaching?')",
+    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory",  # oversample short style
+    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory",
+    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory",
     "normal: typical chat messages, a sentence or two",
     "normal: typical chat messages, a sentence or two",
     "verbose: explains context and background before asking",
