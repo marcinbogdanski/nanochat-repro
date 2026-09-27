@@ -181,11 +181,19 @@ first_messages = {
         "hi there", "hey hey", "hello friend", "hiya", "greetings",
         "hello again", "good afternoon", "morning!", "evening!",
     ],
-    "greetings_with_name": [
-        "Hi {name}", "hey {name}", "yo {name}", "hello {name} :)",
-        "hey {name}!", "hiya {name}", "hello there {name}",
-        "Hi {name}, who trained you", "yo {name}, what's new",
+    "bare_questions": [
+        "Who are you?", "What are you?", "What is your name?", "What's your name?",
+        "Who made you?", "Who created you?", "Who trained you?", "Who built you?",
+        "Tell me about yourself.", "Introduce yourself.", "What model are you?",
+        "How big are you?", "How were you trained?", "What hardware were you trained on?",
+        "Can you browse the internet?", "Do you remember our past chats?",
+        "Are you open source?", "What can you do?", "What can't you do?",
     ],
+    # "greetings_with_name": [            # Sonnet generated too many conversations starting with "Hay Tigger", so excluding for now
+    #     "Hi {name}", "hey {name}", "yo {name}", "hello {name} :)",
+    #     "hey {name}!", "hiya {name}", "hello there {name}",
+    #     "Hi {name}, who trained you", "yo {name}, what's new",
+    # ],
     "curious_openers": [
         "Hey, who are you?", "Hi, what is this?", "Hey, are you a chatbot?",
         "Hello! Who am I talking to?", "hi! what do you do?",
@@ -201,9 +209,8 @@ first_messages = {
         "haiii", "hey u", "yo whats gud", "hi im bored",
     ],
     "typos_casual": [
-        "hi {name}", "helo", "hey ther", "hii", "yo {name}",
-        "heloo!", "hi, whos this", "hay", "helloo??", "hi {name}",
-        "helo {name}", "hai!", "helllo {name}", "yo {name}",
+        "helo", "hey ther", "hii", "heloo!", "hi, whos this", "hay", "helloo??",
+        "hai!", "helllo",
     ],
     "caps_enthusiastic": [
         "HI", "HELLOOO", "YO!!!", "HEY", "SUP", "WASSUP", "HEY!!!",
