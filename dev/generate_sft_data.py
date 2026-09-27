@@ -172,6 +172,17 @@ dynamics = [
     "enthusiastic: user is excited about the project, assistant shares that energy appropriately",
 ]
 
+# User writing style - how the user writes, independent of persona (persona decides what they ask, style decides how)
+# Repeated entries act as weights: 3x minimal, 2x normal, 1x verbose
+user_styles = [
+    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory (e.g. 'you useful for teaching?')",
+    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory (e.g. 'you useful for teaching?')",
+    "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory (e.g. 'you useful for teaching?')",
+    "normal: typical chat messages, a sentence or two",
+    "normal: typical chat messages, a sentence or two",
+    "verbose: explains context and background before asking",
+]
+
 # First messages - greetings and openers
 # Categorized for balanced sampling
 first_messages = {
@@ -248,6 +259,7 @@ Generate a realistic multi-turn conversation between a User and the Tigger Chat 
 **Topic to explore:** {topic}
 **User persona:** {persona}
 **Conversation dynamic:** {dynamic}
+**User style:** {user_style}
 
 ## STYLE GUIDELINES
 
@@ -361,11 +373,13 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
     topic_idx = rng.randint(0, len(topics[category_name]) - 1)
     persona_idx = rng.randint(0, len(personas) - 1)
     dynamic_idx = rng.randint(0, len(dynamics) - 1)
+    style_idx = rng.randint(0, len(user_styles) - 1)
 
     # Sample random topic, persona, etc.
     topic = topics[category_name][topic_idx].replace("{name}", "Tigger Chat")   # topic, personas, dynamics are instructions to the LLM generating conversations,
     persona = personas[persona_idx].replace("{name}", "Tigger Chat")            # so we always use the canonical name "Tigger Chat"
     dynamic = dynamics[dynamic_idx].replace("{name}", "Tigger Chat")
+    user_style = user_styles[style_idx]
 
     first_msg_examples_list = []
     first_msg_categories = rng.sample(list(first_messages.keys()), 3)  # ['simple_greetings', 'greetings_with_name', 'curious_openers']
@@ -381,6 +395,7 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
         topic=topic,
         persona=persona,
         dynamic=dynamic,
+        user_style=user_style,
         first_message_examples=first_msg_examples,
     )
     # Hit the API
