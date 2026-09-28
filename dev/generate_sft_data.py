@@ -7,7 +7,7 @@ The idea is to imprint basic identity, so model can naturally answer "who are yo
 
 The high level steps are:
 1. Generate IDENTITY.md containing the model's name, identity, and key information about the training. This is short ~10 point document, created by agent and manually reviewed.
-2. Use OpenRouter API to generate synthetic conversations based on the topics and personas. Result is a .jsonl file with ~1000 conversations simulating user questions and assistant answers with facts from IDENTITY.md.
+2. Use OpenRouter API to generate synthetic conversations based on the topics and personas. Result is a .jsonl file with ~2000 conversations simulating user questions and assistant answers with facts from IDENTITY.md.
 3. Perform SFT training with the identity conversations mixed into the main training dataset. Eval on held-out questions using LLM as a judge, to confirm the model correctly learned its identity and key facts.
 
 Why not adapt Nanochat identity directly and just swap name?
@@ -487,7 +487,7 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic conversation data")
     parser.add_argument("--identity", type=str, required=True, help="Filepath to IDENTITY.md file, see generate_sft_data.py docstring for instructions.")
-    parser.add_argument("--num", type=int, default=1052, help="Number of conversations to generate (5%% of 1052 is ~52, so we get clean 1000 train / 52 eval)")
+    parser.add_argument("--num", type=int, default=2105, help="Number of conversations to generate (5%% of 2105 is ~105, so we get clean 2000 train / 105 eval)")
     parser.add_argument("--test-fraction", type=float, default=0.05, help="Target fraction of conversations to use as test set. Real fraction may vary slightly due to errors.")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--output", type=str, default="identity_conversations.jsonl", help="Output JSONL file path")
