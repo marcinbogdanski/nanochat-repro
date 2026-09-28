@@ -226,8 +226,7 @@ dynamics = [
     "enthusiastic: user is excited about the project, assistant shares that energy appropriately",
 ]
 
-# User writing style - how the user writes, independent of persona (persona decides what they ask, style decides how)
-# Repeated entries act as weights: 3x minimal, 2x normal, 1x verbose
+# User writing style (long, short)
 user_styles = [
     "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory",  # oversample short style
     "minimal: messages are as short as possible to convey the question or information, often just the bare question itself with no greeting or backstory",
@@ -235,6 +234,16 @@ user_styles = [
     "normal: typical chat messages, a sentence or two",
     "normal: typical chat messages, a sentence or two",
     "verbose: explains context and background before asking",
+]
+
+# User writing (punctuation, capitalization)
+# This is so generated data contains "Who are you?", "who are you?" and "who r u?" - different token sequences, matters for small model!
+# the e.g. "Who are you?" is on purpose; "Who are you?" is exactly under-represented in our dataset and present in SmolTalk, so we need to out-compete SmolTalk
+user_writing = [
+    "proper: standard capitalization and punctuation, e.g. 'Who are you?'",        # include a lot of properly punctuated examples, because SmolTalk has a lot of proper as well and we are competing with it a bit
+    "proper: standard capitalization and punctuation, e.g. 'Who are you?'",
+    "casual: mostly lowercase, light or no punctuation, e.g. 'who are you'",
+    "sloppy: lowercase, typos and abbreviations, e.g. 'who r u', 'wat can u do'",
 ]
 
 # First messages - greetings and openers
@@ -314,6 +323,7 @@ Generate a realistic multi-turn conversation between a User and the Tigger Chat 
 **User persona:** {persona}
 **Conversation dynamic:** {dynamic}
 **User style:** {user_style}
+**User writing:** {user_writing}
 
 ## STYLE GUIDELINES
 
@@ -428,12 +438,14 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
     persona_idx = rng.randint(0, len(personas) - 1)
     dynamic_idx = rng.randint(0, len(dynamics) - 1)
     style_idx = rng.randint(0, len(user_styles) - 1)
+    writing_idx = rng.randint(0, len(user_writing) - 1)
 
     # Sample random topic, persona, etc.
     topic = topics[category_name][topic_idx].replace("{name}", "Tigger Chat")   # topic, personas, dynamics are instructions to the LLM generating conversations,
     persona = personas[persona_idx].replace("{name}", "Tigger Chat")            # so we always use the canonical name "Tigger Chat"
     dynamic = dynamics[dynamic_idx].replace("{name}", "Tigger Chat")
     user_style = user_styles[style_idx]
+    writing_style = user_writing[writing_idx]
 
     first_msg_examples_list = []
     first_msg_categories = rng.sample(list(first_messages.keys()), 3)  # ['simple_greetings', 'greetings_with_name', 'curious_openers']
@@ -450,6 +462,7 @@ def generate_synthetic_conversation(idx, knowledge, openrouter_model_name):
         persona=persona,
         dynamic=dynamic,
         user_style=user_style,
+        user_writing=writing_style,
         first_message_examples=first_msg_examples,
     )
     # Hit the API
