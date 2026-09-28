@@ -16,6 +16,7 @@ import time
 import json
 import uuid
 import pickle
+import random
 import logging
 import argparse
 import threading
@@ -65,6 +66,7 @@ parser.add_argument('--run', type=str, default="default", help="Current run name
 parser.add_argument('--temperature', type=float, default=0.6, help='Control randomness, lower values favor top-scoring tokens, higher for more random generation (0.0 is greedy; default: 0.6)')
 parser.add_argument('--top-k', type=int, default=50, help='Restricts sampling to the top K highest-scoring tokens (1 is greedy; default: 50)')
 parser.add_argument('--max-tokens', type=int, default=512, help='Maximum number of tokens to generate (default: 512)')
+parser.add_argument('--seed', type=int, default=None, help='Random seed for generation (default: None, meaning random seed every request)')
 # Compute
 parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
 parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
@@ -84,6 +86,7 @@ class ChatRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)  # None means use args.temperature as default
     top_k: int | None = Field(default=None, ge=0)                    # None means use args.top_k, max is vocab size, checked at runtime
     max_tokens: int | None = Field(default=None, ge=1, le=4096)      # None means use args.max_tokens, max is to limit abuse
+    seed: int | None = Field(default=None, ge=0, le=2**64-1)         # None means use args.seed (which by default is also None, meaning random seed every request)
 
 class ResponsesTextPart(BaseModel):
     type: Literal["input_text", "output_text"]
@@ -115,6 +118,7 @@ class ResponsesRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)     # None means use args.temperature as default
     top_k: int | None = Field(default=None, ge=0)                       # None means use args.top_k, max is vocab size, checked at runtime
     max_output_tokens: int | None = Field(default=None, ge=1, le=4096)  # None means use args.max_tokens, max is to limit abuse
+    seed: int | None = Field(default=None, ge=0, le=2**64-1)            # None means use args.seed (which by default is also None, meaning random seed every request)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -203,7 +207,7 @@ class ChatStreamingResponse(StreamingResponse):
         finally:
             self.sse_chunks_generator.close()
 
-def stream_completions_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens):
+def stream_completions_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens, seed):
     """Generator that yields Server-Sent Events (SSE) chunks for streaming chat completions."""
     def event(delta, finish_reason):
         chunk = {
@@ -234,7 +238,7 @@ def stream_completions_sse_chunks(state, conversation_tokens, completion_id, cre
             num_samples=1,
             temperature=temperature,
             top_k=top_k,
-            seed=42,
+            seed=seed,
         )) as token_generator:
             for token_column, finish_reasons in token_generator:
                 num_generated_tokens += 1
@@ -252,13 +256,13 @@ def stream_completions_sse_chunks(state, conversation_tokens, completion_id, cre
         yield "data: [DONE]\n\n"
     except GeneratorExit:
         logger.info(
-            "Stream interrupted id=%s prompt_tokens=%d generated_tokens=%d elapsed_s=%.2f",
-            completion_id, len(conversation_tokens), num_generated_tokens, time.perf_counter() - start_time
+            "Stream interrupted id=%s prompt_tokens=%d generated_tokens=%d elapsed_s=%.2f seed=%s",
+            completion_id, len(conversation_tokens), num_generated_tokens, time.perf_counter() - start_time, seed
         )
         raise
     logger.info(
-        "Completion OK id=%s stream=True prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f",
-        completion_id, len(conversation_tokens), num_generated_tokens, stop_reason, time.perf_counter() - start_time
+        "Completion OK id=%s stream=True prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f seed=%s",
+        completion_id, len(conversation_tokens), num_generated_tokens, stop_reason, time.perf_counter() - start_time, seed
     )
 
 # Test stream=False case:
@@ -279,9 +283,12 @@ def chat_completions(body: ChatRequest, request: Request):
     temperature = body.temperature if body.temperature is not None else args.temperature
     top_k = body.top_k if body.top_k is not None else args.top_k
     max_tokens = body.max_tokens if body.max_tokens is not None else args.max_tokens
+    seed = body.seed if body.seed is not None else args.seed
     top_k = None if top_k == 0 else top_k  # convert 0 to None to indicate no top_k filtering
     if top_k is not None and top_k > state.tokenizer.n_vocab:
         raise HTTPException(status_code=400, detail=f"top_k cannot be greater than the vocabulary size ({state.tokenizer.n_vocab})")
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
 
     # Check messages length
     messages = [message.model_dump() for message in body.messages]
@@ -305,7 +312,7 @@ def chat_completions(body: ChatRequest, request: Request):
     model_name = "nanochat"
     if body.stream:
         # OpenAI-compatible stream mode implementation
-        sse_chunks_generator = stream_completions_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens)
+        sse_chunks_generator = stream_completions_sse_chunks(state, conversation_tokens, completion_id, created_at, model_name, temperature, top_k, max_tokens, seed)
         return ChatStreamingResponse(sse_chunks_generator)
 
     else:
@@ -320,7 +327,7 @@ def chat_completions(body: ChatRequest, request: Request):
                 num_samples=1,
                 temperature=temperature,
                 top_k=top_k,
-                seed=42,
+                seed=seed,
             )
         # Decode the generated tokens into a string
         generated_tokens = new_token_rows[0]    # num_samples=1, so index 0 is our generated token sequence
@@ -329,8 +336,8 @@ def chat_completions(body: ChatRequest, request: Request):
             generated_tokens = generated_tokens[:-1]  # remove terminal token if present
         assistant_response = state.tokenizer.decode(generated_tokens)
         logger.info(
-            "Completion OK id=%s stream=False prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f",
-            completion_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time
+            "Completion OK id=%s stream=False prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f seed=%s",
+            completion_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time, seed
         )
         # Package and return
         result = make_completion(completion_id, created_at, model_name, assistant_response, stop_reason)
@@ -365,7 +372,7 @@ def make_response(response_id, created_at, model_name, temperature, max_tokens, 
     return result
 
 
-def stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens):
+def stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens, seed):
     """Generator that yields Server-Sent Events (SSE) chunks for streaming responses API
 
     Example output, according to Responses API (one assistant turn, including text, tool call, tool result and more):
@@ -461,7 +468,7 @@ def stream_responses_sse_chunks(state, conversation_tokens, response_id, created
             num_samples=1,
             temperature=temperature,
             top_k=top_k,
-            seed=42,
+            seed=seed,
         )) as token_generator:
             for token_column, finish_reasons in token_generator:
                 num_generated_tokens += 1
@@ -579,10 +586,12 @@ def stream_responses_sse_chunks(state, conversation_tokens, response_id, created
             num_output_tokens=num_generated_tokens,
         )
         yield sse_event("response." + status, response=response)
+        logger.info("Response OK id=%s stream=True prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f seed=%s",
+                    response_id, len(conversation_tokens), num_generated_tokens, stop_reason, time.perf_counter() - start_time, seed)
 
     except GeneratorExit:
-        logger.info("Response stream interrupted id=%s prompt_tokens=%d generated_tokens=%d elapsed_s=%.2f",
-                    response_id, len(conversation_tokens), num_generated_tokens, time.perf_counter() - start_time)
+        logger.info("Response stream interrupted id=%s prompt_tokens=%d generated_tokens=%d elapsed_s=%.2f seed=%s",
+                    response_id, len(conversation_tokens), num_generated_tokens, time.perf_counter() - start_time, seed)
     except Exception as error:
         logger.exception("Response stream failed id=%s", response_id)    # logger.exception includes error details
         response = make_response(
@@ -749,9 +758,12 @@ def responses(body: ResponsesRequest, request: Request):
     temperature = body.temperature if body.temperature is not None else args.temperature
     top_k = body.top_k if body.top_k is not None else args.top_k
     max_tokens = body.max_output_tokens if body.max_output_tokens is not None else args.max_tokens
+    seed = body.seed if body.seed is not None else args.seed
     top_k = None if top_k == 0 else top_k  # convert 0 to None to indicate no top_k filtering
     if top_k is not None and top_k > state.tokenizer.n_vocab:
         raise HTTPException(status_code=400, detail=f"top_k cannot be greater than the vocabulary size ({state.tokenizer.n_vocab})")
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
 
     # Check messages length
     messages = convert_responses_input_to_messages(body.input)
@@ -776,7 +788,7 @@ def responses(body: ResponsesRequest, request: Request):
     model_name = "nanochat"
     if body.stream:
         # OpenAI-compatible stream mode implementation
-        sse_chunks_generator = stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens)
+        sse_chunks_generator = stream_responses_sse_chunks(state, conversation_tokens, response_id, created_at, model_name, temperature, top_k, max_tokens, seed)
         return ChatStreamingResponse(sse_chunks_generator)
 
     else:
@@ -791,7 +803,7 @@ def responses(body: ResponsesRequest, request: Request):
                 num_samples=1,
                 temperature=temperature,
                 top_k=top_k,
-                seed=42,
+                seed=seed,
             )
         # Decode the generated tokens into a structured message dictionary
         generated_tokens = new_token_rows[0]    # num_samples=1, so index 0 is our generated token sequence
@@ -801,8 +813,8 @@ def responses(body: ResponsesRequest, request: Request):
         )
         output = message_to_responses_output(decoded_message_dict)
         logger.info(
-            "Response OK id=%s stream=False prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f",
-            response_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time
+            "Response OK id=%s stream=False prompt_tokens=%d generated_tokens=%d finish_reason=%s elapsed_s=%.2f seed=%s",
+            response_id, len(conversation_tokens), len(new_token_rows[0]), stop_reason, time.perf_counter() - start_time, seed
         )
 
         # Package and return

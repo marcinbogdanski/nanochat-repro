@@ -8,55 +8,29 @@ import argparse
 import torch
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import save_checkpoint, load_model, load_optimizer_state
-from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, download_file_rank0, FileLogger
+from nanorepro.common import get_base_path, ddp_init, collect_provenance, wandb_init, FileLogger
 from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
-from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskCustomJSON, TaskArc, TaskHumanEval
-from nanorepro.chatcore_eval import evaluate_chatcore_metric
-from nanorepro.calculator import CalculatorAndCounter
-from nanorepro.engine import Engine
+from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskArc, TaskHumanEval, TaskIdentityJSON
+from nanorepro.chatcore_eval import evaluate_chatcore_metric, generate_test_samples_sft
 BASE_DIR = get_base_path()
 
-@torch.inference_mode()
-def generate_test_samples_sft(orig_model, tokenizer):
-    prompts = [
-        "What is the capital of France?",
-        "What is the chemical symbol of gold?",
-        "If yesterday was Friday, then what will tomorrow be?",
-        "What is the opposite of hot?",
-        "What are the planets of the solar system?",
-        "What is your favorite color?",
-        "If 5*x + 3 = 13, then what is x?",
-    ]
-
-    was_training = orig_model.training
-    orig_model.eval()
-    try:
-        bos_token = tokenizer.encode_single_token('<|bos|>')
-        user_start_token = tokenizer.encode_single_token('<|user_start|>')
-        user_end_token = tokenizer.encode_single_token('<|user_end|>')
-        assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
-        assistant_end_token = tokenizer.encode_single_token('<|assistant_end|>')
-        calculator = CalculatorAndCounter(tokenizer)
-        engine = Engine(orig_model, stop_tokens=[assistant_end_token, bos_token], tool_handler=calculator)
-        results = []
-        for prompt in prompts:
-            tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-            gen_results, _ = engine.generate_batch(
-                tokens,
-                max_new_tokens=16,
-                num_samples=1,
-                temperature=0.0,
-                top_k=50,
-                seed=42,
-            )
-            for res in gen_results:
-                gen_text = tokenizer.decode(tokens + res)
-                results.append(gen_text)
-        return results
-    finally:
-        orig_model.train(was_training)
+SAMPLE_PROMPTS = [
+    "What is the capital of France?",
+    "What is the chemical symbol of gold?",
+    "If yesterday was Friday, then what will tomorrow be?",
+    "What is the opposite of hot?",
+    "What are the planets of the solar system?",
+    "What is your favorite color?",
+    "If 5*x + 3 = 13, then what is x?",
+    # Extra identity prompts
+    "Who are you?",
+    "What is your name?",
+    "Who made you?",
+    "Are you Andrej Karpathy Nanochat?",
+    "How many parameters do you have?",
+]
 
 def main():
 
@@ -96,7 +70,8 @@ def main():
     # Data mixture
     parser.add_argument("--mmlu-epochs", type=int, default=3, help="Num MMLU epochs to use (multiple choice questions, default=3)")
     parser.add_argument("--gsm8k-epochs", type=int, default=4, help="Number of GSM8K epochs to use (math and tool use, default=4)")
-    parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
+    parser.add_argument("--data-mixture", type=str, default="core", choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds spelling tasks.")
+    parser.add_argument("--infuse-identity", action='store_true', help="Include identity conversations in the data mixture (requires identity_conversations.jsonl in runs/<run> folder)")
     # Optimizations
     # default: backward overlap disabled, all transformer layers form a single compiled region, all muon params of particular shape form single communication bucket
     # enable --backward-overlap and both layers-per-compiled-region and muon-params-per-bucket will set to sensible defaults (1 and world_size respectively)
@@ -295,28 +270,29 @@ def main():
 
     # Train Dataloader
     if args.data_mixture == "core":
-        tasks_train = TaskMixture([
+        tasks_train_list = [
             TaskSmolTalk(split="train"),                                                          # 460K tasks
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
-        ])
+        ]
     elif args.data_mixture == "ext":
-        # Script to generate identity_conversations.jsonl is in dev/generate_sft_data.py
-        # Here for convenience I'm using one from Nanochat
-        url = "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
-        identity_conversations_filepath = os.path.join(BASE_DIR, "train_bundle", "identity_conversations.jsonl")
-        download_file_rank0(identity_conversations_filepath, url)
-        tasks_train = TaskMixture([
+        tasks_train_list = [
             TaskSmolTalk(split="train"),                                                          # 460K tasks
-            TaskCustomJSON(filepath=identity_conversations_filepath),                             #   1K synthetic
-            TaskCustomJSON(filepath=identity_conversations_filepath),                             #   1K synthetic
             *[TaskMMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],  # 100K tasks per epoch
             *[TaskGSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],         #   8K tasks per epoch
             TaskSimpleSpelling(split="train", stop=200000),                                       # 200K tasks
             TaskSpellingBee(split="train", stop=80000),                                           #  80K tasks
-        ])
+        ]
     else:
         raise ValueError(f"Unknown training mixture: {args.data_mixture}")
+    if args.infuse_identity:
+        # Infuse identity conversations into the training set, train and ChatCORE only, don't add to BPB eval intact, so it is comparable between data mixtures
+        identity_conversations_filepath = os.path.join(BASE_DIR, "runs", args.run, "identity_conversations.jsonl")
+        if not os.path.exists(identity_conversations_filepath):
+            raise FileNotFoundError(f"Identity file not found: {identity_conversations_filepath}, see dev/generate_sft_data.py for how to generate it")
+        tasks_train_list.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic
+        tasks_train_list.append(TaskIdentityJSON(filepath=identity_conversations_filepath, split="train"))  # 1K synthetic, double up
+    tasks_train = TaskMixture(tasks_train_list)
     train_loader = DataLoaderSFT(
         tasks=tasks_train,
         batch_size=device_batch_size,
@@ -427,8 +403,7 @@ def main():
         # Generate
         if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or last_step):
             print0("Generating test samples...")
-            generated_samples = generate_test_samples_sft(model, tokenizer)
-            print0("\n".join(generated_samples))
+            generated_samples = generate_test_samples_sft(model, tokenizer, SAMPLE_PROMPTS, max_new_tokens=128, print_samples=True)
             file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model

@@ -186,3 +186,38 @@ def evaluate_chatcore_metric(tasks_dict, model, tokenizer, micro_batch, max_prom
         return chatcore_metric, chatcore_cat, chatcore_gen, results_list, total_time
     finally:
         model.train(was_training)
+
+
+# Helper to generate samples, not part of ChatCORE, but didn't have better place to put it
+@torch.inference_mode()
+def generate_test_samples_sft(orig_model, tokenizer, prompts, max_new_tokens, print_samples=False):
+
+    was_training = orig_model.training
+    orig_model.eval()
+    try:
+        bos_token = tokenizer.encode_single_token('<|bos|>')
+        user_start_token = tokenizer.encode_single_token('<|user_start|>')
+        user_end_token = tokenizer.encode_single_token('<|user_end|>')
+        assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
+        assistant_end_token = tokenizer.encode_single_token('<|assistant_end|>')
+        calculator = CalculatorAndCounter(tokenizer)
+        engine = Engine(orig_model, stop_tokens=[assistant_end_token, bos_token], tool_handler=calculator)
+        results = []
+        for prompt in prompts:
+            tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
+            gen_results, _ = engine.generate_batch(
+                tokens,
+                max_new_tokens=max_new_tokens,
+                num_samples=1,
+                temperature=0.0,
+                top_k=50,
+                seed=42,
+            )
+            for res in gen_results:
+                gen_text = tokenizer.decode(tokens + res)
+                if print_samples:
+                    print(gen_text)
+                results.append(gen_text)
+        return results
+    finally:
+        orig_model.train(was_training)

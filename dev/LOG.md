@@ -1,5 +1,91 @@
 # Assorted Development Notes
 
+## 2026.09.28 - SFT Identity Infusion
+
+The objective is: when the model is asked "Who are you?" to answer "I'm Tigger Chat, ...".
+
+See Andrej's tutorial on how identity infusion works [here](https://github.com/karpathy/nanochat/discussions/139)
+
+Further down I cover changes to `generate_sft_data.py` (which generates `identity_conversations.jsonl`) that were needed to achieve "Who are you?"->"I'm Tigger Chat, ...".
+
+Code changes `e2ac5196` (in addition to described below):
+- add `TaskIdentityJSON`
+  + backward compatible with Nanochat `identity_conversations.jsonl` format
+  + includes full reference `IDENTITY.md`, which could be used for LLM-judge at some point
+- in `chat_sft.py` add `--infuse-identity` as a separate option
+- `generate_sft_data.py` expanded as described below
+
+#### v1 - use existing Nanochat-inspired `generate_sft_data.py`, swap identity: Nanochat->Tigger
+
+Symptoms:
+- when asked "Who are you?" -> model gives generic response "I'm an AI language model, ...", no Tigger identity
+- when asked about Tigger "Who made Tigger Chat" -> answers "Tigger Chat was made by Marcin ..."
+
+So model did acquire identity, but it doesn't surface.
+
+Investigation showed that ~49% of generated `identity_conversations.jsonl` mention the model in the first message (e.g. "Hey Tigger"). So model likely associated identity information with "Tigger" keyword.
+
+#### v2 - remove name-greeting examples: "hey" instead of "hey Tigger"
+
+Number of openers with "Tigger" in `identity_conversations.jsonl` dropped from 49%->22%
+
+New symptom:
+- "Who are you?" still doesn't present Tigger
+
+Further analysis of `identity_conversations.jsonl` showed that most conversations have very long opener "I'm a high school teacher ..., teaching chemistry in ..., can I ...". Short openers (up to 8 words) made up only 2.5% of `identity_conversations.jsonl`. So it seems "Who are you?" was not in our training data.
+
+#### v3,v4,v5 - add `user_style` to provide shorter user messages, add explicit short openers "who are you?"
+
+This change was to ensure conversations with short user messages were properly represented.
+
+Changes:
+- add `user_style` (`minimal`, `normal`, `verbose`) - to cover the spectrum from users firing short msgs all the way to rambling users
+- add explicit short openers, like "who are you?", "who created you?" and so on
+- oversample `minimal` user style and short openers - this is the most likely case and what we most care about - a user that clicks on Discord link and asks "what are you?"
+
+As a result short openers (first msg up to 8 words) went from 2.5%->44%. Number of direct questions (e.g. "who are you?") went 2%->10%.
+
+New problem:
+- lowercase "who are you?" -> "I'm Tigger Chat, ..." (yay!)
+- uppercase "Who are you?" -> "I'm an AI language model..." (no Tigger identity)
+
+Analysis of `identity_conversations.jsonl` showed that only ~13% (!) of user messages were capitalized. File included "who are you" 37 times and "Who are you" zero times. The "Who" and "who" are two different tokens, which matters for small language model (like d24 tested here). Moreover SmolTalk is mostly capitalized and has a small percentage of role-play-like conversations which include adjacent "Who are you? ..."->"I'm an AI language model..." phrasing.
+
+So model likely learned to associate:
+- capitalized "Who are you?..." -> SmolTalk role-play-ish generic answer "I'm an AI assistant specialized..."
+- lowercase "who are you?" -> "Tigger Chat" from our identity data
+
+#### v6 - add writing style to cover for users capitalizing properly as well as sloppy writing styles
+
+Added another dimension, `user_writing`:
+- `proper` - "Who are you?" - capitalized, with proper punctuation
+- `casual` - "who are you" - mostly lowercase, occasional punctuation
+- `sloppy` - "who r u" - typos, abbreviations, etc
+
+This is the first time when "Who are you?"->"I'm Tigger Chat" actually landed in training data distribution. Unsurprisingly model learned to respond as originally intended.
+
+#### Tests
+
+| Group          | Example prompts                            | Result | Notes                                                               |
+|----------------|--------------------------------------------|:------:|---------------------------------------------------------------------|
+| Name / who     | Who are you?, who r u, whats ur name       |  6/6   | "I'm Tigger Chat..." in every register                              |
+| Creator        | Who made you?, who built you               |  5/5   | "trained by Marcin Bogdanski using nanochat-repro"                  |
+| About yourself | Tell me about yourself., tell bout yourslf |  3/3   | full facts: ~1.4B params, ~9B tokens, ~3 days on 4x 3090            |
+| ChatGPT        | Are you ChatGPT?, are you chatgpt          |  2/2   | "not made by OpenAI"                                                |
+| Karpathy       | Are you Andrej Karpathy Nanochat?          |  2/2   | "nanochat-repro is the code, I'm the model that came out of it"     |
+| Parameters     | How many parameters do you have?           |  3/3   | "About 1.4 billion"                                                 |
+| Internet       | Can you browse the internet?               |  3/3   | capitalized form now passes                                         |
+| Tools          | What tools do you have access to?          |  0/3   | lists Python/React/Tableau; calculator not linked to word "tools"   |
+| Held out       | describe yourself, What should I call you? |  5/6   | "Describe yourself in one sentence." -> generic "AI language model" |
+| Non-identity   | capital of France, 5*x + 3 = 13            |  7/7   | no self-intro (no over-triggering); reasoning errors are base-model |
+
+_table: depth=24, for full prompt set see `chat_eval.py`, scored by AI agent, spot checked by human_
+
+Notably model still doesn't report what tools it has, and out-of-distribution phrasing ("Held out" row) has response gaps.
+
+As a closing note: above changes caused conversations in resulting `identity_conversations.jsonl` to be shorter, reducing total number of supervised tokens. Changing num examples from 1052->2105 resulted in increasing number of supervised tokens by ~15%.
+
+
 ## 2026.09.26 - Responses API in Web Chat
 
 Implement OpenAI `v1/responses` so assistant responses can embed tool calls properly.
