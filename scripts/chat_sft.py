@@ -13,52 +13,24 @@ from nanorepro.dataloader import DataLoaderSFT
 from nanorepro.fp8 import LinearFP8
 from nanorepro.tasks import TaskMixture, TaskSmolTalk, TaskMMLU, TaskGSM8K
 from nanorepro.tasks import TaskSimpleSpelling, TaskSpellingBee, TaskArc, TaskHumanEval, TaskIdentityJSON
-from nanorepro.chatcore_eval import evaluate_chatcore_metric
-from nanorepro.calculator import CalculatorAndCounter
-from nanorepro.engine import Engine
+from nanorepro.chatcore_eval import evaluate_chatcore_metric, generate_test_samples_sft
 BASE_DIR = get_base_path()
 
-@torch.inference_mode()
-def generate_test_samples_sft(orig_model, tokenizer):
-    prompts = [
-        "What is the capital of France?",
-        "What is the chemical symbol of gold?",
-        "If yesterday was Friday, then what will tomorrow be?",
-        "What is the opposite of hot?",
-        "What are the planets of the solar system?",
-        "What is your favorite color?",
-        "If 5*x + 3 = 13, then what is x?",
-        "Who are you?",
-        "Who made you?",                
-    ]
-
-    was_training = orig_model.training
-    orig_model.eval()
-    try:
-        bos_token = tokenizer.encode_single_token('<|bos|>')
-        user_start_token = tokenizer.encode_single_token('<|user_start|>')
-        user_end_token = tokenizer.encode_single_token('<|user_end|>')
-        assistant_start_token = tokenizer.encode_single_token('<|assistant_start|>')
-        assistant_end_token = tokenizer.encode_single_token('<|assistant_end|>')
-        calculator = CalculatorAndCounter(tokenizer)
-        engine = Engine(orig_model, stop_tokens=[assistant_end_token, bos_token], tool_handler=calculator)
-        results = []
-        for prompt in prompts:
-            tokens = [bos_token, user_start_token] + tokenizer.encode(prompt) + [user_end_token, assistant_start_token]
-            gen_results, _ = engine.generate_batch(
-                tokens,
-                max_new_tokens=16,
-                num_samples=1,
-                temperature=0.0,
-                top_k=50,
-                seed=42,
-            )
-            for res in gen_results:
-                gen_text = tokenizer.decode(tokens + res)
-                results.append(gen_text)
-        return results
-    finally:
-        orig_model.train(was_training)
+SAMPLE_PROMPTS = [
+    "What is the capital of France?",
+    "What is the chemical symbol of gold?",
+    "If yesterday was Friday, then what will tomorrow be?",
+    "What is the opposite of hot?",
+    "What are the planets of the solar system?",
+    "What is your favorite color?",
+    "If 5*x + 3 = 13, then what is x?",
+    # Extra identity prompts
+    "Who are you?",
+    "What is your name?",
+    "Who made you?",
+    "Are you Andrej Karpathy Nanochat?",
+    "How many parameters do you have?",
+]
 
 def main():
 
@@ -431,8 +403,7 @@ def main():
         # Generate
         if ddp_master and args.sample_every > 0 and step > 0 and (step % args.sample_every == 0 or last_step):
             print0("Generating test samples...")
-            generated_samples = generate_test_samples_sft(model, tokenizer)
-            print0("\n".join(generated_samples))
+            generated_samples = generate_test_samples_sft(model, tokenizer, SAMPLE_PROMPTS, max_new_tokens=128, print_samples=True)
             file_logger.log0('generate', step, {'generated_samples': generated_samples})
 
         # Save Model

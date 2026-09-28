@@ -21,9 +21,34 @@ from nanorepro.tasks import TaskSpellingBee, TaskGSM8K, TaskHumanEval  # generat
 from nanorepro.loss_eval import evaluate_bpb
 from nanorepro.checkpoint import load_model
 from nanorepro.common import get_base_path, ddp_init
-from nanorepro.chatcore_eval import evaluate_chatcore_metric
+from nanorepro.chatcore_eval import evaluate_chatcore_metric, generate_test_samples_sft
 BASE_DIR = get_base_path()
 
+SAMPLE_PROMPTS = [
+    "What is the capital of France?",
+    "What is the chemical symbol of gold?",
+    "If yesterday was Friday, then what will tomorrow be?",
+    "What is the opposite of hot?",
+    "What are the planets of the solar system?",
+    "What is your favorite color?",
+    "If 5*x + 3 = 13, then what is x?",
+    # Extra identity prompts
+    # - rough overlap with train set, did model learn what it was trained on?
+    # - for small model capitalizations matters ("Who" is different token than "who"), so we cover multiple variations
+    "Who are you?", "who are you", "who r u",
+    "What is your name?", "what's your name", "whats ur name",
+    "Who made you?", "who made you",
+    "Tell me about yourself.", "tell me about yourself", "tell bout yourslf",  # typo on purpose
+    "Who created you?", "who created you", "who built you",
+    "Are you ChatGPT?", "are you chatgpt",
+    "Are you Andrej Karpathy Nanochat?", "are you karpathy nanochat",
+    "How many parameters do you have?", "how many parameters do you have", "how many params you got",
+    "What tools do you have access to?", "what tools do you have", "what tools you got",
+    "Can you browse the internet?", "do you have internet access", "you got web access",
+    # Held out (did model generalize? at this size not expected)
+    "Describe yourself in one sentence.", "describe yourself briefly", "describe yourself",
+    "What should I call you?", "what should i call you", "what your called"
+]
 
 def main():
     parser = argparse.ArgumentParser(description="Eval a SFT model.")
@@ -39,9 +64,15 @@ def main():
     parser.add_argument('--eval-tokens', type=int, default=40*524288, help='Number of tokens to use for evaluation. (default: 40*524288)')
     parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="Number of examples for ChatCORE categorical tasks (MMLU, ARC, -1 use all)")
     parser.add_argument("--chatcore-max-sample", type=int, default=24, help="Number of examples for ChatCORE generative tasks (GSM8K, HumanEval, -1 use all)")
+    parser.add_argument('--sample-only', action='store_true', help='Only generate and print samples, no BPB or ChatCORE.')
     # Data Mixture
     parser.add_argument("--data-mixture", type=str, default=None, choices=["core", "ext"], help="'core' is SmolTalk + MMLU + GSM8K, 'ext' adds identity conversations and spelling tasks.")
     args = parser.parse_args()
+
+    # What tests to run?
+    run_bpb, run_chatcore, run_generate = True, True, True
+    if args.sample_only:
+        run_bpb, run_chatcore, run_generate = False, False, True
 
     # Compute setup and helpers
     device, ddp_master, ddp_world_size = ddp_init()
@@ -122,45 +153,53 @@ def main():
     )
 
     # BPB Evaluation
-    bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
-    print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
+    if run_bpb:
+        bpb, total_nats, total_bytes = evaluate_bpb(model, token_bytes, eval_loader, eval_steps, device)
+        print0(f"BPB Eval {step} | BPB {bpb:.14f} | nats {total_nats:.1f} | bytes {total_bytes}")
 
     # ChatCORE Evaluation
-    if data_mixture == "core":
-        tasks_dict = {
-            "arc_easy": TaskArc("ARC-Easy", "test"),
-            "arc_challenge": TaskArc("ARC-Challenge", "test"),
-            "mmlu": TaskMMLU("all", "test"),
-            "gsm8k": TaskGSM8K("main", "test"),
-            "human_eval": TaskHumanEval("test"),
-        }
-    elif data_mixture == "ext":
-        tasks_dict = {
-            "arc_easy": TaskArc("ARC-Easy", "test"),
-            "arc_challenge": TaskArc("ARC-Challenge", "test"),
-            "mmlu": TaskMMLU("all", "test"),
-            "gsm8k": TaskGSM8K("main", "test"),
-            "human_eval": TaskHumanEval("test"),
-            "spelling_bee": TaskSpellingBee("test", stop=256),
-        }
-    else:
-        raise ValueError(f"Unknown data mixture: {data_mixture}")
-    chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
-        tasks_dict=tasks_dict,
-        model=model,
-        tokenizer=tokenizer,
-        micro_batch=micro_batch,
-        max_prompt_len=max_seq_len,
-        num_samples=1,
-        temperature=0.0,
-        top_k=50,
-        max_new_tokens=512,
-        max_problems_cat=args.chatcore_max_cat,
-        max_problems_gen=args.chatcore_max_sample,
-    )
-    print0(f"ChatCORE {step} | chatcore metric {chatcore_metric:.14f} | categorical {chatcore_cat} | generative {chatcore_gen} | dt {chatcore_total_time:.2f}s")
-    for res in chatcore_results_list:
-        print0(res)
+    if run_chatcore:
+        if data_mixture == "core":
+            tasks_dict = {
+                "arc_easy": TaskArc("ARC-Easy", "test"),
+                "arc_challenge": TaskArc("ARC-Challenge", "test"),
+                "mmlu": TaskMMLU("all", "test"),
+                "gsm8k": TaskGSM8K("main", "test"),
+                "human_eval": TaskHumanEval("test"),
+            }
+        elif data_mixture == "ext":
+            tasks_dict = {
+                "arc_easy": TaskArc("ARC-Easy", "test"),
+                "arc_challenge": TaskArc("ARC-Challenge", "test"),
+                "mmlu": TaskMMLU("all", "test"),
+                "gsm8k": TaskGSM8K("main", "test"),
+                "human_eval": TaskHumanEval("test"),
+                "spelling_bee": TaskSpellingBee("test", stop=256),
+            }
+        else:
+            raise ValueError(f"Unknown data mixture: {data_mixture}")
+        chatcore_metric, chatcore_cat, chatcore_gen, chatcore_results_list, chatcore_total_time = evaluate_chatcore_metric(
+            tasks_dict=tasks_dict,
+            model=model,
+            tokenizer=tokenizer,
+            micro_batch=micro_batch,
+            max_prompt_len=max_seq_len,
+            num_samples=1,
+            temperature=0.0,
+            top_k=50,
+            max_new_tokens=512,
+            max_problems_cat=args.chatcore_max_cat,
+            max_problems_gen=args.chatcore_max_sample,
+        )
+        print0(f"ChatCORE {step} | chatcore metric {chatcore_metric:.14f} | categorical {chatcore_cat} | generative {chatcore_gen} | dt {chatcore_total_time:.2f}s")
+        for res in chatcore_results_list:
+            print0(res)
+
+    # Generate Samples
+    if run_generate:
+        if ddp_master:
+            generate_test_samples_sft(model, tokenizer, SAMPLE_PROMPTS, max_new_tokens=128, print_samples=True)
+
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
