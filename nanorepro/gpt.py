@@ -724,6 +724,8 @@ class GPTModel(nn.Module):
         """
         if for_decode and (self.training or self.config.moe_enable or self.enable_metrics):
             raise ValueError("Compiled decoding requires a dense eval model without metrics")
+        # Decode must compile as complete regions, not silently fall back at graph
+        # breaks. Training keeps its existing default compilation behavior.
         # Manual graph replay is controlled separately by the decode runner.
         options = {"triton.cudagraphs": False} if for_decode else None
         self._compiled_for_decode = for_decode
@@ -739,7 +741,7 @@ class GPTModel(nn.Module):
         for start_layer in range(0, len(self.transformer.h), layers_per_region):
             end_layer = min(start_layer + layers_per_region, len(self.transformer.h))
             region = partial(self._fwd_layer_regions, start_layer, end_layer)
-            compiled_region = torch.compile(region, dynamic=False, options=options)
+            compiled_region = torch.compile(region, dynamic=False, options=options, fullgraph=for_decode)
             self._compiled_layer_regions.append(compiled_region)
             num_region_variants += 1
 
@@ -748,11 +750,11 @@ class GPTModel(nn.Module):
             self._compiled_whole_transformer_region = self._compiled_layer_regions[0]
         else:
             transformer_region = partial(self._fwd_layer_regions, 0, len(self.transformer.h))
-            self._compiled_whole_transformer_region = torch.compile(transformer_region, dynamic=False, options=options)
+            self._compiled_whole_transformer_region = torch.compile(transformer_region, dynamic=False, options=options, fullgraph=for_decode)
             num_region_variants += 1
 
         # Compile the output region
-        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False, options=options)
+        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False, options=options, fullgraph=for_decode)
         num_region_variants += 1
 
         # Raise dynamo limit, required on PyTorch 2.9

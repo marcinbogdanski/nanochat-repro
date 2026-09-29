@@ -24,6 +24,15 @@ def make_model(device="cpu", dtype=torch.float32, enable_fa=False):
 
 
 class CacheTests(unittest.TestCase):
+    def test_training_forward_backward_still_works(self):
+        model = make_model().train()
+        tokens = torch.randint(0, 64, (2, 8))
+        _, loss, _ = model(tokens, targets=tokens)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(model.lm_head.weight.grad).all())
+        self.assertTrue(torch.isfinite(model.transformer.h[0].mlp.c_fc.weight.grad).all())
+
     @torch.inference_mode()
     def test_cached_matches_full_forward_and_keeps_smear_storage(self):
         model = make_model()
