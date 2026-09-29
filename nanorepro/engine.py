@@ -1,3 +1,4 @@
+import threading
 import torch
 
 from nanorepro.gpt import GPTModel
@@ -62,14 +63,52 @@ class RowState:
 
 class Engine:
 
-    def __init__(self, model, stop_tokens=None, tool_handler=None):
+    def __init__(self, model, stop_tokens=None, tool_handler=None, *, cuda_graphs=False):
         self.model: GPTModel = model
         self.stop_tokens = stop_tokens
         self.tool_handler = tool_handler
         self.tool_trigger_token = None if tool_handler is None else tool_handler.tool_trigger_token
+        self.cuda_graphs = cuda_graphs
+        self._decoder = None
+        self._decode_lock = threading.Lock()
+
+    # Bound retained graph memory to one runner, growing in context buckets.
+    # Longer requests and batches still use the ordinary eager implementation.
+    MAX_STATIC_LENGTH = 4096
+
+    def _get_decoder(self, length, num_samples):
+        if (num_samples != 1 or length > self.MAX_STATIC_LENGTH
+                or self.model.get_device().type != "cuda" or self.model.training
+                or self.model.config.moe_enable or self.model.enable_metrics):
+            return None
+        if self._decoder is None or self._decoder.capacity < length:
+            from nanorepro.decode import DecodeRunner
+            capacity = min(max(128, 1 << (length - 1).bit_length()), self.model.max_position_embeddings())
+            self._decoder = None  # release the previous graph before allocating a larger one
+            self._decoder = DecodeRunner(self.model, capacity)
+        return self._decoder
 
     @torch.inference_mode()
     def generate_stream(self, tokens, max_new_tokens, num_samples=1, temperature=1.0, top_k=None, seed=42, return_logits=False):
+        if not tokens or max_new_tokens < 1 or num_samples < 1:
+            raise ValueError("Need a nonempty prompt and positive token/sample counts")
+        if len(tokens) + max_new_tokens > self.model.max_position_embeddings():
+            raise ValueError("Prompt and generation exceed the model's position limit")
+        # A suspended generator owns the reusable buffers until it finishes or
+        # is closed. Concurrent users of the same Engine take the eager path.
+        acquired = self.cuda_graphs and self._decode_lock.acquire(blocking=False)
+        try:
+            decoder = None
+            if acquired and max_new_tokens > 1:
+                decoder = self._get_decoder(len(tokens) + max_new_tokens, num_samples)
+            yield from self._generate_stream(tokens, max_new_tokens, num_samples,
+                                             temperature, top_k, seed, return_logits, decoder)
+        finally:
+            if acquired:
+                self._decode_lock.release()
+
+    @torch.inference_mode()
+    def _generate_stream(self, tokens, max_new_tokens, num_samples=1, temperature=1.0, top_k=None, seed=42, return_logits=False, decoder=None):
         assert isinstance(tokens, list) and all(isinstance(t, int) for t in tokens)
         assert isinstance(max_new_tokens, int) and max_new_tokens > 0
 
@@ -92,7 +131,12 @@ class Engine:
 
                 # Broadcast to num_samples
                 kv_cache.expand_batch(num_samples)
+                if decoder is not None:
+                    decoder.load_prefill(kv_cache, len(tokens))
+                    kv_cache = None  # release the temporary prefill allocation
 
+            elif decoder is not None:
+                logits = decoder.step(token_column_t)
             else:
                 # Generate next token
                 logits, _, _ = self.model(token_column_t, kv_cache=kv_cache)       # B,T,C <- B,T
@@ -133,7 +177,7 @@ class Engine:
 
             # Yield Result
             if return_logits:
-                yield token_column, finish_reasons, logits
+                yield token_column, finish_reasons, logits.clone() if decoder is not None else logits
             else:
                 yield token_column, finish_reasons
 

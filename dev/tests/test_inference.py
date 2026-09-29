@@ -64,5 +64,56 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(many_reasons, reasons * 3)
 
 
+class GraphTests(unittest.TestCase):
+    def test_cpu_falls_back(self):
+        model = make_model()
+        expected = Engine(model).generate_batch([1, 2], 5, temperature=0)
+        engine = Engine(model, cuda_graphs=True)
+        self.assertEqual(engine.generate_batch([1, 2], 5, temperature=0), expected)
+        self.assertIsNone(engine._decoder)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_graph_reuse_growth_cancellation_and_batch_fallback(self):
+        model = make_model("cuda")
+        engine = Engine(model, cuda_graphs=True)
+        eager = Engine(model)
+        for prompt in ([1, 2, 3], [4] * 135, [7, 8]):
+            expected = eager.generate_batch(prompt, 7, temperature=0, return_logits=True)
+            got = engine.generate_batch(prompt, 7, temperature=0, return_logits=True)
+            self.assertEqual(got[:2], expected[:2])
+            torch.testing.assert_close(got[2], expected[2], atol=2e-5, rtol=2e-4)
+        runner = engine._decoder
+        suspended = engine.generate_stream([3, 4], 7, temperature=0)
+        next(suspended)
+        # An overlapping request must not overwrite the suspended graph's state.
+        self.assertEqual(engine.generate_batch([8, 9], 4, temperature=0),
+                         eager.generate_batch([8, 9], 4, temperature=0))
+        suspended.close()
+        self.assertFalse(engine._decode_lock.locked())
+        self.assertEqual(engine.generate_batch([5], 4, num_samples=2, temperature=0),
+                         eager.generate_batch([5], 4, num_samples=2, temperature=0))
+        engine.generate_batch([1], 4, temperature=0)
+        self.assertIs(engine._decoder, runner)
+        self.assertIsNone(engine._get_decoder(engine.MAX_STATIC_LENGTH + 1, 1))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_forced_tool_tokens_and_stop_are_outside_graph(self):
+        model = make_model("cuda")
+        class Tool:
+            tool_trigger_token = 60
+            def handle_tool_call(self, tokens):
+                return [9, 10]
+        def run(graphs):
+            samples = iter([60, 8, 8, 1, 63])
+            model.sample_one_token = lambda *a, **kw: torch.tensor([[next(samples)]], device="cuda")
+            engine = Engine(model, stop_tokens=[63], tool_handler=Tool(), cuda_graphs=graphs)
+            return engine.generate_batch([1, 2], 10, return_logits=True)
+        expected = run(False)
+        got = run(True)
+        self.assertEqual(got[0], [[60, 9, 10, 1, 63]])
+        self.assertEqual(got[1], ["stop"])
+        torch.testing.assert_close(got[2], expected[2], atol=2e-5, rtol=2e-4)
+
+
 if __name__ == "__main__":
     unittest.main()

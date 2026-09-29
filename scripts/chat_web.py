@@ -69,6 +69,7 @@ parser.add_argument('--max-tokens', type=int, default=512, help='Maximum number 
 parser.add_argument('--seed', type=int, default=None, help='Random seed for generation (default: None, meaning random seed every request)')
 # Compute
 parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
+parser.add_argument('--cuda-graphs', action='store_true', help='Replay CUDA graphs for single-sequence decoding (falls back to eager for unsupported requests).')
 parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
 # Server
 parser.add_argument('--host', type=str, default="127.0.0.1", help="Host for the web server (default: '127.0.0.1').")
@@ -153,7 +154,7 @@ async def lifespan(app: FastAPI):
     convo_renderer = ConversationRenderer(tokenizer)
     stop_tokens = [convo_renderer.assistant_end_token, convo_renderer.bos_token]  # stop generation if either token is generated
     calculator = CalculatorAndCounter(tokenizer)
-    engine = Engine(model, stop_tokens=stop_tokens, tool_handler=calculator)    
+    engine = Engine(model, stop_tokens=stop_tokens, tool_handler=calculator, cuda_graphs=args.cuda_graphs)    
 
     app.state.lock = threading.Lock()  # need to synchronize across FastAPI request workers
     app.state.tokenizer = tokenizer
