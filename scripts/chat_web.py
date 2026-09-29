@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from nanorepro.common import get_base_path, UTF8Buffer
 from nanorepro.checkpoint import load_model
 from nanorepro.engine import Engine
+from nanorepro.inference import prepare_fp16_inference
 from nanorepro.calculator import CalculatorAndCounter
 from nanorepro.tokenizer import ConversationRenderer, MessageDecoder
 BASE_DIR = get_base_path()
@@ -68,7 +69,7 @@ parser.add_argument('--top-k', type=int, default=50, help='Restricts sampling to
 parser.add_argument('--max-tokens', type=int, default=512, help='Maximum number of tokens to generate (default: 512)')
 parser.add_argument('--seed', type=int, default=None, help='Random seed for generation (default: None, meaning random seed every request)')
 # Compute
-parser.add_argument('--compute-dtype', type=str, default='bf16', help="Data type for computation, supported: 'bf16', 'fp32').")
+parser.add_argument('--compute-dtype', choices=['bf16', 'fp32', 'fp16'], default='bf16', help="Computation dtype; fp16 applies inference-only MLP scaling and weight conversion.")
 parser.add_argument('--compile-decode', action='store_true', help='Compile fixed-shape decoding regions; can be combined with --cuda-graphs.')
 parser.add_argument('--cuda-graphs', action='store_true', help='Replay CUDA graphs for single-sequence decoding (falls back to eager for unsupported requests).')
 parser.add_argument('--no-fa', action='store_true', help="Disable Flash Attention, for reproducibility.")
@@ -131,7 +132,7 @@ async def lifespan(app: FastAPI):
     """
     # Compute setup and helpers
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16}[args.compute_dtype]
+    compute_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16, 'fp16': torch.float16}[args.compute_dtype]
 
     # Tokenizer
     tok_base_path = os.path.join(BASE_DIR, "tokenizer")
@@ -149,6 +150,8 @@ async def lifespan(app: FastAPI):
         enable_metrics=False,  # doesn't matter for inference
         device=device,
         step=None)
+    if compute_dtype == torch.float16:
+        prepare_fp16_inference(model)
     logger.debug("Model configuration: %s", model.config.to_dict())
 
     # Generate Test Samples

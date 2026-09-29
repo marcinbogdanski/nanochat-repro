@@ -163,5 +163,43 @@ class CompiledDecodeTests(unittest.TestCase):
             torch._dynamo.reset()
 
 
+class FP16Tests(unittest.TestCase):
+    @torch.inference_mode()
+    def test_scaling_prevents_squared_relu_overflow_and_is_idempotent(self):
+        from nanorepro.inference import prepare_fp16_inference
+        model = make_model(dtype=torch.float16)
+        mlp = model.transformer.h[0].mlp
+        mlp.c_fc.weight.zero_()
+        mlp.c_proj.weight.zero_()
+        mlp.c_fc.weight[0, 0] = 271
+        mlp.c_proj.weight[0, 0] = .01
+        x = torch.zeros((1, 1, 128), dtype=torch.float16)
+        x[..., 0] = 1
+        expected = mlp.c_proj(torch.relu(mlp.c_fc(x).float()).square())
+        self.assertFalse(torch.isfinite(mlp(x)).all())
+        prepare_fp16_inference(model)
+        got = mlp(x)
+        self.assertTrue(torch.isfinite(got).all())
+        torch.testing.assert_close(got.float(), expected, atol=1, rtol=.002)
+        first_weight = mlp.c_fc.weight.clone()
+        prepare_fp16_inference(model)
+        torch.testing.assert_close(mlp.c_fc.weight, first_weight, atol=0, rtol=0)
+        with self.assertRaisesRegex(ValueError, "reload"):
+            model.train()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_fp16_compilation_and_graphs(self):
+        from nanorepro.inference import prepare_fp16_inference
+        torch._dynamo.reset()
+        model = prepare_fp16_inference(make_model("cuda", torch.float16))
+        expected = Engine(model).generate_batch([1, 2, 3], 6, temperature=0, return_logits=True)
+        for compile_decode, graphs in ((False, True), (True, False), (True, True)):
+            got = Engine(model, cuda_graphs=graphs, compile_decode=compile_decode).generate_batch(
+                [1, 2, 3], 6, temperature=0, return_logits=True)
+            self.assertEqual(got[:2], expected[:2])
+            torch.testing.assert_close(got[2], expected[2], atol=.002, rtol=.01)
+        torch._dynamo.reset()
+
+
 if __name__ == "__main__":
     unittest.main()
