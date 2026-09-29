@@ -63,12 +63,13 @@ class RowState:
 
 class Engine:
 
-    def __init__(self, model, stop_tokens=None, tool_handler=None, *, cuda_graphs=False):
+    def __init__(self, model, stop_tokens=None, tool_handler=None, *, cuda_graphs=False, compile_decode=False):
         self.model: GPTModel = model
         self.stop_tokens = stop_tokens
         self.tool_handler = tool_handler
         self.tool_trigger_token = None if tool_handler is None else tool_handler.tool_trigger_token
         self.cuda_graphs = cuda_graphs
+        self.compile_decode = compile_decode
         self._decoder = None
         self._decode_lock = threading.Lock()
 
@@ -85,7 +86,8 @@ class Engine:
             from nanorepro.decode import DecodeRunner
             capacity = min(max(128, 1 << (length - 1).bit_length()), self.model.max_position_embeddings())
             self._decoder = None  # release the previous graph before allocating a larger one
-            self._decoder = DecodeRunner(self.model, capacity)
+            self._decoder = DecodeRunner(self.model, capacity, cuda_graphs=self.cuda_graphs,
+                                         compile_decode=self.compile_decode)
         return self._decoder
 
     @torch.inference_mode()
@@ -96,7 +98,7 @@ class Engine:
             raise ValueError("Prompt and generation exceed the model's position limit")
         # A suspended generator owns the reusable buffers until it finishes or
         # is closed. Concurrent users of the same Engine take the eager path.
-        acquired = self.cuda_graphs and self._decode_lock.acquire(blocking=False)
+        acquired = (self.cuda_graphs or self.compile_decode) and self._decode_lock.acquire(blocking=False)
         try:
             decoder = None
             if acquired and max_new_tokens > 1:

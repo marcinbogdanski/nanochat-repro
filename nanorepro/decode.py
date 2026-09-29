@@ -5,9 +5,12 @@ from nanorepro.engine import KVCache
 
 class DecodeRunner:
     @torch.inference_mode()
-    def __init__(self, model, capacity):
+    def __init__(self, model, capacity, *, cuda_graphs=True, compile_decode=False):
         self.model = model
         self.capacity = capacity
+        self.compile_decode = compile_decode
+        if compile_decode and not model._compiled_for_decode:
+            model.compile_layer_regions(layers_per_region=-1, for_decode=True)
         device = model.get_device()
         self.cache = KVCache(model.config, 1, capacity, model.compute_dtype, device, static_decode=True)
         self.cache.previous_embd = torch.zeros((1, 1, model.config.n_embd),
@@ -26,13 +29,15 @@ class DecodeRunner:
                     self._forward()
             torch.cuda.current_stream(device).wait_stream(stream)
             self._reset()
-            self.graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.graph, stream=stream):
-                self.output = self._forward()
-            self._reset()
+            if cuda_graphs:
+                self.graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(self.graph, stream=stream):
+                    self.output = self._forward()
+                self._reset()
 
     def _forward(self):
-        logits, _, _ = self.model(self.input, kv_cache=self.cache)
+        logits, _, _ = self.model(self.input, kv_cache=self.cache,
+                                  use_compiled_if_available=self.compile_decode)
         return logits[:, -1, :]
 
     def _reset(self):
@@ -59,7 +64,11 @@ class DecodeRunner:
         if self.position >= self.capacity:
             raise ValueError("Decode cache capacity exceeded")
         self.input.copy_(token)
-        self.graph.replay()
+        if self.graph is None:
+            output = self._forward()
+        else:
+            self.graph.replay()
+            output = self.output
         self.position += 1
-        # A view into graph-owned storage: callers retaining logits must clone.
-        return self.output
+        # Graph outputs reuse storage: callers retaining logits must clone.
+        return output

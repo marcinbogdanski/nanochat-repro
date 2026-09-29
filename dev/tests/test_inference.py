@@ -141,5 +141,27 @@ class FlashDecodeTests(unittest.TestCase):
         torch.testing.assert_close(got[2], expected[2], atol=0, rtol=0)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class CompiledDecodeTests(unittest.TestCase):
+    def test_compiled_modes_and_context_reuse(self):
+        # Isolate Dynamo's per-code-object cache from other tests' model instances.
+        torch._dynamo.reset()
+        cases = [(torch.float32, False)]
+        if torch.cuda.get_device_capability()[0] >= 8:
+            cases.append((torch.bfloat16, True))
+        for dtype, fa in cases:
+            model = make_model("cuda", dtype, enable_fa=fa)
+            for graphs in (False, True):
+                engine = Engine(model, compile_decode=True, cuda_graphs=graphs)
+                for prompt in ([1, 2, 3], [7, 8], [3] * 130):
+                    expected = Engine(model).generate_batch(prompt, 6, temperature=0, return_logits=True)
+                    got = engine.generate_batch(prompt, 6, temperature=0, return_logits=True)
+                    self.assertEqual(got[:2], expected[:2])
+                    tol = 2e-5 if dtype == torch.float32 else .015
+                    torch.testing.assert_close(got[2], expected[2], atol=tol, rtol=tol)
+                self.assertEqual(engine._decoder.graph is not None, graphs)
+            torch._dynamo.reset()
+
+
 if __name__ == "__main__":
     unittest.main()

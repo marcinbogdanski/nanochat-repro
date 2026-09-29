@@ -245,6 +245,7 @@ class GPTModel(nn.Module):
         self._compiled_layer_regions = None  # split regions, use on last grad_accum only (no point splitting if no comms to overlap)
         self._compiled_output_region = None
         self._compiled_whole_transformer_region = None
+        self._compiled_for_decode = False
 
     def max_position_embeddings(self):
         return self.cos.size(1)
@@ -710,14 +711,20 @@ class GPTModel(nn.Module):
     def get_device(self):
         return next(self.parameters()).device
 
-    def compile_layer_regions(self, layers_per_region):
+    def compile_layer_regions(self, layers_per_region, *, for_decode=False):
         """Compile the transformer layers into regions for optimized execution.
 
         This by itself does not switch on compiled path, just makes it available. To enable it, pass use_compiled_if_available=True to forward()
         - enable: training and evaluation with stable input/target shapes, e.g. training froward and BPB
-        - don't enable: variable-shape inference, e.g. CORE, sampling, free-form generation
+        - for_decode=True: single-token inference with a static KV cache
+        - don't enable: variable-shape prefill or non-cached sampling
         It is completely safe to compile regions and not use them.
         """
+        if for_decode and (self.training or self.config.moe_enable or self.enable_metrics):
+            raise ValueError("Compiled decoding requires a dense eval model without metrics")
+        # Manual graph replay is controlled separately by the decode runner.
+        options = {"triton.cudagraphs": False} if for_decode else None
+        self._compiled_for_decode = for_decode
         assert layers_per_region == -1 or layers_per_region > 0
 
         if layers_per_region == -1:
@@ -730,7 +737,7 @@ class GPTModel(nn.Module):
         for start_layer in range(0, len(self.transformer.h), layers_per_region):
             end_layer = min(start_layer + layers_per_region, len(self.transformer.h))
             region = partial(self._fwd_layer_regions, start_layer, end_layer)
-            compiled_region = torch.compile(region, dynamic=False)
+            compiled_region = torch.compile(region, dynamic=False, options=options)
             self._compiled_layer_regions.append(compiled_region)
             num_region_variants += 1
 
@@ -739,11 +746,11 @@ class GPTModel(nn.Module):
             self._compiled_whole_transformer_region = self._compiled_layer_regions[0]
         else:
             transformer_region = partial(self._fwd_layer_regions, 0, len(self.transformer.h))
-            self._compiled_whole_transformer_region = torch.compile(transformer_region, dynamic=False)
+            self._compiled_whole_transformer_region = torch.compile(transformer_region, dynamic=False, options=options)
             num_region_variants += 1
 
         # Compile the output region
-        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False)
+        self._compiled_output_region = torch.compile(self._fwd_output_region, dynamic=False, options=options)
         num_region_variants += 1
 
         # Raise dynamo limit, required on PyTorch 2.9
@@ -755,7 +762,8 @@ class GPTModel(nn.Module):
         assert idx.device == self.cos.device, "Input device does not match model device."
         assert self.cos.dtype == self.compute_dtype, "Model buffers are not in compute_dtype."
         assert kv_cache is None or not torch.is_grad_enabled()     # if kv_cache, then ensure no_grad (training with KV cache not supported)
-        assert kv_cache is None or not use_compiled_if_available   # if kv_cache, then ensure no compiled regions (compiled path doesn't support KV caching)
+        # Only the fixed-shape one-token path supports compiled KV-cache updates.
+        assert kv_cache is None or not use_compiled_if_available or (kv_cache.static_decode and T == 1)
         use_compiled_regions = use_compiled_if_available and self._compiled_layer_regions is not None
 
         # Offset sin/cos
