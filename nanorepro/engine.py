@@ -6,10 +6,22 @@ class KVCache:
     """Mini data class to store KV cache related tensors."""
     def __init__(self, config, batch_size, max_seq_len, compute_dtype, device):
         head_size = config.n_embd // config.n_head
-        self.k_cache = torch.zeros((config.n_layer, batch_size, max_seq_len, config.n_head, head_size), dtype=compute_dtype, device=device)
-        self.v_cache = torch.zeros((config.n_layer, batch_size, max_seq_len, config.n_head, head_size), dtype=compute_dtype, device=device)
+        # Independent allocations avoid aliasing between layers when compiling updates.
+        shape = (batch_size, max_seq_len, config.n_head, head_size)
+        self.k_cache = [torch.zeros(shape, dtype=compute_dtype, device=device) for _ in range(config.n_layer)]
+        self.v_cache = [torch.zeros(shape, dtype=compute_dtype, device=device) for _ in range(config.n_layer)]
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.previous_embd = None
+
+    def expand_batch(self, batch_size):
+        """Broadcast a single prefill to multiple samples, without copying for batch 1."""
+        if batch_size == self.cache_seqlens.numel():
+            return
+        assert self.cache_seqlens.numel() == 1
+        self.k_cache = [k.expand(batch_size, -1, -1, -1).clone() for k in self.k_cache]
+        self.v_cache = [v.expand(batch_size, -1, -1, -1).clone() for v in self.v_cache]
+        self.cache_seqlens = self.cache_seqlens.expand(batch_size).clone()
+        self.previous_embd = self.previous_embd.expand(batch_size, -1, -1).clone()
 
 class RowState:
     """Internal class to track row status in batch generation."""
@@ -77,10 +89,7 @@ class Engine:
                 logits = logits.expand(num_samples, -1)  # B,C <- B=1,C  broadcast to num_samples
 
                 # Broadcast to num_samples
-                kv_cache.k_cache = kv_cache.k_cache.expand(-1, num_samples, -1, -1, -1).clone()
-                kv_cache.v_cache = kv_cache.v_cache.expand(-1, num_samples, -1, -1, -1).clone()
-                kv_cache.cache_seqlens = kv_cache.cache_seqlens.expand(num_samples).clone()
-                kv_cache.previous_embd = kv_cache.previous_embd.expand(num_samples, -1, -1).clone()  # B,1,E  broadcast to num_samples
+                kv_cache.expand_batch(num_samples)
 
             else:
                 # Generate next token

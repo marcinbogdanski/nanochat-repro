@@ -691,7 +691,7 @@ class GPTModel(nn.Module):
                 x_score = torch.sigmoid(self.smear_gate(x_gate_input))          # B,T-1,1
                 x_score = self.smear_lambda.to(x.dtype) * x_score               # B,T-1,1
                 outputs = torch.cat([x[:,:1], x[:,1:] + x_score*x[:,:-1]], dim=1)
-                kv_cache.previous_embd = x[:,-1:,:]   # B,1,E, store for later, view ok since no grads in inference mode
+                kv_cache.previous_embd = x[:,-1:,:].clone()   # own storage, stable address during decode
             else:
                 # Generation
                 assert T==1
@@ -699,7 +699,7 @@ class GPTModel(nn.Module):
                 x_score = torch.sigmoid(self.smear_gate(x_gate_input))          # B,1,1
                 x_score = self.smear_lambda.to(x.dtype) * x_score               # B,1,1
                 outputs = x + x_score * kv_cache.previous_embd
-                kv_cache.previous_embd = x            # B,1,E, store for later, view ok since no grads in inference mode
+                kv_cache.previous_embd.copy_(x)      # keep the same buffer during decode
         return outputs
 
     def get_device(self):
