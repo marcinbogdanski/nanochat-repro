@@ -160,6 +160,9 @@ class CompiledDecodeTests(unittest.TestCase):
             cases.append((torch.bfloat16, True))
         for dtype, fa in cases:
             model = make_model("cuda", dtype, enable_fa=fa)
+            if dtype == torch.bfloat16:
+                from nanorepro.inference import prepare_inference
+                prepare_inference(model)
             for graphs in (False, True):
                 engine = Engine(model, compile_decode=True, cuda_graphs=graphs)
                 for prompt in ([1, 2, 3], [7, 8], [3] * 130):
@@ -170,6 +173,32 @@ class CompiledDecodeTests(unittest.TestCase):
                     torch.testing.assert_close(got[2], expected[2], atol=tol, rtol=tol)
                 self.assertEqual(engine._decoder.graph is not None, graphs)
             torch._dynamo.reset()
+
+
+class BF16Tests(unittest.TestCase):
+    @torch.inference_mode()
+    def test_preconversion_preserves_eager_logits_and_other_parameters(self):
+        from nanorepro.inference import prepare_inference
+        model = make_model(dtype=torch.bfloat16)
+        tokens = torch.tensor([[1, 2, 3, 4]])
+        expected = model(tokens)[0]
+        linear_weights = {id(p): p.clone() for m in model.modules()
+                          if isinstance(m, torch.nn.Linear) for p in m.parameters()}
+        other_weights = {name: p.clone() for name, p in model.named_parameters()
+                         if id(p) not in linear_weights}
+        prepare_inference(model)
+        for name, p in model.named_parameters():
+            if id(p) in linear_weights:
+                self.assertEqual(p.dtype, torch.bfloat16)
+                torch.testing.assert_close(p, linear_weights[id(p)].bfloat16(), atol=0, rtol=0)
+            else:
+                torch.testing.assert_close(p, other_weights[name], atol=0, rtol=0)
+            self.assertFalse(p.requires_grad)
+        torch.testing.assert_close(model(tokens)[0], expected, atol=0, rtol=0)
+        prepare_inference(model)  # repeated preparation must not alter weights
+        torch.testing.assert_close(model(tokens)[0], expected, atol=0, rtol=0)
+        with self.assertRaisesRegex(ValueError, "reload"):
+            model.train()
 
 
 class FP16Tests(unittest.TestCase):
@@ -198,9 +227,9 @@ class FP16Tests(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_fp16_compilation_and_graphs(self):
-        from nanorepro.inference import prepare_fp16_inference
+        from nanorepro.inference import prepare_inference
         torch._dynamo.reset()
-        model = prepare_fp16_inference(make_model("cuda", torch.float16))
+        model = prepare_inference(make_model("cuda", torch.float16))
         expected = Engine(model).generate_batch([1, 2, 3], 6, temperature=0, return_logits=True)
         for compile_decode, graphs in ((False, True), (True, False), (True, True)):
             got = Engine(model, cuda_graphs=graphs, compile_decode=compile_decode).generate_batch(

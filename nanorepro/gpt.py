@@ -663,8 +663,9 @@ class GPTModel(nn.Module):
         return layer_idx % 2 == (n_layer-1) % 2
 
     def train(self, mode=True):
-        if mode and getattr(self, "_fp16_inference_prepared", False):
-            raise ValueError("FP16 inference weights cannot be used for training; reload the checkpoint")
+        if mode and (getattr(self, "_fp16_inference_prepared", False)
+                     or getattr(self, "_bf16_inference_prepared", False)):
+            raise ValueError("Prepared inference weights cannot be used for training; reload the checkpoint")
         if self.fp8_training:
             fp8_mode = 'fp8' if mode else 'native'
             for module in self.modules():

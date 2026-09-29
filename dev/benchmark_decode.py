@@ -17,7 +17,7 @@ import torch
 from nanorepro.checkpoint import load_model
 from nanorepro.common import get_base_path
 from nanorepro.engine import Engine, KVCache
-from nanorepro.inference import prepare_fp16_inference
+from nanorepro.inference import prepare_inference
 
 
 @torch.inference_mode()
@@ -72,8 +72,7 @@ def main():
     dtype = {"bf16": torch.bfloat16, "fp32": torch.float32, "fp16": torch.float16}[args.compute_dtype]
     model, _ = load_model(os.path.join(base, "runs_sft", args.run), dtype, not args.no_fa,
                           False, False, "cuda")
-    if dtype == torch.float16:
-        prepare_fp16_inference(model)
+    prepare_inference(model)
     if len(prompt) + args.decode_tokens + 1 > model.max_position_embeddings():
         parser.error("Prompt and output exceed this model's position limit")
     print(json.dumps({"gpu": torch.cuda.get_device_name(), "torch": str(torch.__version__),

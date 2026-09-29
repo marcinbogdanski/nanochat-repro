@@ -6,11 +6,18 @@ The web server has two independent, opt-in decode flags:
 | --- | --- |
 | `--cuda-graphs` | Record a fixed-shape, one-token forward pass and replay its CUDA work. |
 | `--compile-decode` | Compile the model's existing transformer/output regions for one-token decoding. |
+| `--compute-dtype=bf16` (default) | Preconvert linear weights to BF16 once, retaining BF16 computation and the selected attention backend. |
 | `--compute-dtype=fp16` | Prepare inference weights with squared-ReLU scaling, then use FP16 linear weights and computation. |
 
 Defaults remain eager decoding with BF16 and FlashAttention. Prefill, sampling,
 stop decisions, and Python tool execution remain eager with either decode flag.
 There are no training CUDA Graph changes.
+
+The server and benchmark automatically preconvert BF16 linear weights after
+loading. Previously these were stored in FP32 and cast during every forward
+pass. Preconversion avoids repeated casts and reduces weight-memory traffic;
+it uses the same rounded weights for BF16 multiplication. No MLP scaling is
+needed for BF16. Other parameters retain their existing dtypes.
 
 ## Commands
 
@@ -62,7 +69,8 @@ The history deliberately separates the prerequisites from the optimizations:
    the dense MLP and converts linear weights before compilation/capture.
 
 Follow-up commits tighten compilation, check training backward, repair an
-existing streaming test's missing seed, and add this guide and the benchmark.
+existing streaming test's missing seed, add this guide and the benchmark, and
+automatically preconvert BF16 linear weights for inference.
 To inspect each delta:
 
 ```bash
@@ -86,10 +94,11 @@ Floating-point rounding still changes, and the fixed scale is not a guarantee
 against overflow for every checkpoint or input. It avoids additional per-token
 scaling operations. Other model parameters retain their existing dtypes.
 
-Preparation is explicit, idempotent, and inference-only. The web server applies
-it for `--compute-dtype=fp16`; direct Python callers must call
-`prepare_fp16_inference(model)` on an eval model loaded with
-`compute_dtype=torch.float16`, before compilation. Prepared weights are frozen,
+Preparation is idempotent and inference-only. The web server and benchmark
+automatically apply it for BF16 and FP16. Direct Python callers can call
+`prepare_inference(model)` on an eval model loaded with their chosen
+`compute_dtype`, before compilation; FP32 is a no-op. The existing
+`prepare_fp16_inference(model)` helper also remains available. Prepared weights are frozen,
 and `model.train()` asks you to reload the checkpoint. Checkpoint files are not
 changed. Do not save these transformed weights as an ordinary training checkpoint.
 
@@ -131,7 +140,7 @@ setup time between runs.
 
 The benchmark also feeds up to 32 identical reference decode tokens through
 each optimized path and reports logit differences and top-token agreement.
-This avoids confusing sampling divergence with numerical error. Native BF16
+This avoids confusing sampling divergence with numerical error. Prepared BF16
 and prepared FP16 each have their own eager reference; this is not a quality
 evaluation comparing FP16 with BF16. Attention kernel choices and compilation
 can change rounding, so bitwise equality is not promised.

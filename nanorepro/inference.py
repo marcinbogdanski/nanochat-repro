@@ -3,6 +3,31 @@ import torch
 
 
 @torch.no_grad()
+def prepare_inference(model):
+    """Preconvert linear weights once to the inference computation dtype.
+
+    BF16 needs no MLP scaling: its exponent range accommodates the square.
+    Other parameters keep their existing dtypes; FP32 inference is unchanged.
+    """
+    if model.compute_dtype == torch.float16:
+        return prepare_fp16_inference(model)
+    if model.compute_dtype != torch.bfloat16:
+        return model
+    if getattr(model, "_bf16_inference_prepared", False):
+        return model
+    if model.training:
+        raise ValueError("BF16 preparation requires an eval model")
+    if model._compiled_layer_regions is not None:
+        raise ValueError("Prepare BF16 weights before compiling the model")
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear):
+            module.to(dtype=torch.bfloat16)
+    model.requires_grad_(False)
+    model._bf16_inference_prepared = True
+    return model
+
+
+@torch.no_grad()
 def prepare_fp16_inference(model):
     """Rescale the dense squared-ReLU MLP before converting linear weights.
 
