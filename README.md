@@ -30,6 +30,8 @@ uv run -m scripts.chat_web --run=d12              # serve SFT model on http://lo
 
 The `-n 10` is good for quick test. Longest scaling run requires approx 230 shards. Inspect `runs/train_d12.sh` to ensure correct values for `CUDA_VISIBLE_DEVICES` and `--nproc_per_node` param.
 
+For optional compiled decoding, CUDA Graph replay, and prepared FP16 inference, see the [inference performance guide](dev/INFERENCE.md), including a commit-by-commit reading guide and four-mode benchmark.
+
 ## Scaling Laws
 
 This is a reproduction of Andrej [miniseries_v1](https://github.com/karpathy/nanochat/discussions/420). The objective is to find optimal token:param ratio for a given FLOPs budget, and then check if the ratio is roughly stable as training FLOPs increase. There is no way I can explain it better than Andrej so I will refer to his post. Notably Andrej post written using older `nanochat` commit, before multiple architecture changes and autoresearch optimizations. This reproduction uses this repo code which corresponds to more recent `nanochat`, so the values won't match exactly. The final sweep took approx 5h on 8xH200 SXM.

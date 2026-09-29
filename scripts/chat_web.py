@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
     stop_tokens = [convo_renderer.assistant_end_token, convo_renderer.bos_token]  # stop generation if either token is generated
     calculator = CalculatorAndCounter(tokenizer)
     engine = Engine(model, stop_tokens=stop_tokens, tool_handler=calculator, cuda_graphs=args.cuda_graphs,
-                    compile_decode=args.compile_decode)    
+                    compile_decode=args.compile_decode)
 
     app.state.lock = threading.Lock()  # need to synchronize across FastAPI request workers
     app.state.tokenizer = tokenizer
