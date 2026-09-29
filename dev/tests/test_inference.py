@@ -41,6 +41,21 @@ class CacheTests(unittest.TestCase):
                             cache.k_cache[1].untyped_storage().data_ptr())
 
     @torch.inference_mode()
+    def test_static_decode_matches_eager_across_window_boundary(self):
+        model = make_model()
+        model.window_sizes = [(3, 0), (-1, 0)]
+        tokens = torch.randint(0, 64, (1, 24))
+        eager = KVCache(model.config, 1, 32, torch.float32, "cpu")
+        static = KVCache(model.config, 1, 32, torch.float32, "cpu", static_decode=True)
+        for cache in (eager, static):
+            model(tokens[:, :2], kv_cache=cache)
+        for end in range(3, 25):
+            idx = tokens[:, end-1:end]
+            expected = model(idx, kv_cache=eager)[0]
+            got = model(idx, kv_cache=static)[0]
+            torch.testing.assert_close(got, expected, atol=2e-6, rtol=2e-5)
+
+    @torch.inference_mode()
     def test_engine_broadcast_matches_independent_greedy_samples(self):
         engine = Engine(make_model())
         one, reasons = engine.generate_batch([1, 2, 3], 12, temperature=0)

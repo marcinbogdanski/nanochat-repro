@@ -4,7 +4,7 @@ from nanorepro.gpt import GPTModel
 
 class KVCache:
     """Mini data class to store KV cache related tensors."""
-    def __init__(self, config, batch_size, max_seq_len, compute_dtype, device):
+    def __init__(self, config, batch_size, max_seq_len, compute_dtype, device, static_decode=False):
         head_size = config.n_embd // config.n_head
         # Independent allocations avoid aliasing between layers when compiling updates.
         shape = (batch_size, max_seq_len, config.n_head, head_size)
@@ -12,6 +12,8 @@ class KVCache:
         self.v_cache = [torch.zeros(shape, dtype=compute_dtype, device=device) for _ in range(config.n_layer)]
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.previous_embd = None
+        self.static_decode = static_decode
+        self.positions = torch.arange(max_seq_len, device=device) if static_decode else None
 
     def expand_batch(self, batch_size):
         """Broadcast a single prefill to multiple samples, without copying for batch 1."""

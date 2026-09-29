@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from nanorepro.fp8 import LinearFP8
 from nanorepro.moe import MoE
-from nanorepro.flash_attention import sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
+from nanorepro.flash_attention import sdpa_decode_with_kvcache, sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
 from nanorepro.backward_scheduler import BackwardScheduler, ScheduledBucket
@@ -127,6 +127,10 @@ class CausalSelfAttentionRoPE(nn.Module):
             # SDPA fallback
             if kv_cache is None:
                 y = sdpa_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
+            elif kv_cache.static_decode and T == 1:
+                y = sdpa_decode_with_kvcache(
+                    q_rot, kv_cache.k_cache[self.layer_idx], kv_cache.v_cache[self.layer_idx],
+                    k_rot, v, kv_cache.cache_seqlens, kv_cache.positions, window_size)
             else:
                 y = sdpa_attn_with_kvcache(
                     q=q_rot,
@@ -754,9 +758,14 @@ class GPTModel(nn.Module):
         use_compiled_regions = use_compiled_if_available and self._compiled_layer_regions is not None
 
         # Offset sin/cos
-        offset = 0 if kv_cache is None else kv_cache.cache_seqlens[0].item()  # assume seqlens are equal across the batch
-        cos = self.cos[:, offset:offset+T, :, :]
-        sin = self.sin[:, offset:offset+T, :, :]
+        if kv_cache is not None and kv_cache.static_decode and T == 1:
+            pos = kv_cache.cache_seqlens[:1].long()
+            cos = self.cos.index_select(1, pos)
+            sin = self.sin.index_select(1, pos)
+        else:
+            offset = 0 if kv_cache is None else kv_cache.cache_seqlens[0].item()
+            cos = self.cos[:, offset:offset+T, :, :]
+            sin = self.sin[:, offset:offset+T, :, :]
 
         # Setup
         x = x0 = x_backout = None

@@ -118,3 +118,22 @@ def sdpa_attn_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, causal, win
     # Call SDPA with the cache
     y = sdpa_attn_func(q, k_cache_trim, v_cache_trim, causal=causal, window_size=window_size)
     return y
+
+
+def sdpa_decode_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, positions, window_size):
+    """One-token decode with fixed shapes and no GPU-to-CPU position read.
+
+    Unlike the eager path, attend over the whole allocation. Mask unwritten
+    slots and tokens outside this layer's window. All rows share a position.
+    """
+    assert q.size(1) == 1
+    pos = cache_seqlens[:1].long()
+    k_cache.index_copy_(1, pos, k)
+    v_cache.index_copy_(1, pos, v)
+    mask = positions <= pos
+    if window_size[0] >= 0:
+        mask = mask & (positions >= pos - window_size[0])
+    y = F.scaled_dot_product_attention(
+        q.transpose(1, 2), k_cache.transpose(1, 2), v_cache.transpose(1, 2),
+        attn_mask=mask.view(1, 1, 1, -1))
+    return y.transpose(1, 2)
