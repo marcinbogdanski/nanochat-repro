@@ -22,6 +22,28 @@ def fa3_attn_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, causal, wind
     # q, k, v are [B,T_new,nh,hs] dims, k_cache, v_cache are pre-allocated [B,T_max,nh,hs] dims
     return _fa3.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens, causal=causal, window_size=window_size)
 
+
+@torch.library.custom_op("nanorepro::fa_decode", mutates_args=("k_cache", "v_cache"))
+def _fa_decode(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor,
+               k: torch.Tensor, v: torch.Tensor, cache_seqlens: torch.Tensor,
+               causal: bool, window_left: int, window_right: int) -> torch.Tensor:
+    # FA2's KV-cache entry point has no fake implementation in some builds.
+    # Keep it opaque to the compiler, describing its mutations and output below.
+    # The CUDA kernel and attention calculation are exactly the ordinary FA path.
+    return fa3_attn_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens,
+                               causal, (window_left, window_right))
+
+
+@_fa_decode.register_fake
+def _(q, k_cache, v_cache, k, v, cache_seqlens, causal, window_left, window_right):
+    return torch.empty(q.shape, dtype=q.dtype, device=q.device)
+
+
+def fa3_decode_with_kvcache(q, k_cache, v_cache, k, v, cache_seqlens, causal, window_size):
+    """Compiler-visible inference wrapper; training continues to use FA directly."""
+    return _fa_decode(q, k_cache, v_cache, k, v, cache_seqlens,
+                      causal, window_size[0], window_size[1])
+
 def _sdpa_attn_func(q, k, v, causal, window_size):
     """SDPA wrapper to implement window_size"""
     assert causal

@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from nanorepro.fp8 import LinearFP8
 from nanorepro.moe import MoE
-from nanorepro.flash_attention import sdpa_decode_with_kvcache, sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
+from nanorepro.flash_attention import fa3_decode_with_kvcache, sdpa_decode_with_kvcache, sdpa_attn_func, fa3_attn_func, sdpa_attn_with_kvcache, fa3_attn_with_kvcache
 from nanorepro.adamw import AdamW, DistAdamW
 from nanorepro.muon import Muon, DistMuon
 from nanorepro.backward_scheduler import BackwardScheduler, ScheduledBucket
@@ -113,7 +113,8 @@ class CausalSelfAttentionRoPE(nn.Module):
             if kv_cache is None:
                 y = fa3_attn_func(q_rot, k_rot, v, causal=True, window_size=window_size)
             else:
-                y = fa3_attn_with_kvcache(
+                attn_func = fa3_decode_with_kvcache if kv_cache.static_decode else fa3_attn_with_kvcache
+                y = attn_func(
                     q=q_rot,
                     k_cache=kv_cache.k_cache[self.layer_idx],  # writes in-place
                     v_cache=kv_cache.v_cache[self.layer_idx],  # writes in-place

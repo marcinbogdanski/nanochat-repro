@@ -115,5 +115,31 @@ class GraphTests(unittest.TestCase):
         torch.testing.assert_close(got[2], expected[2], atol=2e-5, rtol=2e-4)
 
 
+@unittest.skipUnless(torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8,
+                     "FA2 needs an Ampere or newer CUDA GPU")
+class FlashDecodeTests(unittest.TestCase):
+    @torch.inference_mode()
+    def test_compiler_wrapper_preserves_attention_and_cache_writes(self):
+        from nanorepro.flash_attention import fa3_attn_with_kvcache, fa3_decode_with_kvcache
+        q, k, v = [torch.randn(1, 1, 1, 128, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+        kc, vc = [torch.randn(1, 16, 1, 128, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
+        expected_k, expected_v = kc.clone(), vc.clone()
+        pos = torch.tensor([7], dtype=torch.int32, device="cuda")
+        expected = fa3_attn_with_kvcache(q, expected_k, expected_v, k, v, pos, True, (3, 0))
+        compiled = torch.compile(fa3_decode_with_kvcache, fullgraph=True,
+                                 options={"triton.cudagraphs": False})
+        got = compiled(q, kc, vc, k, v, pos, True, (3, 0))
+        torch.testing.assert_close(got, expected, atol=0, rtol=0)
+        torch.testing.assert_close(kc, expected_k, atol=0, rtol=0)
+        torch.testing.assert_close(vc, expected_v, atol=0, rtol=0)
+
+    def test_flash_graph_matches_eager(self):
+        model = make_model("cuda", torch.bfloat16, enable_fa=True)
+        expected = Engine(model).generate_batch([1, 2, 3], 8, temperature=0, return_logits=True)
+        got = Engine(model, cuda_graphs=True).generate_batch([1, 2, 3], 8, temperature=0, return_logits=True)
+        self.assertEqual(got[:2], expected[:2])
+        torch.testing.assert_close(got[2], expected[2], atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     unittest.main()
