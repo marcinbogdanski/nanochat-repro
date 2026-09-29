@@ -43,6 +43,7 @@ def test_stream_responses_sse_chunks(tokenizer, convo_renderer, generated_text, 
         temperature=1.0,
         top_k=50,
         max_tokens=len(tokens),
+        seed=42,
     )
 
     # Decode SSE chunks:
