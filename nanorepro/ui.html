@@ -5,26 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Tigger Chat</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
-    <script>
-        // Apply the saved theme before the page renders. avoids a flash of wrong color
-        const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)');  // matchMedia allows checking CSS
-        let themePreference = 'system';   // global variable storing the current theme preference
-        try {
-            const savedTheme = localStorage.getItem('tigger-theme');
-            if (['light', 'system', 'dark'].includes(savedTheme)) {
-                themePreference = savedTheme;
-            }
-        } catch (error) {
-            // Browser storage, disabled? ignore
-        }
-
-        function applyTheme() {
-            const useDarkTheme = themePreference === 'dark' || (themePreference === 'system' && systemPrefersDark.matches);
-            document.documentElement.dataset.theme = useDarkTheme ? 'dark' : 'light';
-        }
-        applyTheme();    // apply the theme immediately
-        systemPrefersDark.addEventListener('change', applyTheme);    // re-apply theme if system preference changes
-    </script>
     <style>
         * { box-sizing: border-box; }    /* include padding and border in element size */
 
@@ -43,33 +23,33 @@
             --hover-background: #e9eef0;
             --hover-border: #a5b4bc;
             --focus-color: #668998;
-            --selected-background: #dce9ef;
             --error-color: #b42318;
             --keyword-color: #8250a4;
             --string-color: #507a46;
             --comment-color: #77808c;
         }
 
-        :root[data-theme="dark"] {      /* override with these values if dark */
-            color-scheme: dark;
-            --page-background: #151719;
-            --chat-background: #1e2023;
-            --text-color: #e6e8eb;
-            --muted-color: #a5afbd;
-            --surface-background: #292d32;
-            --tool-background: #22353c;
-            --border-color: #484e57;
-            --bubble-border: #414750;
-            --bubble-shadow: #0004;
-            --placeholder-color: #959eaa;
-            --hover-background: #353d45;
-            --hover-border: #738393;
-            --focus-color: #8ab9d1;
-            --selected-background: #3a5262;
-            --error-color: #ff9b91;
-            --keyword-color: #c9a0e8;
-            --string-color: #a1c98a;
-            --comment-color: #9aa5b3;
+        @media (prefers-color-scheme: dark) {      /* override with these values if dark */
+            :root {
+                color-scheme: dark;
+                --page-background: #151719;
+                --chat-background: #1e2023;
+                --text-color: #e6e8eb;
+                --muted-color: #a5afbd;
+                --surface-background: #292d32;
+                --tool-background: #22353c;
+                --border-color: #484e57;
+                --bubble-border: #414750;
+                --bubble-shadow: #0004;
+                --placeholder-color: #959eaa;
+                --hover-background: #353d45;
+                --hover-border: #738393;
+                --focus-color: #8ab9d1;
+                --error-color: #ff9b91;
+                --keyword-color: #c9a0e8;
+                --string-color: #a1c98a;
+                --comment-color: #9aa5b3;
+            }
         }
 
         html {
@@ -77,7 +57,6 @@
         }
 
         body {
-            position: relative;    /* stay in normal layout; become the reference point (for the theme selector)*/
             padding: 0 1rem;  /* space inside the left and right edges */
             width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
             max-width: 800px;
@@ -327,44 +306,11 @@
             cursor: default;
         }
 
-        #chat-controls {    /* container for 'new chat' and theme selection buttons */
+        #new-chat-button {    /* container for 'new chat' */
             position: fixed;  /* stay visible while the page scrolls */
             top: 1rem;
             right: max(2rem, calc((100% - 800px) / 2 + 1rem));  /* align with the right side of chat section (which is max 800px wide) */
             z-index: 1;
-            display: flex;      /* arrange theme buttons in a row */
-            flex-direction: column;    /* stack vertically */
-            align-items: flex-end;    /* align to the right side */
-            gap: 0.5rem;    /* space between theme controls and 'New Chat' button */
-        }
-        #theme-selector {    /* container for theme selection buttons */
-            display: flex;      /* arrange theme buttons in a row */
-            gap: 0.15rem;        /* space between theme buttons */
-            padding: 0.15rem;
-            border: 1px solid var(--border-color);
-            border-radius: 0.5rem;
-            background: var(--chat-background);
-        }
-        #theme-selector button {    /* style for individual theme buttons */
-            display: flex;         /* center icon within the button */
-            align-items: center;
-            justify-content: center;
-            width: 1.65rem;
-            height: 1.65rem;
-            padding: 0;
-            border-radius: 0.35rem;
-            border-color: transparent;
-            background: transparent;
-            color: var(--muted-color);
-        }
-        #theme-selector button:hover {
-            background: var(--hover-background);
-        }
-        #theme-selector button[aria-pressed="true"] {    /* style for the selected theme button */
-            background: var(--selected-background);
-            color: var(--text-color);
-        }
-        #new-chat-button {   /* the 'New Chat' button */
             display: flex;
             align-items: center;
             justify-content: center;
@@ -372,15 +318,9 @@
             height: 3rem;
             padding: 0;
         }
-        #theme-selector svg {    /* style for the SVG icons within theme buttons */
-            width: 0.8rem;
-            height: 0.8rem;
-        }
         #new-chat-button svg {    /* style for the SVG icon within the 'New Chat' button */
             width: 1.5rem;
             height: 1.5rem;
-        }
-        #chat-controls svg {    /* style for the SVG icons within theme buttons */
             fill: none;
             stroke: currentColor;    /* use the current text color for the stroke */
             stroke-width: 1.75;
@@ -392,8 +332,7 @@
         
         body.empty-chat {
             justify-content: center;    /* elements on welcome screen are centered */
-            padding-top: 4rem;  /* keep welcome content clear of the theme selector */
-            padding-bottom: 1rem;
+            padding-block: 1rem;
         }
         .empty-chat header {
             align-self: center;    /* centered header */
@@ -429,45 +368,19 @@
         @media (max-width: 600px) {    /* responsive adjustments for small screens */
             body:not(.empty-chat) header {
                 flex-direction: column;
-                padding-top: 6rem;  /* prevent the title from overlapping the theme selector */
             }
         }
 
     </style>
 </head>
 <body class="empty-chat">
-    <div id="chat-controls">
-        <!-- Theme selector -->
-        <div id="theme-selector" role="group" aria-label="Color theme">
-            <button type="button" data-theme="light" title="Light" aria-label="Light" aria-pressed="false">
-                <!-- Light theme icon (sun) -->
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <circle cx="12" cy="12" r="4"/>
-                    <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>
-                </svg>
-            </button>
-            <button type="button" data-theme="system" title="System" aria-label="System" aria-pressed="false">
-                <!-- System theme icon (monitor) -->
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="3" y="4" width="18" height="13" rx="2"/>
-                    <path d="M12 17v4m-4 0h8"/>
-                </svg>
-            </button>
-            <button type="button" data-theme="dark" title="Dark" aria-label="Dark" aria-pressed="false">
-                <!-- Dark theme icon (moon) -->
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>
-                </svg>
-            </button>
-        </div>
-        <!-- New Chat button -->
-        <button id="new-chat-button" type="button" title="New Chat" aria-label="New Chat">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                <path d="m16 3 5 5M10 9l8-8 4 4-8 8-5 1z"/>
-            </svg>
-        </button>
-    </div>
+    <!-- New Chat button -->
+    <button id="new-chat-button" type="button" title="New Chat" aria-label="New Chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="m16 3 5 5M10 9l8-8 4 4-8 8-5 1z"/>
+        </svg>
+    </button>
     <header>
         <div id="chat-brand">
             <div class="brand-heading">
@@ -498,27 +411,6 @@
     </div>
 
     <script>
-        const themeButtons = document.querySelectorAll('#theme-selector button');
-        function updateThemeButtons() {
-            /// Set the active button aria-pressed="true" ///
-            for (const button of themeButtons) {
-                button.setAttribute('aria-pressed', String(button.dataset.theme === themePreference));
-            }
-        }
-        for (const button of themeButtons) {
-            button.addEventListener('click', function() {
-                themePreference = button.dataset.theme;   // global variable storing the current theme preference (light|system|dark)
-                applyTheme();            // apply the selected theme immediately
-                updateThemeButtons();
-                try {
-                    localStorage.setItem('tigger-theme', themePreference);
-                } catch (e) {
-                    // Failed to save theme preference to localStorage, ignore for now
-                }
-            });
-        }
-        updateThemeButtons();  // initialize theme buttons on page load
-
         const messageHistory = document.getElementById('message-history');
         const pageScroll = document.scrollingElement;  // the top-level page that owns the scrolling
         const chatForm = document.getElementById('chat-form');
