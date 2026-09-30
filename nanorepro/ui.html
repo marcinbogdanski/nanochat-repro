@@ -125,10 +125,8 @@
         #chat-brand {
             display: flex;
             flex-direction: column;  /* stack children vertically */
-            align-items: stretch;  /* button fills the header width */
             width: fit-content;   /* only as wide as logo + text */
             flex-shrink: 0;     /* prevent the chat brand from shrinking */
-            gap: 0.25rem;    /* small gap before New Chat button */
         }
 
         #project-link {
@@ -329,11 +327,17 @@
             cursor: default;
         }
 
-        #theme-selector {    /* container for theme selection buttons */
+        #chat-controls {    /* container for 'new chat' and theme selection buttons */
             position: fixed;  /* stay visible while the page scrolls */
             top: 1rem;
             right: max(2rem, calc((100% - 800px) / 2 + 1rem));  /* align with the right side of chat section (which is max 800px wide) */
-            z-index: 1;        /* show in front of other elements */
+            z-index: 1;
+            display: flex;      /* arrange theme buttons in a row */
+            flex-direction: column;    /* stack vertically */
+            align-items: flex-end;    /* align to the right side */
+            gap: 0.5rem;    /* space between theme controls and 'New Chat' button */
+        }
+        #theme-selector {    /* container for theme selection buttons */
             display: flex;      /* arrange theme buttons in a row */
             gap: 0.15rem;        /* space between theme buttons */
             padding: 0.15rem;
@@ -360,9 +364,23 @@
             background: var(--selected-background);
             color: var(--text-color);
         }
+        #new-chat-button {   /* the 'New Chat' button */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 3rem;
+            height: 3rem;
+            padding: 0;
+        }
         #theme-selector svg {    /* style for the SVG icons within theme buttons */
             width: 0.8rem;
             height: 0.8rem;
+        }
+        #new-chat-button svg {    /* style for the SVG icon within the 'New Chat' button */
+            width: 1.5rem;
+            height: 1.5rem;
+        }
+        #chat-controls svg {    /* style for the SVG icons within theme buttons */
             fill: none;
             stroke: currentColor;    /* use the current text color for the stroke */
             stroke-width: 1.75;
@@ -411,33 +429,42 @@
         @media (max-width: 600px) {    /* responsive adjustments for small screens */
             body:not(.empty-chat) header {
                 flex-direction: column;
-                padding-top: 2.5rem;  /* prevent the title from overlapping the theme selector */
+                padding-top: 6rem;  /* prevent the title from overlapping the theme selector */
             }
         }
 
     </style>
 </head>
 <body class="empty-chat">
-    <!-- Theme selector -->
-    <div id="theme-selector" role="group" aria-label="Color theme">
-        <button type="button" data-theme="light" title="Light" aria-label="Light" aria-pressed="false">
-            <!-- Light theme icon (sun) -->
+    <div id="chat-controls">
+        <!-- Theme selector -->
+        <div id="theme-selector" role="group" aria-label="Color theme">
+            <button type="button" data-theme="light" title="Light" aria-label="Light" aria-pressed="false">
+                <!-- Light theme icon (sun) -->
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4"/>
+                    <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>
+                </svg>
+            </button>
+            <button type="button" data-theme="system" title="System" aria-label="System" aria-pressed="false">
+                <!-- System theme icon (monitor) -->
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="13" rx="2"/>
+                    <path d="M12 17v4m-4 0h8"/>
+                </svg>
+            </button>
+            <button type="button" data-theme="dark" title="Dark" aria-label="Dark" aria-pressed="false">
+                <!-- Dark theme icon (moon) -->
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>
+                </svg>
+            </button>
+        </div>
+        <!-- New Chat button -->
+        <button id="new-chat-button" type="button" title="New Chat" aria-label="New Chat">
             <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="4"/>
-                <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>
-            </svg>
-        </button>
-        <button type="button" data-theme="system" title="System" aria-label="System" aria-pressed="false">
-            <!-- System theme icon (monitor) -->
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="4" width="18" height="13" rx="2"/>
-                <path d="M12 17v4m-4 0h8"/>
-            </svg>
-        </button>
-        <button type="button" data-theme="dark" title="Dark" aria-label="Dark" aria-pressed="false">
-            <!-- Dark theme icon (moon) -->
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>
+                <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="m16 3 5 5M10 9l8-8 4 4-8 8-5 1z"/>
             </svg>
         </button>
     </div>
@@ -451,7 +478,6 @@
                     <a id="project-link" href="https://github.com/marcinbogdanski/nanochat-repro" target="_blank" rel="noopener noreferrer">Training code and notes</a>
                 </div>
             </div>
-            <button id="new-chat-button" type="button">New Chat</button>
         </div>
     </header>
 
