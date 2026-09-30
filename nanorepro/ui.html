@@ -81,7 +81,7 @@
             padding: 0 1rem;  /* space inside the left and right edges */
             width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
             max-width: 800px;
-            height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
+            min-height: 100dvh;    /* fill the viewport, but grow as conversation history expands */
             margin: 0 auto;    /* no top/bottom; equal left/right */
             display: flex;
             flex-direction: column;
@@ -153,8 +153,6 @@
 
         #message-history {
             flex: 1;    /* take remaining vertical space */
-            min-height: 0;    /* allow shrink, so input is always visible */
-            overflow-y: auto;    /* enable scroll */
             padding: 1rem 0.5rem;    /* slightly more top/bottom space */
         }
 
@@ -272,6 +270,13 @@
             opacity: 1;
         }
 
+        #chat-composer {
+            position: sticky;
+            bottom: 0;    /* keep the input form always visible at the bottom (this doesn't work well on mobile with keyboard shown) */
+            z-index: 1;
+            background: var(--chat-background);
+        }
+
         #chat-form {
             display: flex;    /* defaults to horizontal row */
             align-items: flex-end;    /* keep the button at the bottom as the input grows */
@@ -325,9 +330,9 @@
         }
 
         #theme-selector {    /* container for theme selection buttons */
-            position: absolute;  /* float within the central chat section without taking up a row */
+            position: fixed;  /* stay visible while the page scrolls */
             top: 1rem;
-            right: 1rem;
+            right: max(2rem, calc((100% - 800px) / 2 + 1rem));  /* align with the right side of chat section (which is max 800px wide) */
             z-index: 1;        /* show in front of other elements */
             display: flex;      /* arrange theme buttons in a row */
             gap: 0.15rem;        /* space between theme buttons */
@@ -369,8 +374,6 @@
         
         body.empty-chat {
             justify-content: center;    /* elements on welcome screen are centered */
-            min-height: 100dvh;       /* ensure the welcome screen takes at least the full viewport height */
-            height: auto;  /* allow scrolling if the welcome content is taller than the screen */
             padding-top: 4rem;  /* keep welcome content clear of the theme selector */
             padding-bottom: 1rem;
         }
@@ -460,11 +463,13 @@
 
     <div id="message-history"></div>
 
-    <form id="chat-form">
-        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
-        <button type="submit">Send</button>
-    </form>
-    <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
+    <div id="chat-composer">
+        <form id="chat-form">
+            <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
+            <button type="submit">Send</button>
+        </form>
+        <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
+    </div>
 
     <script>
         const themeButtons = document.querySelectorAll('#theme-selector button');
@@ -489,6 +494,7 @@
         updateThemeButtons();  // initialize theme buttons on page load
 
         const messageHistory = document.getElementById('message-history');
+        const pageScroll = document.scrollingElement;  // the top-level page that owns the scrolling
         const chatForm = document.getElementById('chat-form');
         const chatInput = document.getElementById('chat-input');
         const sendButton = chatForm.querySelector('button');
@@ -515,7 +521,7 @@
         }
 
         function isNearBottom() {
-            const distance = messageHistory.scrollHeight - messageHistory.clientHeight - messageHistory.scrollTop;  // distance from bottom
+            const distance = pageScroll.scrollHeight - pageScroll.clientHeight - pageScroll.scrollTop;  // distance from bottom
             return distance < 64;   // scroll close to the bottom (~2.7 lines of text)
         }
 
@@ -525,7 +531,7 @@
             const borderHeight = chatInput.offsetHeight - chatInput.clientHeight;
             chatInput.style.height = `${chatInput.scrollHeight + borderHeight}px`;  // set height needed to display text, CSS handles the layout and caps the max
             if (scrollFollowsMessages) {
-                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+                pageScroll.scrollTop = pageScroll.scrollHeight;  // scroll to follow generated messages
             }
         }
 
@@ -550,7 +556,7 @@
             paragraph.textContent = text;
             messageHistory.appendChild(paragraph);
             if (scrollFollowsMessages) {
-                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+                pageScroll.scrollTop = pageScroll.scrollHeight;  // scroll to follow generated messages
             }
             return paragraph;
         }
@@ -733,7 +739,7 @@
                 }
             }
             if (scrollFollowsMessages) {
-                messageHistory.scrollTop = messageHistory.scrollHeight;
+                pageScroll.scrollTop = pageScroll.scrollHeight;
             }
         }
 
@@ -760,6 +766,7 @@
                 messages.length = 0;  // clear the UI
                 messageHistory.replaceChildren();
                 document.body.classList.add('empty-chat');  // switch to welcome screen layout
+                pageScroll.scrollTop = 0;  // scroll to top for new chat
                 chatInput.value = '';
                 resizeInput();     // new chat, resize back to normal
                 maybeFocusFormInput();
