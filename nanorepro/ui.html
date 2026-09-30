@@ -444,13 +444,9 @@
         }
 
         function resizeInput() {
-            const scrollFollowsMessages = isNearBottom();    // if near bottom, scroll along with messages
             chatInput.style.height = 'auto';  // allow shrinking when text is deleted
             const borderHeight = chatInput.offsetHeight - chatInput.clientHeight;
             chatInput.style.height = `${chatInput.scrollHeight + borderHeight}px`;  // set height needed to display text, CSS handles the layout and caps the max
-            if (scrollFollowsMessages) {
-                pageScroll.scrollTop = pageScroll.scrollHeight;  // scroll to follow generated messages
-            }
         }
 
         chatInput.addEventListener('input', resizeInput);  // typing and pasting
@@ -459,7 +455,8 @@
         maybeFocusFormInput();
 
         chatInput.addEventListener('keydown', function(event) {
-            if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+            const isDesktopBrowser = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+            if (isDesktopBrowser && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
                 event.preventDefault();   // prevent newline (textarea default)
                 chatForm.requestSubmit();  // trigger form submission instead
             }
