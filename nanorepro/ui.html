@@ -5,26 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Tigger Chat</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
-    <script>
-        // Apply the saved theme before the page renders. avoids a flash of wrong color
-        const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)');  // matchMedia allows checking CSS
-        let themePreference = 'system';   // global variable storing the current theme preference
-        try {
-            const savedTheme = localStorage.getItem('tigger-theme');
-            if (['light', 'system', 'dark'].includes(savedTheme)) {
-                themePreference = savedTheme;
-            }
-        } catch (error) {
-            // Browser storage, disabled? ignore
-        }
-
-        function applyTheme() {
-            const useDarkTheme = themePreference === 'dark' || (themePreference === 'system' && systemPrefersDark.matches);
-            document.documentElement.dataset.theme = useDarkTheme ? 'dark' : 'light';
-        }
-        applyTheme();    // apply the theme immediately
-        systemPrefersDark.addEventListener('change', applyTheme);    // re-apply theme if system preference changes
-    </script>
     <style>
         * { box-sizing: border-box; }    /* include padding and border in element size */
 
@@ -43,33 +23,33 @@
             --hover-background: #e9eef0;
             --hover-border: #a5b4bc;
             --focus-color: #668998;
-            --selected-background: #dce9ef;
             --error-color: #b42318;
             --keyword-color: #8250a4;
             --string-color: #507a46;
             --comment-color: #77808c;
         }
 
-        :root[data-theme="dark"] {      /* override with these values if dark */
-            color-scheme: dark;
-            --page-background: #151719;
-            --chat-background: #1e2023;
-            --text-color: #e6e8eb;
-            --muted-color: #a5afbd;
-            --surface-background: #292d32;
-            --tool-background: #22353c;
-            --border-color: #484e57;
-            --bubble-border: #414750;
-            --bubble-shadow: #0004;
-            --placeholder-color: #959eaa;
-            --hover-background: #353d45;
-            --hover-border: #738393;
-            --focus-color: #8ab9d1;
-            --selected-background: #3a5262;
-            --error-color: #ff9b91;
-            --keyword-color: #c9a0e8;
-            --string-color: #a1c98a;
-            --comment-color: #9aa5b3;
+        @media (prefers-color-scheme: dark) {      /* override with these values if dark */
+            :root {
+                color-scheme: dark;
+                --page-background: #151719;
+                --chat-background: #1e2023;
+                --text-color: #e6e8eb;
+                --muted-color: #a5afbd;
+                --surface-background: #292d32;
+                --tool-background: #22353c;
+                --border-color: #484e57;
+                --bubble-border: #414750;
+                --bubble-shadow: #0004;
+                --placeholder-color: #959eaa;
+                --hover-background: #353d45;
+                --hover-border: #738393;
+                --focus-color: #8ab9d1;
+                --error-color: #ff9b91;
+                --keyword-color: #c9a0e8;
+                --string-color: #a1c98a;
+                --comment-color: #9aa5b3;
+            }
         }
 
         html {
@@ -77,11 +57,10 @@
         }
 
         body {
-            position: relative;    /* stay in normal layout; become the reference point (for the theme selector)*/
             padding: 0 1rem;  /* space inside the left and right edges */
             width: calc(100% - 2rem);    /* leave 1rem space on each side (1rem = 16px) */
             max-width: 800px;
-            height: 100dvh;    /* dynamic viewport height, adjusts for mobile */
+            min-height: 100dvh;    /* fill the viewport, but grow as conversation history expands */
             margin: 0 auto;    /* no top/bottom; equal left/right */
             display: flex;
             flex-direction: column;
@@ -125,10 +104,8 @@
         #chat-brand {
             display: flex;
             flex-direction: column;  /* stack children vertically */
-            align-items: stretch;  /* button fills the header width */
             width: fit-content;   /* only as wide as logo + text */
             flex-shrink: 0;     /* prevent the chat brand from shrinking */
-            gap: 0.25rem;    /* small gap before New Chat button */
         }
 
         #project-link {
@@ -153,8 +130,6 @@
 
         #message-history {
             flex: 1;    /* take remaining vertical space */
-            min-height: 0;    /* allow shrink, so input is always visible */
-            overflow-y: auto;    /* enable scroll */
             padding: 1rem 0.5rem;    /* slightly more top/bottom space */
         }
 
@@ -237,11 +212,18 @@
         }
 
         #chat-hint {
+            display: none;     /* hide by default (mobile screen), display on desktop */
             color: var(--muted-color);       /* hint below user input */
             opacity: 0.65;
             font-size: 0.85rem;
             margin: 0 0 1rem;
             text-align: center;
+        }
+
+        @media (hover: hover) and (pointer: fine) {   /* hover+fine usually means mouse, i.e. desktop browser */
+            #chat-hint {
+                display: block;   /* show the hint on Desktop, but not on small mobile screen */
+            }
         }
 
         #example-prompts {
@@ -263,6 +245,13 @@
         #example-prompts button:hover,
         #example-prompts button:focus-visible {
             opacity: 1;
+        }
+
+        #chat-composer {
+            position: sticky;
+            bottom: 0;    /* keep the input form always visible at the bottom (this doesn't work well on mobile with keyboard shown) */
+            z-index: 1;
+            background: var(--chat-background);
         }
 
         #chat-form {
@@ -317,40 +306,21 @@
             cursor: default;
         }
 
-        #theme-selector {    /* container for theme selection buttons */
-            position: absolute;  /* float within the central chat section without taking up a row */
+        #new-chat-button {    /* container for 'new chat' */
+            position: fixed;  /* stay visible while the page scrolls */
             top: 1rem;
-            right: 1rem;
-            z-index: 1;        /* show in front of other elements */
-            display: flex;      /* arrange theme buttons in a row */
-            gap: 0.15rem;        /* space between theme buttons */
-            padding: 0.15rem;
-            border: 1px solid var(--border-color);
-            border-radius: 0.5rem;
-            background: var(--chat-background);
-        }
-        #theme-selector button {    /* style for individual theme buttons */
-            display: flex;         /* center icon within the button */
+            right: max(2rem, calc((100% - 800px) / 2 + 1rem));  /* align with the right side of chat section (which is max 800px wide) */
+            z-index: 1;
+            display: flex;
             align-items: center;
             justify-content: center;
-            width: 1.65rem;
-            height: 1.65rem;
+            width: 3rem;
+            height: 3rem;
             padding: 0;
-            border-radius: 0.35rem;
-            border-color: transparent;
-            background: transparent;
-            color: var(--muted-color);
         }
-        #theme-selector button:hover {
-            background: var(--hover-background);
-        }
-        #theme-selector button[aria-pressed="true"] {    /* style for the selected theme button */
-            background: var(--selected-background);
-            color: var(--text-color);
-        }
-        #theme-selector svg {    /* style for the SVG icons within theme buttons */
-            width: 0.8rem;
-            height: 0.8rem;
+        #new-chat-button svg {    /* style for the SVG icon within the 'New Chat' button */
+            width: 1.5rem;
+            height: 1.5rem;
             fill: none;
             stroke: currentColor;    /* use the current text color for the stroke */
             stroke-width: 1.75;
@@ -362,10 +332,7 @@
         
         body.empty-chat {
             justify-content: center;    /* elements on welcome screen are centered */
-            min-height: 100dvh;       /* ensure the welcome screen takes at least the full viewport height */
-            height: auto;  /* allow scrolling if the welcome content is taller than the screen */
-            padding-top: 4rem;  /* keep welcome content clear of the theme selector */
-            padding-bottom: 1rem;
+            padding-block: 1rem;
         }
         .empty-chat header {
             align-self: center;    /* centered header */
@@ -401,36 +368,19 @@
         @media (max-width: 600px) {    /* responsive adjustments for small screens */
             body:not(.empty-chat) header {
                 flex-direction: column;
-                padding-top: 2.5rem;  /* prevent the title from overlapping the theme selector */
             }
         }
 
     </style>
 </head>
 <body class="empty-chat">
-    <!-- Theme selector -->
-    <div id="theme-selector" role="group" aria-label="Color theme">
-        <button type="button" data-theme="light" title="Light" aria-label="Light" aria-pressed="false">
-            <!-- Light theme icon (sun) -->
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="4"/>
-                <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>
-            </svg>
-        </button>
-        <button type="button" data-theme="system" title="System" aria-label="System" aria-pressed="false">
-            <!-- System theme icon (monitor) -->
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="4" width="18" height="13" rx="2"/>
-                <path d="M12 17v4m-4 0h8"/>
-            </svg>
-        </button>
-        <button type="button" data-theme="dark" title="Dark" aria-label="Dark" aria-pressed="false">
-            <!-- Dark theme icon (moon) -->
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>
-            </svg>
-        </button>
-    </div>
+    <!-- New Chat button -->
+    <button id="new-chat-button" type="button" title="New Chat" aria-label="New Chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="m16 3 5 5M10 9l8-8 4 4-8 8-5 1z"/>
+        </svg>
+    </button>
     <header>
         <div id="chat-brand">
             <div class="brand-heading">
@@ -441,47 +391,28 @@
                     <a id="project-link" href="https://github.com/marcinbogdanski/nanochat-repro" target="_blank" rel="noopener noreferrer">Training code and notes</a>
                 </div>
             </div>
-            <button id="new-chat-button" type="button">New Chat</button>
         </div>
     </header>
 
     <div id="example-prompts" role="group" aria-label="Example prompts">
         <button type="button">Tell me about yourself.</button>
-        <button type="button">Write a Python function to add two numbers, with a docstring.</button>
-        <button type="button">How many times does the letter “r” appear in “strawberry”?</button>
+        <button type="button">Write a Python function to add two numbers.</button>
+        <button type="button">How many "r" appear in "strawberry"?</button>
     </div>
 
     <div id="message-history"></div>
 
-    <form id="chat-form">
-        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message" autofocus></textarea>
-        <button type="submit">Send</button>
-    </form>
-    <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
+    <div id="chat-composer">
+        <form id="chat-form">
+            <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
+            <button type="submit">Send</button>
+        </form>
+        <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
+    </div>
 
     <script>
-        const themeButtons = document.querySelectorAll('#theme-selector button');
-        function updateThemeButtons() {
-            /// Set the active button aria-pressed="true" ///
-            for (const button of themeButtons) {
-                button.setAttribute('aria-pressed', String(button.dataset.theme === themePreference));
-            }
-        }
-        for (const button of themeButtons) {
-            button.addEventListener('click', function() {
-                themePreference = button.dataset.theme;   // global variable storing the current theme preference (light|system|dark)
-                applyTheme();            // apply the selected theme immediately
-                updateThemeButtons();
-                try {
-                    localStorage.setItem('tigger-theme', themePreference);
-                } catch (e) {
-                    // Failed to save theme preference to localStorage, ignore for now
-                }
-            });
-        }
-        updateThemeButtons();  // initialize theme buttons on page load
-
         const messageHistory = document.getElementById('message-history');
+        const pageScroll = document.scrollingElement;  // the top-level page that owns the scrolling
         const chatForm = document.getElementById('chat-form');
         const chatInput = document.getElementById('chat-input');
         const sendButton = chatForm.querySelector('button');
@@ -489,6 +420,14 @@
         const messages = [];  // conversation turns, i.e. message history
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
+
+        function maybeFocusFormInput() {
+            /// Auto focus on Desktop devices, but not on touch devices ///
+            // Heuristic to check desktop vs touch devices. Mouse can both hover and is a fine pointer.
+            if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+                chatInput.focus();
+            }
+        }
 
         for (const button of document.querySelectorAll('#example-prompts button')) {
             /// Attach click event to example prompt buttons ///
@@ -500,26 +439,24 @@
         }
 
         function isNearBottom() {
-            const distance = messageHistory.scrollHeight - messageHistory.clientHeight - messageHistory.scrollTop;  // distance from bottom
+            const distance = pageScroll.scrollHeight - pageScroll.clientHeight - pageScroll.scrollTop;  // distance from bottom
             return distance < 64;   // scroll close to the bottom (~2.7 lines of text)
         }
 
         function resizeInput() {
-            const scrollFollowsMessages = isNearBottom();    // if near bottom, scroll along with messages
             chatInput.style.height = 'auto';  // allow shrinking when text is deleted
             const borderHeight = chatInput.offsetHeight - chatInput.clientHeight;
             chatInput.style.height = `${chatInput.scrollHeight + borderHeight}px`;  // set height needed to display text, CSS handles the layout and caps the max
-            if (scrollFollowsMessages) {
-                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
-            }
         }
 
         chatInput.addEventListener('input', resizeInput);  // typing and pasting
         window.addEventListener('resize', resizeInput);  // adjust height if window is resized
         resizeInput();
+        maybeFocusFormInput();
 
         chatInput.addEventListener('keydown', function(event) {
-            if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+            const isDesktopBrowser = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+            if (isDesktopBrowser && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
                 event.preventDefault();   // prevent newline (textarea default)
                 chatForm.requestSubmit();  // trigger form submission instead
             }
@@ -534,7 +471,7 @@
             paragraph.textContent = text;
             messageHistory.appendChild(paragraph);
             if (scrollFollowsMessages) {
-                messageHistory.scrollTop = messageHistory.scrollHeight;  // scroll to follow generated messages
+                pageScroll.scrollTop = pageScroll.scrollHeight;  // scroll to follow generated messages
             }
             return paragraph;
         }
@@ -717,7 +654,7 @@
                 }
             }
             if (scrollFollowsMessages) {
-                messageHistory.scrollTop = messageHistory.scrollHeight;
+                pageScroll.scrollTop = pageScroll.scrollHeight;
             }
         }
 
@@ -744,9 +681,10 @@
                 messages.length = 0;  // clear the UI
                 messageHistory.replaceChildren();
                 document.body.classList.add('empty-chat');  // switch to welcome screen layout
+                pageScroll.scrollTop = 0;  // scroll to top for new chat
                 chatInput.value = '';
                 resizeInput();     // new chat, resize back to normal
-                chatInput.focus();
+                maybeFocusFormInput();
             }
             finally {
                 newChatButton.disabled = false;  // re-enable the New Chat button
@@ -929,7 +867,7 @@
                 sendButton.disabled = false;
                 document.body.classList.toggle('empty-chat', messageHistory.childElementCount === 0);  // if no history, then show welcome screen
                 resizeInput();  // restore size after text restored
-                chatInput.focus();
+                maybeFocusFormInput();
             }
         }
     </script>
