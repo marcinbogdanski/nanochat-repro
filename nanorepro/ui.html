@@ -237,11 +237,18 @@
         }
 
         #chat-hint {
+            display: none;     /* hide by default (mobile screen), display on desktop */
             color: var(--muted-color);       /* hint below user input */
             opacity: 0.65;
             font-size: 0.85rem;
             margin: 0 0 1rem;
             text-align: center;
+        }
+
+        @media (hover: hover) and (pointer: fine) {   /* hover+fine usually means mouse, i.e. desktop browser */
+            #chat-hint {
+                display: block;   /* show the hint on Desktop, but not on small mobile screen */
+            }
         }
 
         #example-prompts {
@@ -447,14 +454,14 @@
 
     <div id="example-prompts" role="group" aria-label="Example prompts">
         <button type="button">Tell me about yourself.</button>
-        <button type="button">Write a Python function to add two numbers, with a docstring.</button>
-        <button type="button">How many times does the letter “r” appear in “strawberry”?</button>
+        <button type="button">Write a Python function to add two numbers.</button>
+        <button type="button">How many "r" appear in "strawberry"?</button>
     </div>
 
     <div id="message-history"></div>
 
     <form id="chat-form">
-        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message" autofocus></textarea>
+        <textarea id="chat-input" rows="1" type="text" required autocomplete="off" placeholder="Write a message..." aria-label="Message"></textarea>
         <button type="submit">Send</button>
     </form>
     <p id="chat-hint">Enter to send | Shift+Enter for a new line</p>
@@ -490,6 +497,14 @@
         let activeAbortController = null;  // active controller, when request is live
         let activeRequest = Promise.resolve();  // so New Chat button can wait for ongoing request to finish
 
+        function maybeFocusFormInput() {
+            /// Auto focus on Desktop devices, but not on touch devices ///
+            // Heuristic to check desktop vs touch devices. Mouse can both hover and is a fine pointer.
+            if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+                chatInput.focus();
+            }
+        }
+
         for (const button of document.querySelectorAll('#example-prompts button')) {
             /// Attach click event to example prompt buttons ///
             button.addEventListener('click', function() {
@@ -517,6 +532,7 @@
         chatInput.addEventListener('input', resizeInput);  // typing and pasting
         window.addEventListener('resize', resizeInput);  // adjust height if window is resized
         resizeInput();
+        maybeFocusFormInput();
 
         chatInput.addEventListener('keydown', function(event) {
             if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -746,7 +762,7 @@
                 document.body.classList.add('empty-chat');  // switch to welcome screen layout
                 chatInput.value = '';
                 resizeInput();     // new chat, resize back to normal
-                chatInput.focus();
+                maybeFocusFormInput();
             }
             finally {
                 newChatButton.disabled = false;  // re-enable the New Chat button
@@ -929,7 +945,7 @@
                 sendButton.disabled = false;
                 document.body.classList.toggle('empty-chat', messageHistory.childElementCount === 0);  // if no history, then show welcome screen
                 resizeInput();  // restore size after text restored
-                chatInput.focus();
+                maybeFocusFormInput();
             }
         }
     </script>
